@@ -1,2 +1,9 @@
 zig-out/
 .zig-cache/
+
+
+# rr debugger
+zen_workaround.py
+
+# Testing
+**/*.mp4

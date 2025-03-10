@@ -37,7 +37,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+
+    exe_mod.linkSystemLibrary("libavcodec", .{});
+    exe_mod.linkSystemLibrary("libavformat", .{});
+    exe_mod.linkSystemLibrary("libswscale", .{});
+    exe_mod.linkSystemLibrary("libavutil", .{});
 
     // Modules can depend on one another using the `std.Build.Module.addImport` function.
     // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
