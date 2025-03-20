@@ -167,7 +167,7 @@ pub fn main() !void {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
 
-    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", 640, 480, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
+    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", codec_ctx.width, codec_ctx.height, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
     defer c.SDL_DestroyWindow(window);
 
     const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
@@ -181,6 +181,24 @@ pub fn main() !void {
     gl.makeProcTableCurrent(&gl_procs);
     defer gl.makeProcTableCurrent(null);
 
+    // -- opengl --
+    var vao_id = opengl_impl.vao();
+    defer gl.DeleteVertexArrays(1, vao_id[0..]);
+
+    var tex: [2]c_uint = .{
+        opengl_impl.vidTex(out_frame, codec_ctx.width, codec_ctx.height),
+        opengl_impl.outTex(codec_ctx.width, codec_ctx.height),
+    };
+    defer gl.DeleteBuffers(2, tex[0..]);
+
+    // var fbo_id = try opengl_impl.frameBuffer(tex[1]);
+    // defer gl.DeleteFramebuffers(1, fbo_id[0..]);
+
+    const prog_id = try opengl_impl.program();
+    defer gl.DeleteProgram(prog_id);
+
+    // -- opengl end --
+
     win_loop: while (true) {
         var event: c.SDL_Event = undefined;
         var timeout: i32 = -1;
@@ -191,13 +209,39 @@ pub fn main() !void {
 
         var w: c_int, var h: c_int = .{ undefined, undefined };
         try errify(c.SDL_GetWindowSizeInPixels(window, &w, &h));
-        gl.Viewport(0, 0, w, h);
 
+        gl.Viewport(0, 0, w, h);
         gl.ClearBufferfv(gl.COLOR, 0, &.{ 1, 1, 1, 1 });
 
-        try errify(c.SDL_GL_SwapWindow(window));
+        {
+            // gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_id[1]);
+            // defer gl.BindFramebuffer(.gl.FRAMEBUFFER, 0);
 
-        break;
+            gl.BindTexture(gl.TEXTURE_2D, tex[0]);
+            defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+            gl.TexSubImage2D(
+                gl.TEXTURE_2D,
+                0,
+                0,
+                0,
+                codec_ctx.width,
+                codec_ctx.height,
+                gl.RGBA,
+                gl.UNSIGNED_INT_8_8_8_8,
+                frame.data[0][0..],
+            );
+
+            gl.BindVertexArray(vao_id[0]);
+            defer gl.BindVertexArray(0);
+
+            gl.UseProgram(prog_id);
+            defer gl.UseProgram(0);
+
+            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 3);
+        }
+
+        try errify(c.SDL_GL_SwapWindow(window));
     }
 }
 
@@ -240,3 +284,116 @@ inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(valu
         else => comptime unreachable,
     };
 }
+
+const opengl_impl = struct {
+    fn vao() [1]c_uint {
+        var vao_id: [1]c_uint = undefined;
+        gl.GenVertexArrays(1, vao_id[0..]);
+
+        return vao_id;
+    }
+
+    fn vidTex(frame: *c.AVFrame, width: c_int, height: c_int) c_uint {
+        var tex_id: [1]c_uint = undefined;
+        gl.GenTextures(1, tex_id[0..]);
+
+        gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+        gl.TexImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            width,
+            height,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_INT_8_8_8_8,
+            frame.data[0][0..],
+        );
+
+        return tex_id[0];
+    }
+
+    fn outTex(width: c_int, height: c_int) c_uint {
+        var tex_id: [1]c_uint = undefined;
+        gl.GenTextures(1, tex_id[0..]);
+
+        gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_INT_8_8_8_8, null);
+
+        return tex_id[0];
+    }
+
+    fn frameBuffer(tex_id: c_uint) ![1]c_uint {
+        var fbo_id: [1]c_uint = undefined;
+        gl.GenFramebuffers(1, fbo_id[0..]);
+
+        gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_id[0]);
+        defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+
+        gl.FramebufferTexture(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, tex_id, 0);
+        gl.DrawBuffers(1, &@as(c_uint, gl.COLOR_ATTACHMENT0));
+
+        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE)
+            return error.FrameBufferObejctInitFailed;
+
+        return fbo_id;
+    }
+
+    fn program() !c_uint {
+        const vert_shader: [1][*]const u8 = .{@embedFile("shader/texture.vert")[0..].ptr};
+        const frag_shader: [1][*]const u8 = .{@embedFile("shader/texture.frag")[0..].ptr};
+
+        const vs = gl.CreateShader(gl.VERTEX_SHADER);
+        defer gl.DeleteShader(vs);
+
+        gl.ShaderSource(vs, 1, vert_shader[0..], null);
+        gl.CompileShader(vs);
+
+        if (!shader.didCompile(vs)) return error.VertexCompileError;
+
+        const fs = gl.CreateShader(gl.FRAGMENT_SHADER);
+        defer gl.DeleteShader(fs);
+
+        gl.ShaderSource(fs, 1, frag_shader[0..], null);
+        gl.CompileShader(fs);
+
+        if (!shader.didCompile(fs)) return error.FragmentCompileError;
+
+        const prog = gl.CreateProgram();
+        gl.AttachShader(prog, vs);
+        gl.AttachShader(prog, fs);
+        gl.LinkProgram(prog);
+
+        return prog;
+    }
+
+    const shader = struct {
+        const log = std.log.scoped(.shader);
+
+        fn didCompile(id: c_uint) bool {
+            var success: c_int = undefined;
+            gl.GetShaderiv(id, gl.COMPILE_STATUS, &success);
+
+            if (success == 0) err(id);
+
+            return success == 1;
+        }
+
+        fn err(id: c_uint) void {
+            var error_msg: [512]u8 = undefined;
+
+            gl.GetShaderInfoLog(id, error_msg.len, null, &error_msg);
+            log.err("{s}", .{std.mem.sliceTo(&error_msg, 0)});
+        }
+    };
+};
