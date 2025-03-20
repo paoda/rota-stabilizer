@@ -10,7 +10,8 @@ const c = @cImport({
     @cInclude("SDL3/SDL_main.h");
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
-    // @cInclude("libswscale/swscale.h");
+    @cInclude("libswscale/swscale.h");
+    @cInclude("libavutil/imgutils.h");
 });
 
 var gl_procs: gl.ProcTable = undefined;
@@ -33,79 +34,126 @@ pub fn main() !void {
     };
     defer c.avformat_close_input(@constCast(@ptrCast(&format_ctx))); // SAFETY: only okay 'cause we're cleaning up
 
-    if (c.avformat_find_stream_info(format_ctx, null) < 0)
-        return error.find_stream_info_failed;
+    if (c.avformat_find_stream_info(format_ctx, null) < 0) return error.find_stream_info_failed;
 
-    var found: ?VideoStream = null;
-
-    for (0..format_ctx.nb_streams) |i| {
-        std.debug.print("AVStream->time_base before open coded {}/{}\n", .{ format_ctx.streams[i].*.time_base.num, format_ctx.streams[i].*.time_base.den });
-        std.debug.print("AVStream->r_frame_rate before open coded {}/{}\n", .{ format_ctx.streams[i].*.r_frame_rate.num, format_ctx.streams[i].*.r_frame_rate.den });
-        std.debug.print("AVStream->start_time {}\n", .{format_ctx.streams[i].*.start_time});
-        std.debug.print("AVStream->duration {}\n", .{format_ctx.streams[i].*.duration});
-
-        const codec_params: *c.AVCodecParameters = format_ctx.streams[i].*.codecpar;
-
-        const codec = blk: {
-            const ptr: ?*const c.AVCodec = c.avcodec_find_decoder(codec_params.codec_id);
-            if (ptr == null) continue; // skip unmatched codecs
-
-            break :blk ptr.?;
-        };
-
-        switch (codec.type) {
-            c.AVMEDIA_TYPE_VIDEO => {
-                std.debug.print("Video Codec: resolution {} x {}\n", .{ codec_params.width, codec_params.height });
-                found = .{ .codec = codec, .params = codec_params, .idx = @intCast(i) };
-            },
-            c.AVMEDIA_TYPE_AUDIO => {
-                std.debug.print("Audio Codec: {} channels, sample rate: {}\n", .{ codec_params.ch_layout.nb_channels, codec_params.sample_rate });
-            },
-            else => {},
+    const found_idx: usize = blk: {
+        var found: ?usize = null;
+        for (0..format_ctx.nb_streams) |i| {
+            if (format_ctx.streams[i].*.codecpar.*.codec_type == c.AVMEDIA_TYPE_VIDEO) {
+                found = i;
+                break;
+            }
         }
 
-        std.debug.print("Codec: {s} ID: {} bit_rate: {}\n", .{ codec.name, codec.id, codec_params.bit_rate });
-        std.debug.print("\n", .{});
-    }
-    std.debug.print("format {s}, duration: {} us, bit_rate: {}\n", .{ format_ctx.iformat.*.name, format_ctx.duration, format_ctx.bit_rate });
+        break :blk found orelse return error.missing_video_stream;
+    };
 
-    if (found == null) return error.no_video_stream_found;
+    const codec = blk: {
+        const ptr: ?*const c.AVCodec = c.avcodec_find_decoder(format_ctx.streams[found_idx].*.codecpar.*.codec_id);
+        if (ptr == null) return error.unsupported_codec;
+
+        break :blk ptr.?;
+    };
 
     const codec_ctx: *c.AVCodecContext = blk: {
-        const ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(found.?.codec);
+        const ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec);
         if (ptr == null) return error.out_of_memory;
 
-        if (c.avcodec_parameters_to_context(ptr, found.?.params) < 0)
-            return error.codec_copy_failed;
-
+        if (c.avcodec_parameters_to_context(ptr, format_ctx.streams[found_idx].*.codecpar) < 0) return error.codec_copy_failed;
         break :blk ptr.?;
     };
     defer c.avcodec_free_context(@constCast(@ptrCast(&codec_ctx))); // SAFETY: only okay 'cause we're cleaning up
 
-    if (c.avcodec_open2(codec_ctx, found.?.codec, null) < 0)
-        return error.codec_open_failed;
+    if (c.avcodec_open2(codec_ctx, codec, null) < 0) return error.codec_open_failed;
 
-    const frame: ?*c.AVFrame = c.av_frame_alloc();
+    const frame: *c.AVFrame = blk: {
+        const ptr: ?*c.AVFrame = c.av_frame_alloc();
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
     defer c.av_frame_free(@constCast(@ptrCast(&frame))); // SAFETY: only okay 'cause we're cleaning up
 
-    const pkt: ?*c.AVPacket = c.av_packet_alloc();
+    const out_frame: *c.AVFrame = blk: {
+        const ptr: ?*c.AVFrame = c.av_frame_alloc();
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
+    defer c.av_frame_free(@constCast(@ptrCast(&out_frame))); // SAFETY: only okay 'cause we're cleaning up
+
+    const pkt: *c.AVPacket = blk: {
+        const ptr: ?*c.AVPacket = c.av_packet_alloc();
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
     defer c.av_packet_free(@constCast(@ptrCast(&pkt))); // SAFETY: only okay 'cause we're cleaning up
 
-    if (frame == null) return error.out_of_memory;
-    if (pkt == null) return error.out_of_memory;
+    const byte_count: usize = @intCast(c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, codec_ctx.width, codec_ctx.height, 32)); // FIXME: why 32?
 
-    var how_many_packets_to_process: i32 = 8;
+    const buffer = blk: {
+        const ptr: [*]u8 = @ptrCast(c.av_malloc(byte_count * @sizeOf(u8)));
+        break :blk ptr[0 .. byte_count / @sizeOf(u8)];
+    };
+
+    _ = c.av_image_fill_arrays(
+        @ptrCast(&out_frame.data),
+        @ptrCast(&out_frame.linesize),
+        buffer.ptr,
+        c.AV_PIX_FMT_RGB24,
+        codec_ctx.width,
+        codec_ctx.height,
+        32,
+    );
+
+    const sws_ctx = blk: {
+        const ptr = c.sws_getContext(
+            codec_ctx.width,
+            codec_ctx.height,
+            codec_ctx.pix_fmt,
+            codec_ctx.width,
+            codec_ctx.height,
+            c.AV_PIX_FMT_RGB24,
+            c.SWS_BILINEAR,
+            null,
+            null,
+            null,
+        );
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
+    defer c.sws_freeContext(sws_ctx);
+
+    var frames_to_decode: i32 = 8;
 
     while (c.av_read_frame(format_ctx, pkt) >= 0) {
-        defer c.av_packet_unref(pkt);
-        if (pkt.?.stream_index != found.?.idx) continue;
+        if (pkt.stream_index != found_idx) continue;
 
-        std.debug.print("AVPacket->pts {}\n", .{pkt.?.pts});
-        decodePacket(pkt.?, codec_ctx, frame.?) catch break;
+        var ret = c.avcodec_send_packet(codec_ctx, pkt);
+        if (ret < 0) return error.packet_decode_send_fail;
 
-        // don't process too many for this dmeo
-        how_many_packets_to_process -= 1;
-        if (how_many_packets_to_process <= 0) break;
+        while (ret >= 0) {
+            ret = c.avcodec_receive_frame(codec_ctx, frame);
+            if (ret == c.AVERROR(c.EAGAIN) or ret == c.AVERROR_EOF) break;
+            if (ret < 0) return error.decode_fail;
+
+            _ = c.sws_scale(
+                sws_ctx,
+                @ptrCast(&frame.data),
+                @ptrCast(&frame.linesize),
+                0,
+                codec_ctx.height,
+                @ptrCast(&out_frame.data),
+                @ptrCast(&out_frame.linesize),
+            );
+
+            try saveFrame(out_frame, @intCast(codec_ctx.width), @intCast(codec_ctx.height), codec_ctx.frame_num);
+        }
+
+        frames_to_decode -= 1;
+        if (frames_to_decode <= 0) break;
     }
 
     // lmao just put SDL stuff after this
@@ -148,60 +196,32 @@ pub fn main() !void {
         gl.ClearBufferfv(gl.COLOR, 0, &.{ 1, 1, 1, 1 });
 
         try errify(c.SDL_GL_SwapWindow(window));
+
+        break;
     }
 }
 
-fn decodePacket(pkt: *c.AVPacket, codec_ctx: *c.AVCodecContext, frame: *c.AVFrame) !void {
-    var response = c.avcodec_send_packet(codec_ctx, pkt);
-    if (response < 0) return error.packet_send_failure;
+fn saveFrame(frame: *c.AVFrame, width: usize, height: usize, frame_idx: i64) !void {
+    const path = blk: {
+        var buf: [0x100]u8 = undefined;
+        break :blk try std.fmt.bufPrint(&buf, "frame-{}.ppm", .{frame_idx});
+    };
 
-    while (response >= 0) {
-        response = c.avcodec_receive_frame(codec_ctx, frame);
-        if (response == c.AVERROR(c.EAGAIN) or response == c.AVERROR_EOF) break;
-        if (response < 0) return error.decoding_failure;
-
-        if (response >= 0) {
-            std.debug.print("Frame: {} (type=?, size={} bytes, format={}) pts {} key_frame {}\n", .{
-                codec_ctx.frame_num,
-                // &[_]u8{c.av_get_picture_type_char(frame.pict_type)},
-                frame.pkt_size,
-                frame.format,
-                frame.pts,
-                frame.key_frame,
-            });
-
-            var buf: [1024]u8 = undefined;
-            const path = try std.fmt.bufPrint(&buf, "{s}-{}.pgm", .{ "frame", codec_ctx.frame_num });
-
-            try saveGrayFrame(frame.data[0], @intCast(frame.linesize[0]), @intCast(frame.width), @intCast(frame.height), path);
-        }
-    }
-}
-
-pub fn saveGrayFrame(buf: [*]const u8, wrap: usize, width: usize, height: usize, path: []const u8) !void {
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
 
-    // Prepare the minimal required header for a PGM file
-    // Format: "P5\n<xsize> <ysize>\n255\n"
     var w = file.writer();
-    try w.print("P5\n{} {}\n255\n", .{ width, height });
+    try w.print("P6\n{} {}\n255\n", .{ width, height });
 
-    // Write image rows: for each row, write xsize bytes from buf starting at offset (i * wrap)
     for (0..height) |i| {
-        const offset = i * wrap;
-        try file.writeAll(buf[offset .. offset + width]);
+        const offset = i * @as(usize, @intCast(frame.linesize[0]));
+
+        try file.writeAll(frame.data[0][offset .. offset + (width * 3)]);
     }
 }
 
-const VideoStream = struct {
-    codec: *const c.AVCodec,
-    params: *const c.struct_AVCodecParameters,
-    idx: c_int,
-};
-
 // https://github.com/castholm/zig-examples/blob/77a829c85b5ddbad673026d504626015db4093ac/opengl-sdl/main.zig#L200-L219
-inline fn errify(value: anytype) error{SdlError}!switch (@typeInfo(@TypeOf(value))) {
+inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(value))) {
     .bool => void,
     .pointer, .optional => @TypeOf(value.?),
     .int => |info| switch (info.signedness) {
@@ -211,11 +231,11 @@ inline fn errify(value: anytype) error{SdlError}!switch (@typeInfo(@TypeOf(value
     else => @compileError("unerrifiable type: " ++ @typeName(@TypeOf(value))),
 } {
     return switch (@typeInfo(@TypeOf(value))) {
-        .bool => if (!value) error.SdlError,
-        .pointer, .optional => value orelse error.SdlError,
+        .bool => if (!value) error.sdl_error,
+        .pointer, .optional => value orelse error.sdl_error,
         .int => |info| switch (info.signedness) {
-            .signed => if (value >= 0) @max(0, value) else error.SdlError,
-            .unsigned => if (value != 0) value else error.SdlError,
+            .signed => if (value >= 0) @max(0, value) else error.sdl_error,
+            .unsigned => if (value != 0) value else error.sdl_error,
         },
         else => comptime unreachable,
     };
