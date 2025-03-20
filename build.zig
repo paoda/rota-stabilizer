@@ -40,6 +40,12 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize, .preferred_link_mode = .dynamic });
+    exe_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+
+    const gl_mod = @import("zigglgen").generateBindingsModule(b, .{ .api = .gl, .version = .@"3.3", .profile = .core });
+    exe_mod.addImport("gl", gl_mod);
+
     exe_mod.linkSystemLibrary("libavcodec", .{});
     exe_mod.linkSystemLibrary("libavformat", .{});
     exe_mod.linkSystemLibrary("libswscale", .{});
