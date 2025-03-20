@@ -5,6 +5,7 @@ const vec2 pos[3] = vec2[3](vec2(-1.0f, -1.0f), vec2(-1.0f, 3.0f), vec2(3.0f, -1
 const vec2 uvs[3] = vec2[3](vec2( 0.0f,  0.0f), vec2( 0.0f, 2.0f), vec2(2.0f,  0.0f));
 
 void main() {
-	uv = uvs[gl_VertexID];
+	// uv = uvs[gl_VertexID];
+	uv = vec2(uvs[gl_VertexID].x, 2.0 - uvs[gl_VertexID].y);
 	gl_Position = vec4(pos[gl_VertexID], 0.0, 1.0);
 }

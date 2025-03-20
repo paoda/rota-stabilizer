@@ -189,7 +189,7 @@ pub fn main() !void {
         opengl_impl.vidTex(out_frame, codec_ctx.width, codec_ctx.height),
         opengl_impl.outTex(codec_ctx.width, codec_ctx.height),
     };
-    defer gl.DeleteBuffers(2, tex[0..]);
+    defer gl.DeleteTextures(2, tex[0..]);
 
     // var fbo_id = try opengl_impl.frameBuffer(tex[1]);
     // defer gl.DeleteFramebuffers(1, fbo_id[0..]);
@@ -227,9 +227,9 @@ pub fn main() !void {
                 0,
                 codec_ctx.width,
                 codec_ctx.height,
-                gl.RGBA,
-                gl.UNSIGNED_INT_8_8_8_8,
-                frame.data[0][0..],
+                gl.RGB,
+                gl.UNSIGNED_BYTE,
+                out_frame.data[0][0..],
             );
 
             gl.BindVertexArray(vao_id[0]);
@@ -310,8 +310,8 @@ const opengl_impl = struct {
             width,
             height,
             0,
-            gl.RGBA,
-            gl.UNSIGNED_INT_8_8_8_8,
+            gl.RGB,
+            gl.UNSIGNED_BYTE,
             frame.data[0][0..],
         );
 
