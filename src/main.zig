@@ -183,26 +183,17 @@ pub fn main() !void {
 
         gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 2 * @sizeOf(f32));
         gl.EnableVertexAttribArray(1);
-
-        // gl.PolygonMode(gl.FRONT_AND_BACK, gl.LINE);
     }
 
-    var tex: [2]c_uint = .{
-        opengl_impl.vidTex(out_frame, codec_ctx.width, codec_ctx.height),
-        opengl_impl.outTex(codec_ctx.width, codec_ctx.height),
-    };
-    defer gl.DeleteTextures(2, tex[0..]);
-
-    // var fbo_id = try opengl_impl.frameBuffer(tex[1]);
-    // defer gl.DeleteFramebuffers(1, fbo_id[0..]);
+    var tex_id = opengl_impl.vidTex(out_frame, codec_ctx.width, codec_ctx.height);
+    defer gl.DeleteTextures(1, tex_id[0..]);
 
     const prog_id = try opengl_impl.program();
     defer gl.DeleteProgram(prog_id);
 
     // -- opengl end --
-    //
 
-    var rotation: f32 = 0;
+    var rotation: f32 = 0; // FIXME: feels a bit "global var" to me
 
     win_loop: while (true) {
         var event: c.SDL_Event = undefined;
@@ -214,9 +205,7 @@ pub fn main() !void {
             }
         }
 
-        // Try to decode one frame.
-        // We first read a packet. In a real-time scenario you might want to
-        // decode until a new frame is available.
+        // TODO: draw one frame, sync with audio
         if (c.av_read_frame(format_ctx, pkt) >= 0) blk: {
             if (pkt.stream_index != found_idx) break :blk;
 
@@ -241,7 +230,7 @@ pub fn main() !void {
                 );
 
                 {
-                    gl.BindTexture(gl.TEXTURE_2D, tex[0]);
+                    gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
                     defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
                     const linesize: usize = @intCast(out_frame.linesize[0]);
@@ -278,9 +267,6 @@ pub fn main() !void {
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
         {
-            // gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_id[1]);
-            // defer gl.BindFramebuffer(.gl.FRAMEBUFFER, 0);
-
             gl.UseProgram(prog_id);
             defer gl.UseProgram(0);
 
@@ -290,34 +276,26 @@ pub fn main() !void {
             gl.ActiveTexture(gl.TEXTURE0);
             defer gl.ActiveTexture(0);
 
-            gl.BindTexture(gl.TEXTURE_2D, tex[0]);
+            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
             defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-            {
+            { // Uniforms
                 const tex_w: f32 = @floatFromInt(codec_ctx.width);
                 const tex_h: f32 = @floatFromInt(codec_ctx.height);
                 const aspect = tex_w / tex_h;
 
-                const scale: struct { f32, f32 } = blk: {
+                const scale: [2]f32 = blk: {
                     if (aspect > 1.0) break :blk .{ 1.0, 1.0 / aspect };
-
                     break :blk .{ aspect, 1.0 };
                 };
 
                 gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_scale"), scale[0], scale[1]);
-            }
 
-            {
-                const rot: struct { f32, f32 } = blk: {
-                    const target: f32 = rotation;
-
-                    break :blk .{ std.math.sin(target * std.math.pi / 180.0), std.math.cos(target * std.math.pi / 180.0) };
-                };
-
+                const rot: [2]f32 = .{ std.math.sin(rotation * std.math.pi / 180.0), std.math.cos(rotation * std.math.pi / 180.0) };
                 gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_rotation"), rot[0], rot[1]);
-            }
 
-            gl.Uniform1i(gl.GetUniformLocation(prog_id, "u_screen"), 0);
+                gl.Uniform1i(gl.GetUniformLocation(prog_id, "u_screen"), 0);
+            }
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
@@ -326,25 +304,50 @@ pub fn main() !void {
     }
 }
 
-// https://github.com/castholm/zig-examples/blob/77a829c85b5ddbad673026d504626015db4093ac/opengl-sdl/main.zig#L200-L219
-inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(value))) {
-    .bool => void,
-    .pointer, .optional => @TypeOf(value.?),
-    .int => |info| switch (info.signedness) {
-        .signed => @TypeOf(@max(0, value)),
-        .unsigned => @TypeOf(value),
-    },
-    else => @compileError("unerrifiable type: " ++ @typeName(@TypeOf(value))),
-} {
-    return switch (@typeInfo(@TypeOf(value))) {
-        .bool => if (!value) error.sdl_error,
-        .pointer, .optional => value orelse error.sdl_error,
-        .int => |info| switch (info.signedness) {
-            .signed => if (value >= 0) @max(0, value) else error.sdl_error,
-            .unsigned => if (value != 0) value else error.sdl_error,
-        },
-        else => comptime unreachable,
-    };
+fn angle(frame: *const c.AVFrame, width: usize, height: usize) f32 {
+    const ofs = 5;
+    const size = 3;
+
+    const btm_left = sample(size, frame, ofs, height - ofs);
+    const top_left = sample(size, frame, ofs, ofs);
+    const btm_right = sample(size, frame, width - ofs, height - ofs);
+    const top_right = sample(size, frame, width - ofs, ofs);
+
+    var out: u16 = 0;
+    out |= @as(u16, @intFromBool(top_left[0] >= 128)) << 11;
+    out |= @as(u16, @intFromBool(top_left[1] >= 128)) << 10;
+    out |= @as(u16, @intFromBool(top_left[2] >= 128)) << 9;
+    out |= @as(u16, @intFromBool(top_right[0] >= 128)) << 8;
+    out |= @as(u16, @intFromBool(top_right[1] >= 128)) << 7;
+    out |= @as(u16, @intFromBool(top_right[2] >= 128)) << 6;
+    out |= @as(u16, @intFromBool(btm_left[0] >= 128)) << 5;
+    out |= @as(u16, @intFromBool(btm_left[1] >= 128)) << 4;
+    out |= @as(u16, @intFromBool(btm_left[2] >= 128)) << 3;
+    out |= @as(u16, @intFromBool(btm_right[0] >= 128)) << 2;
+    out |= @as(u16, @intFromBool(btm_right[1] >= 128)) << 1;
+    out |= @as(u16, @intFromBool(btm_right[2] >= 128)) << 0;
+
+    return 360.0 * @as(f32, @floatFromInt(out)) / 4096.0;
+}
+
+fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]usize {
+    var sum = [_]usize{0} ** 3;
+
+    for (0..size) |dy| {
+        for (0..size) |dx| {
+            const _y = y + dy;
+            const _x = x + dx;
+
+            const row = _y * @as(usize, @intCast(frame.linesize[0]));
+            const px = frame.data[0][row + _x * 3 ..][0..3];
+
+            for (&sum, px) |*a, val| a.* += val;
+        }
+    }
+
+    for (&sum) |*val| val.* /= size * size; // average values
+
+    return sum;
 }
 
 const opengl_impl = struct {
@@ -362,7 +365,7 @@ const opengl_impl = struct {
         return vbo_id;
     }
 
-    fn vidTex(frame: *c.AVFrame, width: c_int, height: c_int) c_uint {
+    fn vidTex(frame: *c.AVFrame, width: c_int, height: c_int) [1]c_uint {
         var tex_id: [1]c_uint = undefined;
         gl.GenTextures(1, tex_id[0..]);
 
@@ -384,38 +387,7 @@ const opengl_impl = struct {
             frame.data[0][0..],
         );
 
-        return tex_id[0];
-    }
-
-    fn outTex(width: c_int, height: c_int) c_uint {
-        var tex_id: [1]c_uint = undefined;
-        gl.GenTextures(1, tex_id[0..]);
-
-        gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-        defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_INT_8_8_8_8, null);
-
-        return tex_id[0];
-    }
-
-    fn frameBuffer(tex_id: c_uint) ![1]c_uint {
-        var fbo_id: [1]c_uint = undefined;
-        gl.GenFramebuffers(1, fbo_id[0..]);
-
-        gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_id[0]);
-        defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
-
-        gl.FramebufferTexture(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, tex_id, 0);
-        gl.DrawBuffers(1, &@as(c_uint, gl.COLOR_ATTACHMENT0));
-
-        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE)
-            return error.FrameBufferObejctInitFailed;
-
-        return fbo_id;
+        return tex_id;
     }
 
     fn program() !c_uint {
@@ -467,48 +439,23 @@ const opengl_impl = struct {
     };
 };
 
-fn angle(frame: *const c.AVFrame, width: usize, height: usize) f32 {
-    const ofs = 5;
-    const size = 3;
-
-    const btm_left = sample(size, frame, ofs, height - ofs);
-    const top_left = sample(size, frame, ofs, ofs);
-    const btm_right = sample(size, frame, width - ofs, height - ofs);
-    const top_right = sample(size, frame, width - ofs, ofs);
-
-    var out: u16 = 0;
-    out |= @as(u16, @intFromBool(top_left[0] >= 128)) << 11;
-    out |= @as(u16, @intFromBool(top_left[1] >= 128)) << 10;
-    out |= @as(u16, @intFromBool(top_left[2] >= 128)) << 9;
-    out |= @as(u16, @intFromBool(top_right[0] >= 128)) << 8;
-    out |= @as(u16, @intFromBool(top_right[1] >= 128)) << 7;
-    out |= @as(u16, @intFromBool(top_right[2] >= 128)) << 6;
-    out |= @as(u16, @intFromBool(btm_left[0] >= 128)) << 5;
-    out |= @as(u16, @intFromBool(btm_left[1] >= 128)) << 4;
-    out |= @as(u16, @intFromBool(btm_left[2] >= 128)) << 3;
-    out |= @as(u16, @intFromBool(btm_right[0] >= 128)) << 2;
-    out |= @as(u16, @intFromBool(btm_right[1] >= 128)) << 1;
-    out |= @as(u16, @intFromBool(btm_right[2] >= 128)) << 0;
-
-    return 360.0 * @as(f32, @floatFromInt(out)) / 4096.0;
-}
-
-fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]usize {
-    var sum = [_]usize{0} ** 3;
-
-    for (0..size) |dy| {
-        for (0..size) |dx| {
-            const _y = y + dy;
-            const _x = x + dx;
-
-            const row = _y * @as(usize, @intCast(frame.linesize[0]));
-            const px = frame.data[0][row + _x * 3 ..][0..3];
-
-            for (&sum, px) |*a, val| a.* += val;
-        }
-    }
-
-    for (&sum) |*val| val.* /= size * size; // average values
-
-    return sum;
+// https://github.com/castholm/zig-examples/blob/77a829c85b5ddbad673026d504626015db4093ac/opengl-sdl/main.zig#L200-L219
+inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(value))) {
+    .bool => void,
+    .pointer, .optional => @TypeOf(value.?),
+    .int => |info| switch (info.signedness) {
+        .signed => @TypeOf(@max(0, value)),
+        .unsigned => @TypeOf(value),
+    },
+    else => @compileError("unerrifiable type: " ++ @typeName(@TypeOf(value))),
+} {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .bool => if (!value) error.sdl_error,
+        .pointer, .optional => value orelse error.sdl_error,
+        .int => |info| switch (info.signedness) {
+            .signed => if (value >= 0) @max(0, value) else error.sdl_error,
+            .unsigned => if (value != 0) value else error.sdl_error,
+        },
+        else => comptime unreachable,
+    };
 }
