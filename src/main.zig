@@ -137,7 +137,7 @@ pub fn main() !void {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
 
-    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", codec_ctx.width >> 1, codec_ctx.height >> 1, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
+    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", 800, 800, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
     defer c.SDL_DestroyWindow(window);
 
     const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
@@ -151,9 +151,41 @@ pub fn main() !void {
     gl.makeProcTableCurrent(&gl_procs);
     defer gl.makeProcTableCurrent(null);
 
+    // zig fmt: off
+    const vertices: [16]f32 = .{
+        // pos      // uv
+        -1.0, -1.0, 0.0, 1.0, // bottom left
+         1.0, -1.0, 1.0, 1.0, // bottom right
+        -1.0,  1.0, 0.0, 0.0, // top left
+         1.0,  1.0, 1.0, 0.0, // top right
+    };
+    // zig fmt: on
+
     // -- opengl --
     var vao_id = opengl_impl.vao();
     defer gl.DeleteVertexArrays(1, vao_id[0..]);
+
+    var vbo_id = opengl_impl.vbo();
+    defer gl.DeleteBuffers(1, vbo_id[0..]);
+
+    {
+        gl.BindVertexArray(vao_id[0]);
+        defer gl.BindVertexArray(0);
+
+        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_id[0]);
+        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+
+        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), vertices[0..].ptr, gl.STATIC_DRAW);
+
+        // TODO: probs don't run this every frame
+        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 0);
+        gl.EnableVertexAttribArray(0);
+
+        gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 2 * @sizeOf(f32));
+        gl.EnableVertexAttribArray(1);
+
+        // gl.PolygonMode(gl.FRONT_AND_BACK, gl.LINE);
+    }
 
     var tex: [2]c_uint = .{
         opengl_impl.vidTex(out_frame, codec_ctx.width, codec_ctx.height),
@@ -231,22 +263,49 @@ pub fn main() !void {
         try errify(c.SDL_GetWindowSizeInPixels(window, &w, &h));
 
         gl.Viewport(0, 0, w, h);
-        gl.ClearBufferfv(gl.COLOR, 0, &.{ 1, 1, 1, 1 });
+
+        gl.ClearColor(1, 1, 1, 1);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
 
         {
             // gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_id[1]);
             // defer gl.BindFramebuffer(.gl.FRAMEBUFFER, 0);
 
-            gl.BindTexture(gl.TEXTURE_2D, tex[0]);
-            defer gl.BindTexture(gl.TEXTURE_2D, 0);
+            gl.UseProgram(prog_id);
+            defer gl.UseProgram(0);
 
             gl.BindVertexArray(vao_id[0]);
             defer gl.BindVertexArray(0);
 
-            gl.UseProgram(prog_id);
-            defer gl.UseProgram(0);
+            gl.ActiveTexture(gl.TEXTURE0);
+            defer gl.ActiveTexture(0);
 
-            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 3);
+            gl.BindTexture(gl.TEXTURE_2D, tex[0]);
+            defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+            {
+                const tex_w: f32 = @floatFromInt(codec_ctx.width);
+                const tex_h: f32 = @floatFromInt(codec_ctx.height);
+                const aspect = tex_w / tex_h;
+
+                const scale: struct { f32, f32 } = blk: {
+                    if (aspect > 1.0) break :blk .{ 1.0, 1.0 / aspect };
+
+                    break :blk .{ aspect, 1.0 };
+                };
+
+                gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_scale"), scale[0], scale[1]);
+            }
+
+            {
+                const rotation: f32 = 0;
+
+                gl.Uniform1f(gl.GetUniformLocation(prog_id, "u_scale"), rotation);
+            }
+
+            gl.Uniform1i(gl.GetUniformLocation(prog_id, "u_screen"), 0);
+
+            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
 
         try errify(c.SDL_GL_SwapWindow(window));
@@ -280,6 +339,13 @@ const opengl_impl = struct {
         gl.GenVertexArrays(1, vao_id[0..]);
 
         return vao_id;
+    }
+
+    fn vbo() [1]c_uint {
+        var vbo_id: [1]c_uint = undefined;
+        gl.GenBuffers(1, vbo_id[0..]);
+
+        return vbo_id;
     }
 
     fn vidTex(frame: *c.AVFrame, width: c_int, height: c_int) c_uint {

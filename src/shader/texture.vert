@@ -1,11 +1,16 @@
 #version 330 core
 out vec2 uv;
 
-const vec2 pos[3] = vec2[3](vec2(-1.0f, -1.0f), vec2(-1.0f, 3.0f), vec2(3.0f, -1.0f));
-const vec2 uvs[3] = vec2[3](vec2( 0.0f,  0.0f), vec2( 0.0f, 2.0f), vec2(2.0f,  0.0f));
+layout(location = 0) in vec2 pos;
+layout(location = 1) in vec2 _uv; 
+
+uniform vec2 u_scale;
+uniform vec2 u_rotation;
+
 
 void main() {
-	// uv = uvs[gl_VertexID];
-	uv = vec2(uvs[gl_VertexID].x, 2.0 - uvs[gl_VertexID].y);
-	gl_Position = vec4(pos[gl_VertexID], 0.0, 1.0);
+	vec2 _pos = pos * u_scale * 0.9;
+
+	gl_Position = vec4(_pos, 0.0, 1.0);
+	uv = _uv;
 }
