@@ -7,10 +7,13 @@ layout(location = 1) in vec2 _uv;
 uniform vec2 u_scale;
 uniform vec2 u_rotation;
 
-
 void main() {
-	vec2 _pos = pos * u_scale * 0.9;
+	vec2 scaled = pos * u_scale * 0.707106781186547; // TODO: this could be better?
+	vec2 rotated = vec2(
+		scaled.x * u_rotation.y + scaled.y * u_rotation.x,
+		scaled.y * u_rotation.y - scaled.x * u_rotation.x
+	);	
 
-	gl_Position = vec4(_pos, 0.0, 1.0);
+	gl_Position = vec4(rotated, 0.0, 1.0);
 	uv = _uv;
 }

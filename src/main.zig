@@ -98,8 +98,8 @@ pub fn main() !void {
     };
 
     _ = c.av_image_fill_arrays(
-        @ptrCast(&out_frame.data),
-        @ptrCast(&out_frame.linesize),
+        out_frame.data[0..],
+        out_frame.linesize[0..],
         buffer.ptr,
         c.AV_PIX_FMT_RGB24,
         codec_ctx.width,
@@ -200,6 +200,9 @@ pub fn main() !void {
     defer gl.DeleteProgram(prog_id);
 
     // -- opengl end --
+    //
+
+    var rotation: f32 = 0;
 
     win_loop: while (true) {
         var event: c.SDL_Event = undefined;
@@ -229,17 +232,22 @@ pub fn main() !void {
                 // Convert the decoded frame to our output format.
                 _ = c.sws_scale(
                     sws_ctx,
-                    @ptrCast(&frame.data),
-                    @ptrCast(&frame.linesize),
+                    frame.data[0..],
+                    frame.linesize[0..],
                     0,
                     codec_ctx.height,
-                    @ptrCast(&out_frame.data),
-                    @ptrCast(&out_frame.linesize),
+                    out_frame.data[0..],
+                    out_frame.linesize[0..],
                 );
 
                 {
                     gl.BindTexture(gl.TEXTURE_2D, tex[0]);
                     defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+                    const linesize: usize = @intCast(out_frame.linesize[0]);
+
+                    // FIXME: we have this becauase codec_ctx. was wrong?????? 3 is for 3 Channels
+                    gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @intCast(linesize / 3));
 
                     gl.TexSubImage2D(
                         gl.TEXTURE_2D,
@@ -252,6 +260,8 @@ pub fn main() !void {
                         gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
                         out_frame.data[0][0..],
                     );
+
+                    rotation = -angle(out_frame, @intCast(codec_ctx.width), @intCast(codec_ctx.height));
                 }
 
                 break; // one frame per iteration
@@ -298,9 +308,13 @@ pub fn main() !void {
             }
 
             {
-                const rotation: f32 = 0;
+                const rot: struct { f32, f32 } = blk: {
+                    const target: f32 = rotation;
 
-                gl.Uniform1f(gl.GetUniformLocation(prog_id, "u_scale"), rotation);
+                    break :blk .{ std.math.sin(target * std.math.pi / 180.0), std.math.cos(target * std.math.pi / 180.0) };
+                };
+
+                gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_rotation"), rot[0], rot[1]);
             }
 
             gl.Uniform1i(gl.GetUniformLocation(prog_id, "u_screen"), 0);
@@ -452,3 +466,49 @@ const opengl_impl = struct {
         }
     };
 };
+
+fn angle(frame: *const c.AVFrame, width: usize, height: usize) f32 {
+    const ofs = 5;
+    const size = 3;
+
+    const btm_left = sample(size, frame, ofs, height - ofs);
+    const top_left = sample(size, frame, ofs, ofs);
+    const btm_right = sample(size, frame, width - ofs, height - ofs);
+    const top_right = sample(size, frame, width - ofs, ofs);
+
+    var out: u16 = 0;
+    out |= @as(u16, @intFromBool(top_left[0] >= 128)) << 11;
+    out |= @as(u16, @intFromBool(top_left[1] >= 128)) << 10;
+    out |= @as(u16, @intFromBool(top_left[2] >= 128)) << 9;
+    out |= @as(u16, @intFromBool(top_right[0] >= 128)) << 8;
+    out |= @as(u16, @intFromBool(top_right[1] >= 128)) << 7;
+    out |= @as(u16, @intFromBool(top_right[2] >= 128)) << 6;
+    out |= @as(u16, @intFromBool(btm_left[0] >= 128)) << 5;
+    out |= @as(u16, @intFromBool(btm_left[1] >= 128)) << 4;
+    out |= @as(u16, @intFromBool(btm_left[2] >= 128)) << 3;
+    out |= @as(u16, @intFromBool(btm_right[0] >= 128)) << 2;
+    out |= @as(u16, @intFromBool(btm_right[1] >= 128)) << 1;
+    out |= @as(u16, @intFromBool(btm_right[2] >= 128)) << 0;
+
+    return 360.0 * @as(f32, @floatFromInt(out)) / 4096.0;
+}
+
+fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]usize {
+    var sum = [_]usize{0} ** 3;
+
+    for (0..size) |dy| {
+        for (0..size) |dx| {
+            const _y = y + dy;
+            const _x = x + dx;
+
+            const row = _y * @as(usize, @intCast(frame.linesize[0]));
+            const px = frame.data[0][row + _x * 3 ..][0..3];
+
+            for (&sum, px) |*a, val| a.* += val;
+        }
+    }
+
+    for (&sum) |*val| val.* /= size * size; // average values
+
+    return sum;
+}
