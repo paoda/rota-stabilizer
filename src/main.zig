@@ -137,7 +137,9 @@ pub fn main() !void {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
 
-    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", 800, 800, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
+    const sz = @max(codec_ctx.width, codec_ctx.height);
+
+    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", sz >> 1, sz >> 1, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
     defer c.SDL_DestroyWindow(window);
 
     const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
@@ -209,6 +211,7 @@ pub fn main() !void {
         if (c.av_read_frame(format_ctx, pkt) >= 0) blk: {
             if (pkt.stream_index != found_idx) break :blk;
 
+            // TODO: seems to return < 0 when decoding h265 vid
             var ret = c.avcodec_send_packet(codec_ctx, pkt);
             if (ret < 0) return error.packet_decode_send_fail;
 
@@ -263,7 +266,7 @@ pub fn main() !void {
 
         gl.Viewport(0, 0, w, h);
 
-        gl.ClearColor(1, 1, 1, 1);
+        gl.ClearColor(0, 0, 0, 0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
         {
@@ -284,12 +287,17 @@ pub fn main() !void {
                 const tex_h: f32 = @floatFromInt(codec_ctx.height);
                 const aspect = tex_w / tex_h;
 
-                const scale: [2]f32 = blk: {
+                const ratio: [2]f32 = blk: {
                     if (aspect > 1.0) break :blk .{ 1.0, 1.0 / aspect };
                     break :blk .{ aspect, 1.0 };
                 };
 
-                gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_scale"), scale[0], scale[1]);
+                // Need to scale so free rotation is possible
+                // 1 / sqrt(w^2 + h^2)
+                const _scale = 1.0 / std.math.sqrt(std.math.pow(f32, ratio[0], 2) + std.math.pow(f32, ratio[1], 2));
+
+                gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_aspect"), ratio[0], ratio[1]);
+                gl.Uniform1f(gl.GetUniformLocation(prog_id, "u_scale"), _scale);
 
                 const rot: [2]f32 = .{ std.math.sin(rotation * std.math.pi / 180.0), std.math.cos(rotation * std.math.pi / 180.0) };
                 gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_rotation"), rot[0], rot[1]);
