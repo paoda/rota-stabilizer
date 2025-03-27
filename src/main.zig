@@ -36,30 +36,22 @@ pub fn main() !void {
 
     if (c.avformat_find_stream_info(format_ctx, null) < 0) return error.find_stream_info_failed;
 
-    const found_idx: usize = blk: {
-        var found: ?usize = null;
-        for (0..format_ctx.nb_streams) |i| {
-            if (format_ctx.streams[i].*.codecpar.*.codec_type == c.AVMEDIA_TYPE_VIDEO) {
-                found = i;
-                break;
-            }
-        }
+    const codec, const vid_stream: usize = blk: {
+        var ptr: ?*const c.AVCodec = null;
 
-        break :blk found orelse return error.missing_video_stream;
-    };
+        const stream = c.av_find_best_stream(format_ctx, c.AVMEDIA_TYPE_VIDEO, -1, -1, &ptr, 0);
 
-    const codec = blk: {
-        const ptr: ?*const c.AVCodec = c.avcodec_find_decoder(format_ctx.streams[found_idx].*.codecpar.*.codec_id);
+        if (stream < 0) return error.missing_video_stream;
         if (ptr == null) return error.unsupported_codec;
 
-        break :blk ptr.?;
+        break :blk .{ ptr.?, @intCast(stream) };
     };
 
     const codec_ctx: *c.AVCodecContext = blk: {
         const ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec);
         if (ptr == null) return error.out_of_memory;
 
-        if (c.avcodec_parameters_to_context(ptr, format_ctx.streams[found_idx].*.codecpar) < 0) return error.codec_copy_failed;
+        if (c.avcodec_parameters_to_context(ptr, format_ctx.streams[vid_stream].*.codecpar) < 0) return error.codec_copy_failed;
         break :blk ptr.?;
     };
     defer c.avcodec_free_context(@constCast(@ptrCast(&codec_ctx))); // SAFETY: only okay 'cause we're cleaning up
@@ -209,7 +201,7 @@ pub fn main() !void {
 
         // TODO: draw one frame, sync with audio
         if (c.av_read_frame(format_ctx, pkt) >= 0) blk: {
-            if (pkt.stream_index != found_idx) break :blk;
+            if (pkt.stream_index != vid_stream) break :blk;
 
             // TODO: seems to return < 0 when decoding h265 vid
             var ret = c.avcodec_send_packet(codec_ctx, pkt);
