@@ -189,6 +189,8 @@ pub fn main() !void {
 
     var rotation: f32 = 0; // FIXME: feels a bit "global var" to me
 
+    var start_time: u64 = 0;
+
     win_loop: while (true) {
         var event: c.SDL_Event = undefined;
 
@@ -281,6 +283,22 @@ pub fn main() !void {
             }
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+
+        {
+            // Video Sync code
+            const time_base: f64 = c.av_q2d(format_ctx.streams[vid_stream].*.time_base);
+            const pt_in_seconds = @as(f64, @floatFromInt(frame.pts)) * time_base;
+
+            if (start_time == 0) start_time = c.SDL_GetPerformanceCounter();
+
+            while (true) {
+                const elapsed_seconds = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - start_time)) / @as(f64, @floatFromInt(c.SDL_GetPerformanceFrequency()));
+                if (@abs(pt_in_seconds - elapsed_seconds) < std.math.floatEps(f64) or pt_in_seconds < elapsed_seconds) break;
+
+                // std.debug.print("PTS: {} | pt_in_seconds: {d:.2} | elapsed_seconds: {d:.2}\n", .{ frame.pts, pt_in_seconds, elapsed_seconds });
+                std.atomic.spinLoopHint();
+            }
         }
 
         try errify(c.SDL_GL_SwapWindow(window));
