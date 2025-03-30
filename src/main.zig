@@ -2,6 +2,8 @@ const std = @import("std");
 const lib = @import("rota_stabilizer_lib");
 const gl = @import("gl");
 
+const FrameQueue = lib.ThreadSafeRingBuffer(*c.AVFrame);
+
 const c = @cImport({
     @cDefine("SDL_DISABLE_OLD_NAMES", {});
     @cDefine("SDL_MAIN_HANDLED", {});
@@ -17,7 +19,8 @@ const c = @cImport({
 var gl_procs: gl.ProcTable = undefined;
 
 pub fn main() !void {
-    errdefer |err| if (err == error.sdl_error) std.log.err("SDL Error: {s}", .{c.SDL_GetError()});
+    const log = std.log.scoped(.ui);
+    errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
     var args = std.process.args();
     _ = args.skip(); // self
@@ -58,66 +61,6 @@ pub fn main() !void {
 
     if (c.avcodec_open2(codec_ctx, codec, null) < 0) return error.codec_open_failed;
 
-    const frame: *c.AVFrame = blk: {
-        const ptr: ?*c.AVFrame = c.av_frame_alloc();
-        if (ptr == null) return error.out_of_memory;
-
-        break :blk ptr.?;
-    };
-    defer c.av_frame_free(@constCast(@ptrCast(&frame))); // SAFETY: only okay 'cause we're cleaning up
-
-    const out_frame: *c.AVFrame = blk: {
-        const ptr: ?*c.AVFrame = c.av_frame_alloc();
-        if (ptr == null) return error.out_of_memory;
-
-        break :blk ptr.?;
-    };
-    defer c.av_frame_free(@constCast(@ptrCast(&out_frame))); // SAFETY: only okay 'cause we're cleaning up
-
-    const pkt: *c.AVPacket = blk: {
-        const ptr: ?*c.AVPacket = c.av_packet_alloc();
-        if (ptr == null) return error.out_of_memory;
-
-        break :blk ptr.?;
-    };
-    defer c.av_packet_free(@constCast(@ptrCast(&pkt))); // SAFETY: only okay 'cause we're cleaning up
-
-    const byte_count: usize = @intCast(c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, codec_ctx.width, codec_ctx.height, 32)); // FIXME: why 32?
-
-    const buffer = blk: {
-        const ptr: [*]u8 = @ptrCast(c.av_malloc(byte_count * @sizeOf(u8)));
-        break :blk ptr[0 .. byte_count / @sizeOf(u8)];
-    };
-
-    _ = c.av_image_fill_arrays(
-        out_frame.data[0..],
-        out_frame.linesize[0..],
-        buffer.ptr,
-        c.AV_PIX_FMT_RGB24,
-        codec_ctx.width,
-        codec_ctx.height,
-        32,
-    );
-
-    const sws_ctx = blk: {
-        const ptr = c.sws_getContext(
-            codec_ctx.width,
-            codec_ctx.height,
-            codec_ctx.pix_fmt,
-            codec_ctx.width,
-            codec_ctx.height,
-            c.AV_PIX_FMT_RGB24,
-            c.SWS_BILINEAR,
-            null,
-            null,
-            null,
-        );
-        if (ptr == null) return error.out_of_memory;
-
-        break :blk ptr.?;
-    };
-    defer c.sws_freeContext(sws_ctx);
-
     // lmao just put SDL stuff after this
     c.SDL_SetMainReady();
 
@@ -145,6 +88,8 @@ pub fn main() !void {
     gl.makeProcTableCurrent(&gl_procs);
     defer gl.makeProcTableCurrent(null);
 
+    _ = c.SDL_GL_SetSwapInterval(0);
+
     // zig fmt: off
     const vertices: [16]f32 = .{
         // pos      // uv
@@ -171,7 +116,6 @@ pub fn main() !void {
 
         gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), vertices[0..].ptr, gl.STATIC_DRAW);
 
-        // TODO: probs don't run this every frame
         gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 0);
         gl.EnableVertexAttribArray(0);
 
@@ -179,63 +123,33 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(1);
     }
 
-    var tex_id = opengl_impl.vidTex(out_frame, codec_ctx.width, codec_ctx.height);
+    var tex_id = opengl_impl.vidTex(codec_ctx.width, codec_ctx.height);
     defer gl.DeleteTextures(1, tex_id[0..]);
 
     const prog_id = try opengl_impl.program();
     defer gl.DeleteProgram(prog_id);
 
     // -- opengl end --
+    const ptr_buf = try std.heap.c_allocator.alloc(*c.AVFrame, 0x40);
+    defer std.heap.c_allocator.free(ptr_buf);
 
-    var rotation: f32 = 0; // FIXME: feels a bit "global var" to me
+    var queue = FrameQueue.init(ptr_buf);
+    var should_quit: std.atomic.Value(bool) = .init(false);
 
-    var start_time: u64 = 0;
+    const decode_thread = try std.Thread.spawn(.{}, decode, .{ format_ctx, codec_ctx, vid_stream, &queue, &should_quit });
+    defer decode_thread.join();
 
-    win_loop: while (true) {
+    var start_time: ?u64 = 0; // set to null to disable vsync
+    var current_frame: ?*c.AVFrame = null;
+    defer if (current_frame) |_| c.av_frame_free(&current_frame);
+
+    while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
 
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
-                c.SDL_EVENT_QUIT => break :win_loop,
+                c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
                 else => {},
-            }
-        }
-
-        {
-            getFrame(format_ctx, codec_ctx, vid_stream, pkt, frame);
-
-            // Convert the decoded frame to our output format.
-            _ = c.sws_scale(
-                sws_ctx,
-                frame.data[0..],
-                frame.linesize[0..],
-                0,
-                codec_ctx.height,
-                out_frame.data[0..],
-                out_frame.linesize[0..],
-            );
-            out_frame.width, out_frame.height = .{ frame.width, frame.height }; // TODO: is this fine?
-
-            {
-                gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-                defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-                // FIXME: we have this becauase codec_ctx. was wrong?????? 3 is for 3 Channels
-                gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(out_frame.linesize[0], 3));
-
-                gl.TexSubImage2D(
-                    gl.TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    out_frame.width,
-                    out_frame.height,
-                    gl.RGB, // match the format of out_frame data
-                    gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
-                    out_frame.data[0][0..],
-                );
-
-                rotation = -angle(out_frame, @intCast(out_frame.width), @intCast(out_frame.height));
             }
         }
 
@@ -248,74 +162,176 @@ pub fn main() !void {
         gl.ClearColor(1, 1, 1, 1);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
-        {
-            gl.UseProgram(prog_id);
-            defer gl.UseProgram(0);
+        // blocking: while (true) {
+        //     const frame = queue.pop() orelse continue :blocking;
 
-            gl.BindVertexArray(vao_id[0]);
-            defer gl.BindVertexArray(0);
+        //     if (current_frame) |_| c.av_frame_free(&current_frame);
+        //     current_frame = frame;
+        //     break :blocking;
+        // }
 
-            gl.ActiveTexture(gl.TEXTURE0);
-            defer gl.ActiveTexture(0);
-
-            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-            defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-            { // Uniforms
-                const aspect = @as(f32, @floatFromInt(out_frame.width)) / @as(f32, @floatFromInt(out_frame.height));
-
-                const ratio: [2]f32 = blk: {
-                    if (aspect > 1.0) break :blk .{ 1.0, 1.0 / aspect };
-                    break :blk .{ aspect, 1.0 };
-                };
-
-                // Need to scale so free rotation is possible
-                // 1 / sqrt(w^2 + h^2)
-                const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]);
-
-                gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_aspect"), ratio[0], ratio[1]);
-                gl.Uniform1f(gl.GetUniformLocation(prog_id, "u_scale"), scale);
-
-                const rot: [2]f32 = .{ std.math.sin(rotation * std.math.pi / 180.0), std.math.cos(rotation * std.math.pi / 180.0) };
-                gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_rotation"), rot[0], rot[1]);
-
-                gl.Uniform1i(gl.GetUniformLocation(prog_id, "u_screen"), 0);
-            }
-
-            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        if (queue.pop()) |frame| {
+            if (current_frame) |_| c.av_frame_free(&current_frame);
+            current_frame = frame;
         }
 
-        {
-            // Video Sync code
+        const frame = current_frame orelse {
+            log.debug("queue empty, repeated frame", .{});
+
+            try errify(c.SDL_GL_SwapWindow(window));
+            continue;
+        };
+
+        video_sync: {
             const time_base: f64 = c.av_q2d(format_ctx.streams[vid_stream].*.time_base);
             const pt_in_seconds = @as(f64, @floatFromInt(frame.pts)) * time_base;
 
+            if (start_time == null) break :video_sync;
             if (start_time == 0) start_time = c.SDL_GetPerformanceCounter();
 
             while (true) {
-                const elapsed_seconds = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - start_time)) / @as(f64, @floatFromInt(c.SDL_GetPerformanceFrequency()));
+                const elapsed_seconds = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - start_time.?)) / @as(f64, @floatFromInt(c.SDL_GetPerformanceFrequency()));
                 if (@abs(pt_in_seconds - elapsed_seconds) < std.math.floatEps(f64) or pt_in_seconds < elapsed_seconds) break;
 
-                // std.debug.print("PTS: {} | pt_in_seconds: {d:.2} | elapsed_seconds: {d:.2}\n", .{ frame.pts, pt_in_seconds, elapsed_seconds });
-                std.atomic.spinLoopHint();
+                std.atomic.spinLoopHint(); // TODO: less resource intensive
             }
         }
+
+        gl.UseProgram(prog_id);
+        defer gl.UseProgram(0);
+
+        gl.BindVertexArray(vao_id[0]);
+        defer gl.BindVertexArray(0);
+
+        gl.ActiveTexture(gl.TEXTURE0);
+        defer gl.ActiveTexture(0);
+
+        gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
+
+        gl.TexSubImage2D(
+            gl.TEXTURE_2D,
+            0,
+            0,
+            0,
+            frame.width,
+            frame.height,
+            gl.RGB, // match the format of frame data
+            gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
+            frame.data[0][0..],
+        );
+
+        { // calcualte uniforms
+            const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+            const aspect = @as(f32, @floatFromInt(frame.width)) / @as(f32, @floatFromInt(frame.height));
+            const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
+            const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]); // factor allows for ration w/out clipping
+
+            gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_aspect"), ratio[0], ratio[1]);
+            gl.Uniform1f(gl.GetUniformLocation(prog_id, "u_scale"), scale);
+            gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_rotation"), @sin(rad), @cos(rad));
+            gl.Uniform1i(gl.GetUniformLocation(prog_id, "u_screen"), 0);
+        }
+
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         try errify(c.SDL_GL_SwapWindow(window));
     }
 }
 
-fn getFrame(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream: usize, pkt: *c.AVPacket, frame: *c.AVFrame) void {
+fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream: usize, queue: *FrameQueue, should_quit: *std.atomic.Value(bool)) !void {
+    const log = std.log.scoped(.decode);
+    log.info("decode thread start", .{});
+
+    const pkt: *c.AVPacket = blk: {
+        const ptr: ?*c.AVPacket = c.av_packet_alloc();
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
+    defer c.av_packet_free(@constCast(@ptrCast(&pkt))); // SAFETY: only okay 'cause we're cleaning up
+
+    const src_frame: *c.AVFrame = blk: {
+        const ptr: ?*c.AVFrame = c.av_frame_alloc();
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
+    defer c.av_frame_free(@constCast(@ptrCast(&src_frame))); // SAFETY: only okay 'cause we're cleaning up
+
+    const dst_frame: *c.AVFrame = blk: {
+        const ptr: ?*c.AVFrame = c.av_frame_alloc();
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
+    defer c.av_frame_free(@constCast(@ptrCast(&dst_frame))); // SAFETY: only okay 'cause we're cleaning up
+
+    const sws_ctx = blk: {
+        const ptr = c.sws_getContext(
+            codec_ctx.width,
+            codec_ctx.height,
+            codec_ctx.pix_fmt,
+            codec_ctx.width,
+            codec_ctx.height,
+            c.AV_PIX_FMT_RGB24,
+            c.SWS_BILINEAR,
+            null,
+            null,
+            null,
+        );
+        if (ptr == null) return error.out_of_memory;
+
+        break :blk ptr.?;
+    };
+    defer c.sws_freeContext(sws_ctx);
+
     while (c.av_read_frame(fmt_ctx, pkt) >= 0) {
         defer c.av_packet_unref(pkt);
+        defer c.av_frame_unref(dst_frame);
+
+        if (should_quit.load(.monotonic)) return;
         if (pkt.stream_index != vid_stream) continue;
 
-        // TODO: handle errors here
-        if (c.avcodec_send_packet(codec_ctx, pkt) != 0) continue;
-        if (c.avcodec_receive_frame(codec_ctx, frame) != 0) continue;
+        const send_ret = c.avcodec_send_packet(codec_ctx, pkt);
+        if (send_ret == c.AVERROR_EOF) return;
+        if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
+        if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
 
-        // We have received one (1) frame
-        return;
+        const recv_ret = c.avcodec_receive_frame(codec_ctx, src_frame);
+        if (recv_ret == c.AVERROR_EOF) return;
+        if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
+        if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_receive_frame");
+
+        dst_frame.width = codec_ctx.width;
+        dst_frame.height = codec_ctx.height;
+        dst_frame.format = c.AV_PIX_FMT_RGB24;
+        dst_frame.pts = src_frame.pts; // for timing
+        if (c.av_frame_get_buffer(dst_frame, 32) < 0) @panic("TODO: buffer alloc failed or something?");
+
+        _ = c.sws_scale(
+            sws_ctx,
+            src_frame.data[0..],
+            src_frame.linesize[0..],
+            0,
+            src_frame.height, // TODO: this should be src_frame
+            dst_frame.data[0..],
+            dst_frame.linesize[0..],
+        );
+
+        const frame_copy = blk: {
+            const ptr: ?*c.AVFrame = c.av_frame_clone(dst_frame);
+            if (ptr == null) @panic("TODO: clone failed");
+
+            break :blk ptr.?;
+        };
+
+        blocking: while (true) {
+            queue.push(frame_copy) catch continue :blocking;
+            break :blocking;
+        }
     }
 }
 
@@ -380,7 +396,7 @@ const opengl_impl = struct {
         return vbo_id;
     }
 
-    fn vidTex(frame: *c.AVFrame, width: c_int, height: c_int) [1]c_uint {
+    fn vidTex(width: c_int, height: c_int) [1]c_uint {
         var tex_id: [1]c_uint = undefined;
         gl.GenTextures(1, tex_id[0..]);
 
@@ -399,7 +415,7 @@ const opengl_impl = struct {
             0,
             gl.RGB,
             gl.UNSIGNED_BYTE,
-            frame.data[0][0..],
+            null,
         );
 
         return tex_id;
