@@ -264,6 +264,11 @@ fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream:
     };
     defer c.av_frame_free(@constCast(@ptrCast(&dst_frame))); // SAFETY: only okay 'cause we're cleaning up
 
+    dst_frame.width = codec_ctx.width;
+    dst_frame.height = codec_ctx.height;
+    dst_frame.format = c.AV_PIX_FMT_RGB24;
+    if (c.av_frame_get_buffer(dst_frame, 32) < 0) @panic("TODO: buffer alloc failed or something?");
+
     const sws_ctx = blk: {
         const ptr = c.sws_getContext(
             codec_ctx.width,
@@ -285,7 +290,6 @@ fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream:
 
     while (c.av_read_frame(fmt_ctx, pkt) >= 0) {
         defer c.av_packet_unref(pkt);
-        defer c.av_frame_unref(dst_frame);
 
         if (should_quit.load(.monotonic)) return;
         if (pkt.stream_index != vid_stream) continue;
@@ -300,12 +304,7 @@ fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream:
         if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
         if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_receive_frame");
 
-        dst_frame.width = src_frame.width;
-        dst_frame.height = src_frame.height;
-        dst_frame.format = c.AV_PIX_FMT_RGB24;
         dst_frame.pts = src_frame.pts; // for timing
-
-        if (c.av_frame_get_buffer(dst_frame, 32) < 0) @panic("TODO: buffer alloc failed or something?");
 
         _ = c.sws_scale(
             sws_ctx,
@@ -548,7 +547,7 @@ const ThreadSafeFrameQueueRingBuffer = struct {
         return self.buf[self.mask(self.read_idx)];
     }
 
-    inline fn len(self: *@This()) usize {
+    inline fn len(self: @This()) usize {
         return self.write_idx - self.read_idx;
     }
 
