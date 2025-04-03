@@ -1,26 +1,19 @@
 const std = @import("std");
-const lib = @import("rota_stabilizer_lib");
 const gl = @import("gl");
 
-const FrameQueue = ThreadSafeFrameQueueRingBuffer;
+const c = @import("librota").c;
 
-const c = @cImport({
-    @cDefine("SDL_DISABLE_OLD_NAMES", {});
-    @cDefine("SDL_MAIN_HANDLED", {});
-
-    @cInclude("SDL3/SDL.h");
-    @cInclude("SDL3/SDL_main.h");
-    @cInclude("libavcodec/avcodec.h");
-    @cInclude("libavformat/avformat.h");
-    @cInclude("libswscale/swscale.h");
-    @cInclude("libavutil/imgutils.h");
-});
+const libavError = @import("librota").libavError;
+const FrameQueue = @import("librota").FrameQueue;
 
 var gl_procs: gl.ProcTable = undefined;
+
+pub const FfmpegError = error{ffmpeg_error};
 
 pub fn main() !void {
     const log = std.log.scoped(.ui);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
+    // TODO: somehow recover information from ffmpeg errors
 
     var args = std.process.args();
     _ = args.skip(); // self
@@ -37,7 +30,7 @@ pub fn main() !void {
     };
     defer c.avformat_close_input(@constCast(@ptrCast(&format_ctx))); // SAFETY: only okay 'cause we're cleaning up
 
-    if (c.avformat_find_stream_info(format_ctx, null) < 0) return error.find_stream_info_failed;
+    _ = try libavError(c.avformat_find_stream_info(format_ctx, null));
 
     const codec, const vid_stream: usize = blk: {
         var ptr: ?*const c.AVCodec = null;
@@ -138,7 +131,7 @@ pub fn main() !void {
     const decode_thread = try std.Thread.spawn(.{}, decode, .{ format_ctx, codec_ctx, vid_stream, &queue, &should_quit });
     defer decode_thread.join();
 
-    var start_time: ?u64 = 0; // set to null to disable vsync
+    var start_time: ?u64 = null; // set to null to disable vsync
     var current_frame: ?*c.AVFrame = null;
 
     while (!should_quit.load(.monotonic)) {
@@ -157,18 +150,15 @@ pub fn main() !void {
 
         gl.Viewport(0, 0, w, h);
 
-        gl.ClearColor(1, 1, 1, 1);
+        // gl.ClearColor(1, 1, 1, 1);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
-        // blocking: while (true) {
-        //     const frame = queue.pop() orelse continue :blocking;
+        blocking: while (true) {
+            current_frame = queue.pop() orelse continue :blocking;
+            break :blocking;
+        }
 
-        //     if (current_frame) |_| c.av_frame_free(&current_frame);
-        //     current_frame = frame;
-        //     break :blocking;
-        // }
-
-        if (queue.pop()) |frame| current_frame = frame;
+        // if (queue.pop()) |frame| current_frame = frame;
 
         const frame = current_frame orelse {
             log.debug("queue empty, repeated frame", .{});
@@ -482,80 +472,3 @@ inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(valu
         else => comptime unreachable,
     };
 }
-
-const ThreadSafeFrameQueueRingBuffer = struct {
-    buf: []c.AVFrame,
-    read_idx: usize,
-    write_idx: usize,
-
-    mutex: std.Thread.Mutex = .{}, // TODO: switch to atomics
-
-    pub fn init(allocator: std.mem.Allocator, count: usize) !ThreadSafeFrameQueueRingBuffer {
-        if (!std.math.isPowerOfTwo(count)) return error.invalid_queue_size;
-
-        const buf = try allocator.alloc(c.AVFrame, count);
-        @memset(buf, std.mem.zeroes(c.AVFrame));
-
-        for (buf) |*frame| c.av_frame_unref(frame);
-
-        return .{ .buf = buf, .read_idx = 0, .write_idx = 0 };
-    }
-
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-        allocator.free(self.buf);
-    }
-
-    pub fn push(self: *@This(), to_be_copied: *const c.AVFrame) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.isFull()) return error.out_of_memory;
-        defer self.write_idx += 1;
-
-        const ptr = &self.buf[self.mask(self.write_idx)];
-
-        const valid_buffer =
-            to_be_copied.width == ptr.width and
-            to_be_copied.height == ptr.height and
-            to_be_copied.format == ptr.format;
-
-        if (!valid_buffer) {
-            c.av_frame_unref(ptr);
-
-            ptr.width = to_be_copied.width;
-            ptr.height = to_be_copied.height;
-            ptr.format = to_be_copied.format;
-
-            if (c.av_frame_get_buffer(ptr, 32) < 0) return error.av_error;
-        }
-
-        if (c.av_frame_copy(ptr, to_be_copied) < 0) return error.av_error;
-        if (c.av_frame_copy_props(ptr, to_be_copied) < 0) return error.av_error;
-    }
-
-    pub fn pop(self: *@This()) ?*c.AVFrame {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.isEmpty()) return null;
-        defer self.read_idx += 1;
-
-        return &self.buf[self.mask(self.read_idx)];
-    }
-
-    inline fn len(self: @This()) usize {
-        return self.write_idx - self.read_idx;
-    }
-
-    inline fn mask(self: @This(), idx: usize) usize {
-        return idx & (self.buf.len - 1);
-    }
-
-    inline fn isEmpty(self: @This()) bool {
-        return self.read_idx == self.write_idx;
-    }
-
-    inline fn isFull(self: @This()) bool {
-        return self.len() == self.buf.len;
-    }
-};
