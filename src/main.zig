@@ -484,28 +484,24 @@ inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(valu
 }
 
 const ThreadSafeFrameQueueRingBuffer = struct {
-    buf: []?*c.AVFrame,
+    buf: []c.AVFrame,
     read_idx: usize,
     write_idx: usize,
 
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Thread.Mutex = .{}, // TODO: switch to atomics
 
     pub fn init(allocator: std.mem.Allocator, count: usize) !ThreadSafeFrameQueueRingBuffer {
-        std.debug.assert(std.math.isPowerOfTwo(count));
-        const buf = try allocator.alloc(?*c.AVFrame, count);
+        if (!std.math.isPowerOfTwo(count)) return error.invalid_queue_size;
 
-        for (0..buf.len) |i| {
-            const frame_ptr: ?*c.AVFrame = c.av_frame_alloc();
-            if (frame_ptr == null) return error.out_of_memory;
+        const buf = try allocator.alloc(c.AVFrame, count);
+        @memset(buf, std.mem.zeroes(c.AVFrame));
 
-            buf[i] = frame_ptr.?;
-        }
+        for (buf) |*frame| c.av_frame_unref(frame);
 
         return .{ .buf = buf, .read_idx = 0, .write_idx = 0 };
     }
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-        for (0..self.buf.len) |i| c.av_frame_free(&self.buf[i]);
         allocator.free(self.buf);
     }
 
@@ -516,7 +512,7 @@ const ThreadSafeFrameQueueRingBuffer = struct {
         if (self.isFull()) return error.out_of_memory;
         defer self.write_idx += 1;
 
-        const ptr = self.buf[self.mask(self.write_idx)] orelse return error.corrupt_queue;
+        const ptr = &self.buf[self.mask(self.write_idx)];
 
         const valid_buffer =
             to_be_copied.width == ptr.width and
@@ -544,7 +540,7 @@ const ThreadSafeFrameQueueRingBuffer = struct {
         if (self.isEmpty()) return null;
         defer self.read_idx += 1;
 
-        return self.buf[self.mask(self.read_idx)];
+        return &self.buf[self.mask(self.read_idx)];
     }
 
     inline fn len(self: @This()) usize {
