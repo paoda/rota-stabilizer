@@ -2,7 +2,7 @@ const std = @import("std");
 const lib = @import("rota_stabilizer_lib");
 const gl = @import("gl");
 
-const FrameQueue = lib.ThreadSafeRingBuffer(*c.AVFrame);
+const FrameQueue = ThreadSafeFrameQueueRingBuffer;
 
 const c = @cImport({
     @cDefine("SDL_DISABLE_OLD_NAMES", {});
@@ -130,10 +130,9 @@ pub fn main() !void {
     defer gl.DeleteProgram(prog_id);
 
     // -- opengl end --
-    const ptr_buf = try std.heap.c_allocator.alloc(*c.AVFrame, 0x40);
-    defer std.heap.c_allocator.free(ptr_buf);
+    var queue = try FrameQueue.init(std.heap.c_allocator, 0x40);
+    defer queue.deinit(std.heap.c_allocator);
 
-    var queue = FrameQueue.init(ptr_buf);
     var should_quit: std.atomic.Value(bool) = .init(false);
 
     const decode_thread = try std.Thread.spawn(.{}, decode, .{ format_ctx, codec_ctx, vid_stream, &queue, &should_quit });
@@ -141,7 +140,6 @@ pub fn main() !void {
 
     var start_time: ?u64 = 0; // set to null to disable vsync
     var current_frame: ?*c.AVFrame = null;
-    defer if (current_frame) |_| c.av_frame_free(&current_frame);
 
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
@@ -170,10 +168,7 @@ pub fn main() !void {
         //     break :blocking;
         // }
 
-        if (queue.pop()) |frame| {
-            if (current_frame) |_| c.av_frame_free(&current_frame);
-            current_frame = frame;
-        }
+        if (queue.pop()) |frame| current_frame = frame;
 
         const frame = current_frame orelse {
             log.debug("queue empty, repeated frame", .{});
@@ -305,10 +300,11 @@ fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream:
         if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
         if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_receive_frame");
 
-        dst_frame.width = codec_ctx.width;
-        dst_frame.height = codec_ctx.height;
+        dst_frame.width = src_frame.width;
+        dst_frame.height = src_frame.height;
         dst_frame.format = c.AV_PIX_FMT_RGB24;
         dst_frame.pts = src_frame.pts; // for timing
+
         if (c.av_frame_get_buffer(dst_frame, 32) < 0) @panic("TODO: buffer alloc failed or something?");
 
         _ = c.sws_scale(
@@ -321,15 +317,12 @@ fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream:
             dst_frame.linesize[0..],
         );
 
-        const frame_copy = blk: {
-            const ptr: ?*c.AVFrame = c.av_frame_clone(dst_frame);
-            if (ptr == null) @panic("TODO: clone failed");
-
-            break :blk ptr.?;
-        };
-
         blocking: while (true) {
-            queue.push(frame_copy) catch continue :blocking;
+            queue.push(dst_frame) catch |e| {
+                if (e == error.out_of_memory) continue :blocking;
+                std.debug.panic("error: {}", .{e});
+            };
+
             break :blocking;
         }
     }
@@ -490,3 +483,84 @@ inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(valu
         else => comptime unreachable,
     };
 }
+
+const ThreadSafeFrameQueueRingBuffer = struct {
+    buf: []?*c.AVFrame,
+    read_idx: usize,
+    write_idx: usize,
+
+    mutex: std.Thread.Mutex = .{},
+
+    pub fn init(allocator: std.mem.Allocator, count: usize) !ThreadSafeFrameQueueRingBuffer {
+        std.debug.assert(std.math.isPowerOfTwo(count));
+        const buf = try allocator.alloc(?*c.AVFrame, count);
+
+        for (0..buf.len) |i| {
+            const frame_ptr: ?*c.AVFrame = c.av_frame_alloc();
+            if (frame_ptr == null) return error.out_of_memory;
+
+            buf[i] = frame_ptr.?;
+        }
+
+        return .{ .buf = buf, .read_idx = 0, .write_idx = 0 };
+    }
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        for (0..self.buf.len) |i| c.av_frame_free(&self.buf[i]);
+        allocator.free(self.buf);
+    }
+
+    pub fn push(self: *@This(), to_be_copied: *const c.AVFrame) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.isFull()) return error.out_of_memory;
+        defer self.write_idx += 1;
+
+        const ptr = self.buf[self.mask(self.write_idx)] orelse return error.corrupt_queue;
+
+        const valid_buffer =
+            to_be_copied.width == ptr.width and
+            to_be_copied.height == ptr.height and
+            to_be_copied.format == ptr.format;
+
+        if (!valid_buffer) {
+            c.av_frame_unref(ptr);
+
+            ptr.width = to_be_copied.width;
+            ptr.height = to_be_copied.height;
+            ptr.format = to_be_copied.format;
+
+            if (c.av_frame_get_buffer(ptr, 32) < 0) return error.av_error;
+        }
+
+        if (c.av_frame_copy(ptr, to_be_copied) < 0) return error.av_error;
+        if (c.av_frame_copy_props(ptr, to_be_copied) < 0) return error.av_error;
+    }
+
+    pub fn pop(self: *@This()) ?*c.AVFrame {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.isEmpty()) return null;
+        defer self.read_idx += 1;
+
+        return self.buf[self.mask(self.read_idx)];
+    }
+
+    inline fn len(self: *@This()) usize {
+        return self.write_idx - self.read_idx;
+    }
+
+    inline fn mask(self: @This(), idx: usize) usize {
+        return idx & (self.buf.len - 1);
+    }
+
+    inline fn isEmpty(self: @This()) bool {
+        return self.read_idx == self.write_idx;
+    }
+
+    inline fn isFull(self: @This()) bool {
+        return self.len() == self.buf.len;
+    }
+};
