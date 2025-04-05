@@ -114,17 +114,23 @@ pub fn main() !void {
     // zig fmt: on
 
     // -- opengl --
-    var vao_id = opengl_impl.vao();
-    defer gl.DeleteVertexArrays(1, vao_id[0..]);
+    var tex_vao_id = opengl_impl.vao();
+    defer gl.DeleteVertexArrays(1, tex_vao_id[0..]);
 
-    var vbo_id = opengl_impl.vbo();
-    defer gl.DeleteBuffers(1, vbo_id[0..]);
+    var tex_vbo_id = opengl_impl.vbo();
+    defer gl.DeleteBuffers(1, tex_vbo_id[0..]);
+
+    var ring_vao_id = opengl_impl.vao();
+    defer gl.DeleteVertexArrays(1, ring_vao_id[0..]);
+
+    var ring_vbo_id = opengl_impl.vbo();
+    defer gl.DeleteBuffers(1, ring_vbo_id[0..]);
 
     {
-        gl.BindVertexArray(vao_id[0]);
+        gl.BindVertexArray(tex_vao_id[0]);
         defer gl.BindVertexArray(0);
 
-        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_id[0]);
+        gl.BindBuffer(gl.ARRAY_BUFFER, tex_vbo_id[0]);
         defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
 
         gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), vertices[0..].ptr, gl.STATIC_DRAW);
@@ -136,11 +142,28 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(1);
     }
 
+    const ring_vertices = try ring(allocator, 5, 10, 100);
+    defer ring_vertices.deinit();
+    {
+        gl.BindVertexArray(ring_vao_id[0]);
+        defer gl.BindVertexArray(0);
+
+        gl.BindBuffer(gl.ARRAY_BUFFER, ring_vbo_id[0]);
+        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(ring_vertices.items.len * @sizeOf(f32)), ring_vertices.items[0..].ptr, gl.STATIC_DRAW);
+        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
+        gl.EnableVertexAttribArray(0);
+    }
+
     var tex_id = opengl_impl.vidTex(vid_codec_ctx.width, vid_codec_ctx.height);
     defer gl.DeleteTextures(1, tex_id[0..]);
 
-    const prog_id = try opengl_impl.program();
-    defer gl.DeleteProgram(prog_id);
+    const tex_prog = try opengl_impl.program("shader/texture.vert", "shader/texture.frag");
+    defer gl.DeleteProgram(tex_prog);
+
+    const ring_prog = try opengl_impl.program("shader/ring.vert", "shader/ring.frag");
+    defer gl.DeleteProgram(ring_prog);
 
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x40);
@@ -209,45 +232,55 @@ pub fn main() !void {
             }
         }
 
-        gl.UseProgram(prog_id);
-        defer gl.UseProgram(0);
+        {
+            gl.UseProgram(tex_prog);
+            defer gl.UseProgram(0);
 
-        gl.BindVertexArray(vao_id[0]);
-        defer gl.BindVertexArray(0);
+            gl.BindVertexArray(tex_vao_id[0]);
+            defer gl.BindVertexArray(0);
 
-        gl.ActiveTexture(gl.TEXTURE0);
-        defer gl.ActiveTexture(0);
+            gl.ActiveTexture(gl.TEXTURE0);
+            defer gl.ActiveTexture(0);
 
-        gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
+            defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
+            gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
 
-        gl.TexSubImage2D(
-            gl.TEXTURE_2D,
-            0,
-            0,
-            0,
-            frame.width,
-            frame.height,
-            gl.RGB, // match the format of frame data
-            gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
-            frame.data[0][0..],
-        );
+            gl.TexSubImage2D(
+                gl.TEXTURE_2D,
+                0,
+                0,
+                0,
+                frame.width,
+                frame.height,
+                gl.RGB, // match the format of frame data
+                gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
+                frame.data[0][0..],
+            );
 
-        { // calcualte uniforms
             const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
             const aspect = @as(f32, @floatFromInt(frame.width)) / @as(f32, @floatFromInt(frame.height));
             const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
             const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]); // factor allows for ration w/out clipping
 
-            gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_aspect"), ratio[0], ratio[1]);
-            gl.Uniform1f(gl.GetUniformLocation(prog_id, "u_scale"), scale);
-            gl.Uniform2f(gl.GetUniformLocation(prog_id, "u_rotation"), @sin(rad), @cos(rad));
-            gl.Uniform1i(gl.GetUniformLocation(prog_id, "u_screen"), 0);
+            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_aspect"), ratio[0], ratio[1]);
+            gl.Uniform1f(gl.GetUniformLocation(tex_prog, "u_scale"), scale);
+            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_rotation"), @sin(rad), @cos(rad));
+            gl.Uniform1i(gl.GetUniformLocation(tex_prog, "u_screen"), 0);
+
+            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
 
-        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        {
+            gl.UseProgram(ring_prog);
+            defer gl.UseProgram(0);
+
+            gl.BindVertexArray(ring_vao_id[0]);
+            defer gl.BindVertexArray(0);
+
+            gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(ring_vertices.items.len));
+        }
 
         try errify(c.SDL_GL_SwapWindow(window));
     }
@@ -461,9 +494,9 @@ const opengl_impl = struct {
         return tex_id;
     }
 
-    fn program() !c_uint {
-        const vert_shader: [1][*]const u8 = .{@embedFile("shader/texture.vert")[0..].ptr};
-        const frag_shader: [1][*]const u8 = .{@embedFile("shader/texture.frag")[0..].ptr};
+    fn program(comptime vert_path: []const u8, comptime frag_path: []const u8) !c_uint {
+        const vert_shader: [1][*]const u8 = .{@embedFile(vert_path)[0..].ptr};
+        const frag_shader: [1][*]const u8 = .{@embedFile(frag_path)[0..].ptr};
 
         const vs = gl.CreateShader(gl.VERTEX_SHADER);
         defer gl.DeleteShader(vs);
@@ -529,4 +562,25 @@ inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(valu
         },
         else => comptime unreachable,
     };
+}
+
+fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len: usize) !std.ArrayList(f32) {
+    var list = std.ArrayList(f32).init(allocator);
+    errdefer list.deinit();
+
+    const _len: f32 = @floatFromInt(len);
+
+    for (0..len) |i| {
+        const _angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / _len;
+        const x = @cos(_angle);
+        const y = @sin(_angle);
+
+        try list.append(x * outer_radius);
+        try list.append(y * outer_radius);
+
+        try list.append(x * inner_radius);
+        try list.append(y * inner_radius);
+    }
+
+    return list;
 }
