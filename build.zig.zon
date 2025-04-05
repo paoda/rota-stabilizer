@@ -44,6 +44,11 @@
             .url = "git+https://github.com/castholm/zigglgen.git#d5f381759825ee0bac29bc294d47aa05be4ab7b5",
             .hash = "zigglgen-0.4.0-bmyqLX_gLQDFXilQ5VQ9fJeOHKU1RFrggOzRqTGBX79W",
         },
+        .ffmpeg = .{
+            .url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip",
+            .hash = "N-V-__8AACVnyQotVLJZvHlrkmRRsu-KSkdzXlBc1kk4268o",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

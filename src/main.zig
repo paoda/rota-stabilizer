@@ -11,11 +11,20 @@ var gl_procs: gl.ProcTable = undefined;
 pub const FfmpegError = error{ffmpeg_error};
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){
+        .backing_allocator = std.heap.c_allocator,
+    };
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const allocator = gpa.allocator();
+
     const log = std.log.scoped(.ui);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
     // TODO: somehow recover information from ffmpeg errors
 
-    var args = std.process.args();
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+
     _ = args.skip(); // self
     const path = args.next() orelse return error.missing_file;
 
@@ -123,8 +132,8 @@ pub fn main() !void {
     defer gl.DeleteProgram(prog_id);
 
     // -- opengl end --
-    var queue = try FrameQueue.init(std.heap.c_allocator, 0x40);
-    defer queue.deinit(std.heap.c_allocator);
+    var queue = try FrameQueue.init(allocator, 0x40);
+    defer queue.deinit(allocator);
 
     var should_quit: std.atomic.Value(bool) = .init(false);
 

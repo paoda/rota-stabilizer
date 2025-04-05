@@ -3,7 +3,7 @@ const std = @import("std");
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -40,35 +40,48 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize, .preferred_link_mode = .dynamic });
-    exe_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize, .preferred_link_mode = .static });
+    lib_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+
+    switch (target.result.os.tag) {
+        .windows => {
+            const ffmpeg = b.lazyDependency("ffmpeg", .{}) orelse return error.ffmpeg_missing;
+            lib_mod.addIncludePath(ffmpeg.path("include/"));
+            lib_mod.addLibraryPath(ffmpeg.path("lib/"));
+
+            const ffmpeg_libs = [_][]const u8{ "avcodec", "avformat", "swscale", "avutil", "swresample" };
+
+            const base_path = ffmpeg.path("bin\\").getPath3(b, null);
+            const dir = try base_path.openDir(".", .{ .iterate = true });
+
+            var walk = try dir.walk(b.allocator);
+            defer walk.deinit();
+
+            while (try walk.next()) |entry| {
+                const lib = containsAny(ffmpeg_libs[0..], entry.basename) orelse continue;
+                const src_path = try base_path.joinString(b.allocator, entry.basename);
+                defer b.allocator.free(src_path);
+
+                // b.installBinFile internals but modified so we can use a cwd_relative lazy path
+                b.getInstallStep().dependOn(&b.addInstallFileWithDir(.{ .cwd_relative = src_path }, .bin, entry.basename).step);
+                lib_mod.linkSystemLibrary(lib, .{});
+            }
+        },
+        else => {
+            lib_mod.linkSystemLibrary("libavcodec", .{});
+            lib_mod.linkSystemLibrary("libavformat", .{});
+            lib_mod.linkSystemLibrary("libswscale", .{});
+            lib_mod.linkSystemLibrary("libavutil", .{});
+        },
+    }
 
     const gl_mod = @import("zigglgen").generateBindingsModule(b, .{ .api = .gl, .version = .@"3.3", .profile = .core });
     exe_mod.addImport("gl", gl_mod);
-
-    exe_mod.linkSystemLibrary("libavcodec", .{});
-    exe_mod.linkSystemLibrary("libavformat", .{});
-    exe_mod.linkSystemLibrary("libswscale", .{});
-    exe_mod.linkSystemLibrary("libavutil", .{});
 
     // Modules can depend on one another using the `std.Build.Module.addImport` function.
     // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
     exe_mod.addImport("librota", lib_mod);
-
-    // Now, we will create a static library based on the module we created above.
-    // This creates a `std.Build.Step.Compile`, which is the build step responsible
-    // for actually invoking the compiler.
-    const lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "librota",
-        .root_module = lib_mod,
-    });
-
-    // This declares intent for the library to be installed into the standard
-    // location when the user invokes the "install" step (the default step when
-    // running `zig build`).
-    b.installArtifact(lib);
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
@@ -125,4 +138,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
+}
+
+/// will return the first match
+fn containsAny(needles: []const []const u8, haystack: []const u8) ?[]const u8 {
+    for (needles) |needle| {
+        if (std.mem.containsAtLeast(u8, haystack, 1, needle)) return needle;
+    }
+
+    return null;
 }
