@@ -142,7 +142,11 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(1);
     }
 
-    const ring_vertices = try ring(allocator, 5, 10, 100);
+    // TODO: Can I calculate these values or something?
+
+    const radius = 0.676;
+    const ring_vertices = try ring(allocator, radius - 0.011, radius, 0x400);
+
     defer ring_vertices.deinit();
     {
         gl.BindVertexArray(ring_vao_id[0]);
@@ -200,7 +204,7 @@ pub fn main() !void {
 
         gl.Viewport(0, 0, w, h);
 
-        // gl.ClearColor(1, 1, 1, 1);
+        gl.ClearColor(0, 0, 0, 0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
         // blocking: while (true) {
@@ -230,6 +234,16 @@ pub fn main() !void {
 
                 std.atomic.spinLoopHint(); // TODO: less resource intensive
             }
+        }
+
+        {
+            gl.UseProgram(ring_prog);
+            defer gl.UseProgram(0);
+
+            gl.BindVertexArray(ring_vao_id[0]);
+            defer gl.BindVertexArray(0);
+
+            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(ring_vertices.items.len));
         }
 
         {
@@ -270,16 +284,6 @@ pub fn main() !void {
             gl.Uniform1i(gl.GetUniformLocation(tex_prog, "u_screen"), 0);
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        }
-
-        {
-            gl.UseProgram(ring_prog);
-            defer gl.UseProgram(0);
-
-            gl.BindVertexArray(ring_vao_id[0]);
-            defer gl.BindVertexArray(0);
-
-            gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(ring_vertices.items.len));
         }
 
         try errify(c.SDL_GL_SwapWindow(window));
@@ -581,6 +585,8 @@ fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len:
         try list.append(x * inner_radius);
         try list.append(y * inner_radius);
     }
+
+    try list.appendSlice(list.items[0..4]); // complete the loop
 
     return list;
 }
