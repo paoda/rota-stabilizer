@@ -313,9 +313,6 @@ fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream:
     var maybe_aud_frame: ?*c.AVFrame = c.av_frame_alloc();
     defer c.av_frame_free(&maybe_aud_frame);
 
-    var maybe_aud_frame2: ?*c.AVFrame = c.av_frame_alloc();
-    defer c.av_frame_free(&maybe_aud_frame2);
-
     const pkt = maybe_pkt orelse return error.out_of_memory;
     const src_frame = maybe_src_frame orelse return error.out_of_memory;
     const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
@@ -370,10 +367,13 @@ fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream:
 
             _ = c.swr_convert_frame(swr, aud_frame, src_frame);
 
-            // std.debug.print("src sample_rate: {}Hz\n", .{aud.codec_ctx.sample_rate});
-            // std.debug.print("src format: {s}\n", .{c.av_get_sample_fmt_name(aud.codec_ctx.sample_fmt)});
-            // std.debug.print("dst sample_rate: {}Hz\n", .{aud_frame2.sample_rate});
-            // std.debug.print("dst format: {s}\n\n", .{c.av_get_sample_fmt_name(aud_frame2.format)});
+            // std.debug.print("src sample_rate: {}Hz\n", .{src_frame.sample_rate});
+            // std.debug.print("src nb_channels: {}\n", .{src_frame.ch_layout.nb_channels});
+            // std.debug.print("src format: {s}\n", .{c.av_get_sample_fmt_name(src_frame.format)});
+            // std.debug.print("dst sample_rate: {}Hz\n", .{aud_frame.sample_rate});
+            // std.debug.print("dst format: {s}\n", .{c.av_get_sample_fmt_name(aud_frame.format)});
+            // std.debug.print("dst nb_channels: {}\n", .{aud_frame.ch_layout.nb_channels});
+            // std.debug.print("delay (ms): {}\n\n", .{c.swr_get_delay(swr, 1000)});
 
             _ = c.SDL_PutAudioStreamData(sdl_stream, aud_frame.data[0], src_frame.linesize[0]);
             continue;
