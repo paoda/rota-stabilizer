@@ -24,7 +24,7 @@ pub fn main() !void {
     const path = args.next() orelse return error.missing_file;
 
     var maybe_fmt_ctx: ?*c.AVFormatContext = c.avformat_alloc_context();
-    defer c.avformat_close_input(&maybe_fmt_ctx); // SAFETY: only okay 'cause we're cleaning up
+    defer c.avformat_close_input(&maybe_fmt_ctx);
 
     _ = try libavError(c.avformat_open_input(&maybe_fmt_ctx, path, null, null));
     const fmt_ctx = maybe_fmt_ctx orelse return error.out_of_memory;
@@ -144,8 +144,8 @@ pub fn main() !void {
 
     // TODO: Can I calculate these values or something?
 
-    const radius = 0.676;
-    const ring_vertices = try ring(allocator, radius - 0.011, radius, 0x400);
+    const radius = 0.749; // TODO: come back later and see if off-by-one looks better still
+    const ring_vertices = try ring(allocator, radius - 0.015, radius, 0x400);
 
     defer ring_vertices.deinit();
     {
@@ -236,12 +236,19 @@ pub fn main() !void {
             }
         }
 
+        const aspect = @as(f32, @floatFromInt(frame.width)) / @as(f32, @floatFromInt(frame.height));
+        const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
+        // const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]); // factor allows for ration w/out clipping
+        const scale = 1.0;
+
         {
             gl.UseProgram(ring_prog);
             defer gl.UseProgram(0);
 
             gl.BindVertexArray(ring_vao_id[0]);
             defer gl.BindVertexArray(0);
+
+            gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_scale"), scale);
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(ring_vertices.items.len));
         }
@@ -274,9 +281,6 @@ pub fn main() !void {
             );
 
             const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
-            const aspect = @as(f32, @floatFromInt(frame.width)) / @as(f32, @floatFromInt(frame.height));
-            const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
-            const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]); // factor allows for ration w/out clipping
 
             gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_aspect"), ratio[0], ratio[1]);
             gl.Uniform1f(gl.GetUniformLocation(tex_prog, "u_scale"), scale);
