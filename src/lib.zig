@@ -13,6 +13,7 @@ pub const c = @cImport({
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
     @cInclude("libswscale/swscale.h");
+    @cInclude("libswresample/swresample.h");
     @cInclude("libavutil/imgutils.h");
 });
 

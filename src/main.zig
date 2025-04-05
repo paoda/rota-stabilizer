@@ -62,19 +62,28 @@ pub fn main() !void {
     const vid_codec_ctx = maybe_vid_codec_ctx orelse return error.out_of_memory;
     const aud_codec_ctx = maybe_aud_codec_ctx orelse return error.out_of_memory;
 
-    _ = aud_codec_ctx;
-    _ = aud_stream;
-
     // lmao just put SDL stuff after this
     c.SDL_SetMainReady();
 
-    try errify(c.SDL_Init(c.SDL_INIT_AUDIO | c.SDL_INIT_VIDEO));
+    try errify(c.SDL_Init(c.SDL_INIT_AUDIO | c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO));
 
     try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", "0.1.0", "moe.paoda.rota-stabilizer"));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, gl.info.version_minor));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
+
+    const sdl_stream = blk: {
+        var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
+        desired.freq = aud_codec_ctx.sample_rate;
+        desired.format = c.SDL_AUDIO_F32;
+        desired.channels = aud_codec_ctx.ch_layout.nb_channels;
+
+        break :blk c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired, null, null).?;
+    };
+    defer c.SDL_DestroyAudioStream(sdl_stream);
+
+    _ = c.SDL_ResumeAudioStreamDevice(sdl_stream);
 
     const sz = @max(vid_codec_ctx.width, vid_codec_ctx.height);
 
@@ -139,10 +148,17 @@ pub fn main() !void {
 
     var should_quit: std.atomic.Value(bool) = .init(false);
 
-    const decode_thread = try std.Thread.spawn(.{}, decode, .{ fmt_ctx, vid_codec_ctx, vid_stream, &queue, &should_quit });
+    const decode_thread = try std.Thread.spawn(.{}, decode, .{
+        fmt_ctx,
+        AVBundle{ .codec_ctx = vid_codec_ctx, .stream = vid_stream },
+        AVBundle{ .codec_ctx = aud_codec_ctx, .stream = aud_stream },
+        sdl_stream,
+        &queue,
+        &should_quit,
+    });
     defer decode_thread.join();
 
-    var start_time: ?u64 = null; // set to null to disable vsync
+    var start_time: ?u64 = 0; // set to null to disable vsync
     var current_frame: ?*c.AVFrame = null;
 
     while (!should_quit.load(.monotonic)) {
@@ -164,12 +180,12 @@ pub fn main() !void {
         // gl.ClearColor(1, 1, 1, 1);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
-        blocking: while (true) {
-            current_frame = queue.pop() orelse continue :blocking;
-            break :blocking;
-        }
+        // blocking: while (true) {
+        //     current_frame = queue.pop() orelse continue :blocking;
+        //     break :blocking;
+        // }
 
-        // if (queue.pop()) |frame| current_frame = frame;
+        if (queue.pop()) |frame| current_frame = frame;
 
         const frame = current_frame orelse {
             log.debug("queue empty, repeated frame", .{});
@@ -237,7 +253,12 @@ pub fn main() !void {
     }
 }
 
-fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream: usize, queue: *FrameQueue, should_quit: *std.atomic.Value(bool)) !void {
+const AVBundle = struct {
+    codec_ctx: *c.AVCodecContext,
+    stream: usize,
+};
+
+fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream: *c.SDL_AudioStream, queue: *FrameQueue, should_quit: *std.atomic.Value(bool)) !void {
     const log = std.log.scoped(.decode);
 
     log.info("decode thread start", .{});
@@ -252,70 +273,104 @@ fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream:
     var maybe_dst_frame: ?*c.AVFrame = c.av_frame_alloc();
     defer c.av_frame_free(&maybe_dst_frame);
 
+    var maybe_aud_frame: ?*c.AVFrame = c.av_frame_alloc();
+    defer c.av_frame_free(&maybe_aud_frame);
+
+    var maybe_aud_frame2: ?*c.AVFrame = c.av_frame_alloc();
+    defer c.av_frame_free(&maybe_aud_frame2);
+
     const pkt = maybe_pkt orelse return error.out_of_memory;
     const src_frame = maybe_src_frame orelse return error.out_of_memory;
     const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
+    const aud_frame = maybe_aud_frame orelse return error.out_of_memory;
 
-    dst_frame.width = codec_ctx.width;
-    dst_frame.height = codec_ctx.height;
+    _ = try libavError(c.av_channel_layout_copy(&aud_frame.ch_layout, &aud.codec_ctx.ch_layout));
+    aud_frame.sample_rate = aud.codec_ctx.sample_rate;
+    aud_frame.format = c.AV_SAMPLE_FMT_FLT;
+
+    dst_frame.width = vid.codec_ctx.width;
+    dst_frame.height = vid.codec_ctx.height;
     dst_frame.format = c.AV_PIX_FMT_RGB24;
 
     _ = try libavError(c.av_frame_get_buffer(dst_frame, 32));
 
-    const sws_ctx = blk: {
-        const ptr = c.sws_getContext(
-            codec_ctx.width,
-            codec_ctx.height,
-            codec_ctx.pix_fmt,
-            codec_ctx.width,
-            codec_ctx.height,
-            c.AV_PIX_FMT_RGB24,
-            c.SWS_BILINEAR,
-            null,
-            null,
-            null,
-        );
-        if (ptr == null) return error.out_of_memory;
+    const maybe_sws = c.sws_getContext(
+        vid.codec_ctx.width,
+        vid.codec_ctx.height,
+        vid.codec_ctx.pix_fmt,
+        vid.codec_ctx.width,
+        vid.codec_ctx.height,
+        c.AV_PIX_FMT_RGB24,
+        c.SWS_BILINEAR,
+        null,
+        null,
+        null,
+    );
+    defer c.sws_freeContext(maybe_sws);
 
-        break :blk ptr.?;
-    };
-    defer c.sws_freeContext(sws_ctx);
+    var maybe_swr = c.swr_alloc();
+    defer c.swr_free(&maybe_swr);
+
+    const sws = maybe_sws orelse return error.out_of_memory;
+    const swr = maybe_swr orelse return error.out_of_memory;
 
     while (c.av_read_frame(fmt_ctx, pkt) >= 0) {
         defer c.av_packet_unref(pkt);
-
         if (should_quit.load(.monotonic)) return;
-        if (pkt.stream_index != vid_stream) continue;
 
-        const send_ret = c.avcodec_send_packet(codec_ctx, pkt);
-        if (send_ret == c.AVERROR_EOF) return;
-        if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
-        if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
+        // TODO: cleanup this code
 
-        const recv_ret = c.avcodec_receive_frame(codec_ctx, src_frame);
-        if (recv_ret == c.AVERROR_EOF) return;
-        if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
-        if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_receive_frame");
+        if (pkt.stream_index == aud.stream) {
+            const send_ret = c.avcodec_send_packet(aud.codec_ctx, pkt);
+            if (send_ret == c.AVERROR_EOF) return;
+            if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
+            if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
 
-        dst_frame.pts = src_frame.pts; // for timing
+            const recv_ret = c.avcodec_receive_frame(aud.codec_ctx, src_frame);
+            if (recv_ret == c.AVERROR_EOF) return;
+            if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
+            if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
 
-        _ = c.sws_scale(
-            sws_ctx,
-            src_frame.data[0..],
-            src_frame.linesize[0..],
-            0,
-            src_frame.height, // TODO: this should be src_frame
-            dst_frame.data[0..],
-            dst_frame.linesize[0..],
-        );
+            _ = c.swr_convert_frame(swr, aud_frame, src_frame);
 
-        blocking: while (true) {
-            queue.push(dst_frame) catch |e| {
-                if (e == error.out_of_memory) continue :blocking;
-                std.debug.panic("error: {}", .{e});
-            };
+            // std.debug.print("src sample_rate: {}Hz\n", .{aud.codec_ctx.sample_rate});
+            // std.debug.print("src format: {s}\n", .{c.av_get_sample_fmt_name(aud.codec_ctx.sample_fmt)});
+            // std.debug.print("dst sample_rate: {}Hz\n", .{aud_frame2.sample_rate});
+            // std.debug.print("dst format: {s}\n\n", .{c.av_get_sample_fmt_name(aud_frame2.format)});
 
-            break :blocking;
+            _ = c.SDL_PutAudioStreamData(sdl_stream, aud_frame.data[0], src_frame.linesize[0]);
+            continue;
+        } else if (pkt.stream_index == vid.stream) {
+            const send_ret = c.avcodec_send_packet(vid.codec_ctx, pkt);
+            if (send_ret == c.AVERROR_EOF) return;
+            if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
+            if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
+
+            const recv_ret = c.avcodec_receive_frame(vid.codec_ctx, src_frame);
+            if (recv_ret == c.AVERROR_EOF) return;
+            if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
+            if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_receive_frame");
+
+            dst_frame.pts = src_frame.pts; // for timing
+
+            _ = c.sws_scale(
+                sws,
+                src_frame.data[0..],
+                src_frame.linesize[0..],
+                0,
+                src_frame.height, // TODO: this should be src_frame
+                dst_frame.data[0..],
+                dst_frame.linesize[0..],
+            );
+
+            blocking: while (true) {
+                queue.push(dst_frame) catch |e| {
+                    if (e == error.full) continue :blocking;
+                    std.debug.panic("error: {}", .{e});
+                };
+
+                break :blocking;
+            }
         }
     }
 }
