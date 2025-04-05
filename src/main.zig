@@ -8,19 +8,14 @@ const FrameQueue = @import("librota").FrameQueue;
 
 var gl_procs: gl.ProcTable = undefined;
 
-pub const FfmpegError = error{ffmpeg_error};
-
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){
-        .backing_allocator = std.heap.c_allocator,
-    };
+    const log = std.log.scoped(.ui);
+    errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
+
+    var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
-
-    const log = std.log.scoped(.ui);
-    errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
-    // TODO: somehow recover information from ffmpeg errors
 
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
@@ -28,40 +23,47 @@ pub fn main() !void {
     _ = args.skip(); // self
     const path = args.next() orelse return error.missing_file;
 
-    const format_ctx: *c.struct_AVFormatContext = blk: {
-        var ptr: ?*c.struct_AVFormatContext = c.avformat_alloc_context();
-        if (ptr == null) return error.out_of_memory;
+    var maybe_fmt_ctx: ?*c.AVFormatContext = c.avformat_alloc_context();
+    defer c.avformat_close_input(&maybe_fmt_ctx); // SAFETY: only okay 'cause we're cleaning up
 
-        const ret = c.avformat_open_input(&ptr, path, null, null);
-        if (ret != 0) return error.file_open_failed;
+    _ = try libavError(c.avformat_open_input(&maybe_fmt_ctx, path, null, null));
+    const fmt_ctx = maybe_fmt_ctx orelse return error.out_of_memory;
 
-        break :blk ptr.?;
+    _ = try libavError(c.avformat_find_stream_info(fmt_ctx, null));
+
+    var maybe_vid_codec_ctx: ?*c.AVCodecContext, const vid_stream: usize = blk: {
+        var codec_ptr: ?*const c.AVCodec = null;
+        const stream = try libavError(c.av_find_best_stream(fmt_ctx, c.AVMEDIA_TYPE_VIDEO, -1, -1, &codec_ptr, 0));
+        if (codec_ptr == null) return error.unsupported_codec;
+
+        const ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr.?);
+
+        _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.streams[@intCast(stream)].*.codecpar));
+        _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr.?, null));
+
+        break :blk .{ ctx_ptr, @intCast(stream) };
     };
-    defer c.avformat_close_input(@constCast(@ptrCast(&format_ctx))); // SAFETY: only okay 'cause we're cleaning up
+    defer c.avcodec_free_context(&maybe_vid_codec_ctx);
 
-    _ = try libavError(c.avformat_find_stream_info(format_ctx, null));
+    var maybe_aud_codec_ctx: ?*c.AVCodecContext, const aud_stream: usize = blk: {
+        var codec_ptr: ?*const c.AVCodec = null;
+        const stream = try libavError(c.av_find_best_stream(fmt_ctx, c.AVMEDIA_TYPE_AUDIO, -1, -1, &codec_ptr, 0));
+        if (codec_ptr == null) return error.unsupported_codec;
 
-    const codec, const vid_stream: usize = blk: {
-        var ptr: ?*const c.AVCodec = null;
+        const ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr.?);
 
-        const stream = c.av_find_best_stream(format_ctx, c.AVMEDIA_TYPE_VIDEO, -1, -1, &ptr, 0);
+        _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.streams[@intCast(stream)].*.codecpar));
+        _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr.?, null));
 
-        if (stream < 0) return error.missing_video_stream;
-        if (ptr == null) return error.unsupported_codec;
-
-        break :blk .{ ptr.?, @intCast(stream) };
+        break :blk .{ ctx_ptr, @intCast(stream) };
     };
+    defer c.avcodec_free_context(&maybe_aud_codec_ctx);
 
-    const codec_ctx: *c.AVCodecContext = blk: {
-        const ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec);
-        if (ptr == null) return error.out_of_memory;
+    const vid_codec_ctx = maybe_vid_codec_ctx orelse return error.out_of_memory;
+    const aud_codec_ctx = maybe_aud_codec_ctx orelse return error.out_of_memory;
 
-        if (c.avcodec_parameters_to_context(ptr, format_ctx.streams[vid_stream].*.codecpar) < 0) return error.codec_copy_failed;
-        break :blk ptr.?;
-    };
-    defer c.avcodec_free_context(@constCast(@ptrCast(&codec_ctx))); // SAFETY: only okay 'cause we're cleaning up
-
-    if (c.avcodec_open2(codec_ctx, codec, null) < 0) return error.codec_open_failed;
+    _ = aud_codec_ctx;
+    _ = aud_stream;
 
     // lmao just put SDL stuff after this
     c.SDL_SetMainReady();
@@ -74,7 +76,7 @@ pub fn main() !void {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
 
-    const sz = @max(codec_ctx.width, codec_ctx.height);
+    const sz = @max(vid_codec_ctx.width, vid_codec_ctx.height);
 
     const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", sz >> 1, sz >> 1, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
     defer c.SDL_DestroyWindow(window);
@@ -125,7 +127,7 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(1);
     }
 
-    var tex_id = opengl_impl.vidTex(codec_ctx.width, codec_ctx.height);
+    var tex_id = opengl_impl.vidTex(vid_codec_ctx.width, vid_codec_ctx.height);
     defer gl.DeleteTextures(1, tex_id[0..]);
 
     const prog_id = try opengl_impl.program();
@@ -137,7 +139,7 @@ pub fn main() !void {
 
     var should_quit: std.atomic.Value(bool) = .init(false);
 
-    const decode_thread = try std.Thread.spawn(.{}, decode, .{ format_ctx, codec_ctx, vid_stream, &queue, &should_quit });
+    const decode_thread = try std.Thread.spawn(.{}, decode, .{ fmt_ctx, vid_codec_ctx, vid_stream, &queue, &should_quit });
     defer decode_thread.join();
 
     var start_time: ?u64 = null; // set to null to disable vsync
@@ -177,7 +179,7 @@ pub fn main() !void {
         };
 
         video_sync: {
-            const time_base: f64 = c.av_q2d(format_ctx.streams[vid_stream].*.time_base);
+            const time_base: f64 = c.av_q2d(fmt_ctx.streams[vid_stream].*.time_base);
             const pt_in_seconds = @as(f64, @floatFromInt(frame.pts)) * time_base;
 
             if (start_time == null) break :video_sync;
@@ -237,36 +239,28 @@ pub fn main() !void {
 
 fn decode(fmt_ctx: *c.AVFormatContext, codec_ctx: *c.AVCodecContext, vid_stream: usize, queue: *FrameQueue, should_quit: *std.atomic.Value(bool)) !void {
     const log = std.log.scoped(.decode);
+
     log.info("decode thread start", .{});
+    defer log.info("decode thread end", .{});
 
-    const pkt: *c.AVPacket = blk: {
-        const ptr: ?*c.AVPacket = c.av_packet_alloc();
-        if (ptr == null) return error.out_of_memory;
+    var maybe_pkt: ?*c.AVPacket = c.av_packet_alloc();
+    defer c.av_packet_free(&maybe_pkt);
 
-        break :blk ptr.?;
-    };
-    defer c.av_packet_free(@constCast(@ptrCast(&pkt))); // SAFETY: only okay 'cause we're cleaning up
+    var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
+    defer c.av_frame_free(&maybe_src_frame);
 
-    const src_frame: *c.AVFrame = blk: {
-        const ptr: ?*c.AVFrame = c.av_frame_alloc();
-        if (ptr == null) return error.out_of_memory;
+    var maybe_dst_frame: ?*c.AVFrame = c.av_frame_alloc();
+    defer c.av_frame_free(&maybe_dst_frame);
 
-        break :blk ptr.?;
-    };
-    defer c.av_frame_free(@constCast(@ptrCast(&src_frame))); // SAFETY: only okay 'cause we're cleaning up
-
-    const dst_frame: *c.AVFrame = blk: {
-        const ptr: ?*c.AVFrame = c.av_frame_alloc();
-        if (ptr == null) return error.out_of_memory;
-
-        break :blk ptr.?;
-    };
-    defer c.av_frame_free(@constCast(@ptrCast(&dst_frame))); // SAFETY: only okay 'cause we're cleaning up
+    const pkt = maybe_pkt orelse return error.out_of_memory;
+    const src_frame = maybe_src_frame orelse return error.out_of_memory;
+    const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
 
     dst_frame.width = codec_ctx.width;
     dst_frame.height = codec_ctx.height;
     dst_frame.format = c.AV_PIX_FMT_RGB24;
-    if (c.av_frame_get_buffer(dst_frame, 32) < 0) @panic("TODO: buffer alloc failed or something?");
+
+    _ = try libavError(c.av_frame_get_buffer(dst_frame, 32));
 
     const sws_ctx = blk: {
         const ptr = c.sws_getContext(
