@@ -45,8 +45,8 @@
             .hash = "zigglgen-0.4.0-bmyqLX_gLQDFXilQ5VQ9fJeOHKU1RFrggOzRqTGBX79W",
         },
         .ffmpeg = .{
-            .url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip",
-            .hash = "N-V-__8AACVnyQotVLJZvHlrkmRRsu-KSkdzXlBc1kk4268o",
+            .url = "https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip",
+            .hash = "N-V-__8AAD_XPwuvbf8c117TB8ikaKnS8MpyEmyxvhv617i0",
             .lazy = true,
         },
     },

@@ -51,19 +51,18 @@ pub fn build(b: *std.Build) !void {
 
             const ffmpeg_libs = [_][]const u8{ "avcodec", "avformat", "swscale", "avutil", "swresample" };
 
-            const base_path = ffmpeg.path("bin\\").getPath3(b, null);
-            const dir = try base_path.openDir(".", .{ .iterate = true });
+            const base_path = ffmpeg.path("bin\\");
+            const dir = try base_path.getPath3(b, null).openDir(".", .{ .iterate = true });
 
             var walk = try dir.walk(b.allocator);
             defer walk.deinit();
 
             while (try walk.next()) |entry| {
                 const lib = containsAny(ffmpeg_libs[0..], entry.basename) orelse continue;
-                const src_path = try base_path.joinString(b.allocator, entry.basename);
-                defer b.allocator.free(src_path);
+                const src_path = try base_path.join(b.allocator, entry.basename);
 
-                // b.installBinFile internals but modified so we can use a cwd_relative lazy path
-                b.getInstallStep().dependOn(&b.addInstallFileWithDir(.{ .cwd_relative = src_path }, .bin, entry.basename).step);
+                // b.installBinFile doesn't support LazyPath for some reason :\
+                b.getInstallStep().dependOn(&b.addInstallFileWithDir(src_path, .bin, entry.basename).step);
                 lib_mod.linkSystemLibrary(lib, .{});
             }
         },
