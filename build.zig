@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) !void {
             lib_mod.linkSystemLibrary("libavcodec", .{});
             lib_mod.linkSystemLibrary("libavformat", .{});
             lib_mod.linkSystemLibrary("libswscale", .{});
+            lib_mod.linkSystemLibrary("libswresample", .{});
             lib_mod.linkSystemLibrary("libavutil", .{});
         },
     }
