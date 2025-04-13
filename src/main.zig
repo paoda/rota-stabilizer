@@ -114,23 +114,17 @@ pub fn main() !void {
     // zig fmt: on
 
     // -- opengl --
-    var tex_vao_id = opengl_impl.vao();
-    defer gl.DeleteVertexArrays(1, tex_vao_id[0..]);
+    var vao_ids = opengl_impl.vao(2);
+    defer gl.DeleteVertexArrays(2, vao_ids[0..]);
 
-    var tex_vbo_id = opengl_impl.vbo();
-    defer gl.DeleteBuffers(1, tex_vbo_id[0..]);
-
-    var ring_vao_id = opengl_impl.vao();
-    defer gl.DeleteVertexArrays(1, ring_vao_id[0..]);
-
-    var ring_vbo_id = opengl_impl.vbo();
-    defer gl.DeleteBuffers(1, ring_vbo_id[0..]);
+    var vbo_ids = opengl_impl.vbo(2);
+    defer gl.DeleteBuffers(2, vbo_ids[0..]);
 
     {
-        gl.BindVertexArray(tex_vao_id[0]);
+        gl.BindVertexArray(vao_ids[0]);
         defer gl.BindVertexArray(0);
 
-        gl.BindBuffer(gl.ARRAY_BUFFER, tex_vbo_id[0]);
+        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_ids[0]);
         defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
 
         gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), vertices[0..].ptr, gl.STATIC_DRAW);
@@ -149,10 +143,10 @@ pub fn main() !void {
 
     defer ring_vertices.deinit();
     {
-        gl.BindVertexArray(ring_vao_id[0]);
+        gl.BindVertexArray(vao_ids[1]);
         defer gl.BindVertexArray(0);
 
-        gl.BindBuffer(gl.ARRAY_BUFFER, ring_vbo_id[0]);
+        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_ids[1]);
         defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
 
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(ring_vertices.items.len * @sizeOf(f32)), ring_vertices.items[0..].ptr, gl.STATIC_DRAW);
@@ -175,14 +169,14 @@ pub fn main() !void {
 
     var should_quit: std.atomic.Value(bool) = .init(false);
 
-    const decode_thread = try std.Thread.spawn(.{}, decode, .{
-        fmt_ctx,
-        AVBundle{ .codec_ctx = vid_codec_ctx, .stream = vid_stream },
-        AVBundle{ .codec_ctx = aud_codec_ctx, .stream = aud_stream },
-        sdl_stream,
-        &queue,
-        &should_quit,
-    });
+    const decode_ctx: DecodeContext = .{
+        .aud = .{ .codec_ctx = aud_codec_ctx, .stream = aud_stream },
+        .vid = .{ .codec_ctx = vid_codec_ctx, .stream = vid_stream },
+        .fmt_ctx = fmt_ctx,
+        .should_quit = &should_quit,
+    };
+
+    const decode_thread = try std.Thread.spawn(.{}, decode, .{ sdl_stream, &queue, decode_ctx });
     defer decode_thread.join();
 
     var start_time: ?u64 = 0; // set to null to disable vsync
@@ -245,7 +239,7 @@ pub fn main() !void {
             gl.UseProgram(ring_prog);
             defer gl.UseProgram(0);
 
-            gl.BindVertexArray(ring_vao_id[0]);
+            gl.BindVertexArray(vao_ids[1]);
             defer gl.BindVertexArray(0);
 
             gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_scale"), scale);
@@ -257,7 +251,7 @@ pub fn main() !void {
             gl.UseProgram(tex_prog);
             defer gl.UseProgram(0);
 
-            gl.BindVertexArray(tex_vao_id[0]);
+            gl.BindVertexArray(vao_ids[0]);
             defer gl.BindVertexArray(0);
 
             gl.ActiveTexture(gl.TEXTURE0);
@@ -294,12 +288,20 @@ pub fn main() !void {
     }
 }
 
-const AVBundle = struct {
-    codec_ctx: *c.AVCodecContext,
-    stream: usize,
+const DecodeContext = struct {
+    aud: AvBundle,
+    vid: AvBundle,
+    fmt_ctx: *c.AVFormatContext,
+
+    should_quit: *std.atomic.Value(bool),
+
+    const AvBundle = struct {
+        codec_ctx: *c.AVCodecContext,
+        stream: usize,
+    };
 };
 
-fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream: *c.SDL_AudioStream, queue: *FrameQueue, should_quit: *std.atomic.Value(bool)) !void {
+fn decode(sample_queue: *c.SDL_AudioStream, frame_queue: *FrameQueue, ctx: DecodeContext) !void {
     const log = std.log.scoped(.decode);
 
     log.info("decode thread start", .{});
@@ -322,22 +324,22 @@ fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream:
     const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
     const aud_frame = maybe_aud_frame orelse return error.out_of_memory;
 
-    _ = try libavError(c.av_channel_layout_copy(&aud_frame.ch_layout, &aud.codec_ctx.ch_layout));
-    aud_frame.sample_rate = aud.codec_ctx.sample_rate;
+    _ = try libavError(c.av_channel_layout_copy(&aud_frame.ch_layout, &ctx.aud.codec_ctx.ch_layout));
+    aud_frame.sample_rate = ctx.aud.codec_ctx.sample_rate;
     aud_frame.format = c.AV_SAMPLE_FMT_FLT;
 
-    dst_frame.width = vid.codec_ctx.width;
-    dst_frame.height = vid.codec_ctx.height;
+    dst_frame.width = ctx.vid.codec_ctx.width;
+    dst_frame.height = ctx.vid.codec_ctx.height;
     dst_frame.format = c.AV_PIX_FMT_RGB24;
 
     _ = try libavError(c.av_frame_get_buffer(dst_frame, 32));
 
     const maybe_sws = c.sws_getContext(
-        vid.codec_ctx.width,
-        vid.codec_ctx.height,
-        vid.codec_ctx.pix_fmt,
-        vid.codec_ctx.width,
-        vid.codec_ctx.height,
+        ctx.vid.codec_ctx.width,
+        ctx.vid.codec_ctx.height,
+        ctx.vid.codec_ctx.pix_fmt,
+        ctx.vid.codec_ctx.width,
+        ctx.vid.codec_ctx.height,
         c.AV_PIX_FMT_RGB24,
         c.SWS_BILINEAR,
         null,
@@ -352,19 +354,19 @@ fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream:
     const sws = maybe_sws orelse return error.out_of_memory;
     const swr = maybe_swr orelse return error.out_of_memory;
 
-    while (c.av_read_frame(fmt_ctx, pkt) >= 0) {
+    while (c.av_read_frame(ctx.fmt_ctx, pkt) >= 0) {
         defer c.av_packet_unref(pkt);
-        if (should_quit.load(.monotonic)) return;
+        if (ctx.should_quit.load(.monotonic)) return;
 
         // TODO: cleanup this code
 
-        if (pkt.stream_index == aud.stream) {
-            const send_ret = c.avcodec_send_packet(aud.codec_ctx, pkt);
+        if (pkt.stream_index == ctx.aud.stream) {
+            const send_ret = c.avcodec_send_packet(ctx.aud.codec_ctx, pkt);
             if (send_ret == c.AVERROR_EOF) return;
             if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
             if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
 
-            const recv_ret = c.avcodec_receive_frame(aud.codec_ctx, src_frame);
+            const recv_ret = c.avcodec_receive_frame(ctx.aud.codec_ctx, src_frame);
             if (recv_ret == c.AVERROR_EOF) return;
             if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
             if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
@@ -379,15 +381,15 @@ fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream:
             // std.debug.print("dst nb_channels: {}\n", .{aud_frame.ch_layout.nb_channels});
             // std.debug.print("delay (ms): {}\n\n", .{c.swr_get_delay(swr, 1000)});
 
-            _ = c.SDL_PutAudioStreamData(sdl_stream, aud_frame.data[0], src_frame.linesize[0]);
+            _ = c.SDL_PutAudioStreamData(sample_queue, aud_frame.data[0], src_frame.linesize[0]);
             continue;
-        } else if (pkt.stream_index == vid.stream) {
-            const send_ret = c.avcodec_send_packet(vid.codec_ctx, pkt);
+        } else if (pkt.stream_index == ctx.vid.stream) {
+            const send_ret = c.avcodec_send_packet(ctx.vid.codec_ctx, pkt);
             if (send_ret == c.AVERROR_EOF) return;
             if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
             if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
 
-            const recv_ret = c.avcodec_receive_frame(vid.codec_ctx, src_frame);
+            const recv_ret = c.avcodec_receive_frame(ctx.vid.codec_ctx, src_frame);
             if (recv_ret == c.AVERROR_EOF) return;
             if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
             if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_receive_frame");
@@ -405,7 +407,7 @@ fn decode(fmt_ctx: *c.AVFormatContext, vid: AVBundle, aud: AVBundle, sdl_stream:
             );
 
             blocking: while (true) {
-                queue.push(dst_frame) catch |e| {
+                frame_queue.push(dst_frame) catch |e| {
                     if (e == error.full) continue :blocking;
                     std.debug.panic("error: {}", .{e});
                 };
@@ -463,18 +465,18 @@ fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]
 }
 
 const opengl_impl = struct {
-    fn vao() [1]c_uint {
-        var vao_id: [1]c_uint = undefined;
-        gl.GenVertexArrays(1, vao_id[0..]);
+    fn vao(n: comptime_int) [n]c_uint {
+        var ids: [n]c_uint = undefined;
+        gl.GenVertexArrays(n, ids[0..]);
 
-        return vao_id;
+        return ids;
     }
 
-    fn vbo() [1]c_uint {
-        var vbo_id: [1]c_uint = undefined;
-        gl.GenBuffers(1, vbo_id[0..]);
+    fn vbo(n: comptime_int) [n]c_uint {
+        var ids: [n]c_uint = undefined;
+        gl.GenBuffers(n, ids[0..]);
 
-        return vbo_id;
+        return ids;
     }
 
     fn vidTex(width: c_int, height: c_int) [1]c_uint {
