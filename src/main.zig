@@ -163,31 +163,29 @@ pub fn main() !void {
             continue;
         };
 
-        _ = audio_start_timestamp;
+        {
+            const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
+            const pt_in_seconds = @as(f64, @floatFromInt(frame.pts)) * time_base;
 
-        // {
-        //     const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
-        //     const pt_in_seconds = @as(f64, @floatFromInt(frame.pts)) * time_base;
+            const bytes_per_sec: f64 = @floatFromInt(aud_codec_ctx.sample_rate * aud_codec_ctx.ch_layout.nb_channels * c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT));
+            const hz: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
 
-        //     const bytes_per_sec: f64 = @floatFromInt(aud_codec_ctx.sample_rate * aud_codec_ctx.ch_layout.nb_channels * c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT));
-        //     const hz: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
+            const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamAvailable(sdl_stream.inner));
 
-        //     const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamAvailable(sdl_stream.inner));
+            while (true) {
+                const elapsed_time: f64 = @as(f64, @floatFromInt((c.SDL_GetPerformanceCounter() - audio_start_timestamp))) / hz;
+                const actual_time = elapsed_time - (queued / bytes_per_sec);
 
-        //     while (true) {
-        //         const elapsed_time: f64 = -10 + @as(f64, @floatFromInt((c.SDL_GetPerformanceCounter() - audio_start_timestamp))) / hz;
-        //         const actual_time = elapsed_time - (queued / bytes_per_sec);
+                log.debug("video_time: {d:.5}", .{pt_in_seconds});
+                log.debug("audio_time: {d:.5}", .{actual_time});
 
-        //         log.debug("video_time: {d:.5}", .{pt_in_seconds});
-        //         log.debug("audio_time: {d:.5}", .{actual_time});
+                log.debug("elapsed_time :{d:.5}", .{elapsed_time});
+                log.debug("queued_time: {d:.5}\n", .{queued / bytes_per_sec});
 
-        //         log.debug("elapsed_time :{d:.5}", .{elapsed_time});
-        //         log.debug("queued_time: {d:.5}\n", .{queued / bytes_per_sec});
-
-        //         // const distance = @abs(pt_in_seconds - elapsed_time);
-        //         // if (distance < std.math.floatEps(f64) or pt_in_seconds <= elapsed_time) break;
-        //     }
-        // }
+                const distance = @abs(pt_in_seconds - elapsed_time);
+                if (distance < std.math.floatEps(f64) or pt_in_seconds <= elapsed_time) break;
+            }
+        }
 
         // video_sync: {
         //     const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
