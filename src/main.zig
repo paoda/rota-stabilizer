@@ -38,7 +38,10 @@ pub fn main() !void {
     const vid_codec_ctx = vid_bundle.codec_ctx orelse return error.out_of_memory;
     const aud_codec_ctx = aud_bundle.codec_ctx orelse return error.out_of_memory;
 
-    const ui = try createSdlWindow(vid_codec_ctx.height, vid_codec_ctx.width);
+    const vid_width: u32 = @intCast(vid_codec_ctx.width);
+    const vid_height: u32 = @intCast(vid_codec_ctx.height);
+
+    const ui = try createSdlWindow(vid_width, vid_height);
     defer ui.deinit();
 
     _ = c.SDL_GL_SetSwapInterval(0);
@@ -81,10 +84,27 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(1);
     }
 
-    // TODO: Can I calculate these values or something?
+    const aspect = @as(f32, @floatFromInt(vid_width)) / @as(f32, @floatFromInt(vid_height));
+    const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
+    const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]); // factor allows for ration w/out clipping
 
-    const radius = 0.749; // TODO: come back later and see if off-by-one looks better still
-    const ring_vertices = try ring(allocator, radius - 0.015, radius, 0x400);
+    {
+        const gcd = std.math.gcd(vid_width, vid_height);
+        log.debug("Resolution: {}x{}", .{ vid_width, vid_height });
+        log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ vid_width / gcd, vid_height / gcd, aspect });
+    }
+
+    // https://github.com/Lawrenceeeeeeee/python_rotaeno_stabilizer/blob/6e6504f5e3867404c66d94c5752daab5936eedc2/python_rotaeno_stabilizer.py#L253-L258
+    const magic_aspect_ratio = 1.7763157895;
+    const magic_radius_scale = 1.570;
+    const magic_thickness = 0.02;
+    const rota_height = if (aspect >= magic_aspect_ratio) ratio[1] else ratio[0] / magic_aspect_ratio;
+
+    const radius = magic_radius_scale * rota_height;
+    const radius_thickness = rota_height * magic_thickness;
+    const inner_radius = @max(radius - radius_thickness, 0.0);
+
+    const ring_vertices = try ring(allocator, inner_radius, radius, 0x400);
     defer ring_vertices.deinit();
 
     {
@@ -99,7 +119,7 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(0);
     }
 
-    var tex_id = opengl_impl.vidTex(vid_codec_ctx.width, vid_codec_ctx.height);
+    var tex_id = opengl_impl.vidTex(@intCast(vid_width), @intCast(vid_height));
     defer gl.DeleteTextures(1, tex_id[0..]);
 
     const tex_prog = try opengl_impl.program("shader/texture.vert", "shader/texture.frag");
@@ -175,12 +195,13 @@ pub fn main() !void {
             while (true) {
                 const elapsed_time: f64 = @as(f64, @floatFromInt((c.SDL_GetPerformanceCounter() - audio_start_timestamp))) / hz;
                 const actual_time = elapsed_time - (queued / bytes_per_sec);
+                _ = actual_time;
 
-                log.debug("video_time: {d:.5}", .{pt_in_seconds});
-                log.debug("audio_time: {d:.5}", .{actual_time});
+                // log.debug("video_time: {d:.5}", .{pt_in_seconds});
+                // log.debug("audio_time: {d:.5}", .{actual_time});
 
-                log.debug("elapsed_time :{d:.5}", .{elapsed_time});
-                log.debug("queued_time: {d:.5}\n", .{queued / bytes_per_sec});
+                // log.debug("elapsed_time :{d:.5}", .{elapsed_time});
+                // log.debug("queued_time: {d:.5}\n", .{queued / bytes_per_sec});
 
                 const distance = @abs(pt_in_seconds - elapsed_time);
                 if (distance < std.math.floatEps(f64) or pt_in_seconds <= elapsed_time) break;
@@ -201,11 +222,6 @@ pub fn main() !void {
         //         std.atomic.spinLoopHint(); // TODO: less resource intensive
         //     }
         // }
-
-        const aspect = @as(f32, @floatFromInt(frame.width)) / @as(f32, @floatFromInt(frame.height));
-        const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
-        // const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]); // factor allows for ration w/out clipping
-        const scale = 1.0;
 
         {
             gl.UseProgram(ring_prog);
@@ -652,9 +668,9 @@ const Ui = struct {
     }
 };
 
-fn createSdlWindow(height: c_int, width: c_int) !Ui {
+fn createSdlWindow(width: u32, height: u32) !Ui {
     c.SDL_SetMainReady();
-    try errify(c.SDL_Init(c.SDL_INIT_AUDIO | c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO));
+    try errify(c.SDL_Init(c.SDL_INIT_AUDIO | c.SDL_INIT_VIDEO));
 
     try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", "0.1.0", "moe.paoda.rota-stabilizer"));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));
@@ -662,7 +678,7 @@ fn createSdlWindow(height: c_int, width: c_int) !Ui {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
 
-    const size = @max(width, height) >> 1;
+    const size: c_int = @intCast(@max(width, height) / 2);
 
     const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", size, size, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
     errdefer c.SDL_DestroyWindow(window);
