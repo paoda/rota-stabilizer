@@ -15,6 +15,8 @@ pub const c = @cImport({
     @cInclude("libswscale/swscale.h");
     @cInclude("libswresample/swresample.h");
     @cInclude("libavutil/imgutils.h");
+
+    @cInclude("stb_image_write.h");
 });
 
 pub inline fn libavError(value: c_int) error{ffmpeg_error}!c_int {

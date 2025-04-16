@@ -104,6 +104,8 @@ pub fn main() !void {
     const radius_thickness = rota_height * magic_thickness;
     const inner_radius = @max(radius - radius_thickness, 0.0);
 
+    log.debug("inner_radius: {d:.5}", .{inner_radius});
+
     const ring_vertices = try ring(allocator, inner_radius, radius, 0x400);
     defer ring_vertices.deinit();
 
@@ -153,16 +155,25 @@ pub fn main() !void {
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
 
-        while (c.SDL_PollEvent(&event)) {
-            switch (event.type) {
-                c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
-                else => {},
-            }
-        }
-
         // Now do your regular OpenGL render pass.
         var w: c_int, var h: c_int = .{ undefined, undefined };
         try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
+
+        while (c.SDL_PollEvent(&event)) {
+            switch (event.type) {
+                c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
+                c.SDL_EVENT_KEY_DOWN => {
+                    const buf = try allocator.alloc(u8, @intCast(w * h * @sizeOf(u8) * 4));
+                    defer allocator.free(buf);
+
+                    gl.ReadPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf.ptr);
+                    _ = c.stbi_write_png("out.png", w, h, 4, buf.ptr, w * 4);
+
+                    should_quit.store(true, .monotonic);
+                },
+                else => {},
+            }
+        }
 
         gl.Viewport(0, 0, w, h);
 
@@ -264,10 +275,13 @@ pub fn main() !void {
 
             const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
 
+            gl.Uniform1f(gl.GetUniformLocation(tex_prog, "u_radius"), inner_radius);
             gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_aspect"), ratio[0], ratio[1]);
             gl.Uniform1f(gl.GetUniformLocation(tex_prog, "u_scale"), scale);
-            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_rotation"), @sin(rad), @cos(rad));
             gl.Uniform1i(gl.GetUniformLocation(tex_prog, "u_screen"), 0);
+
+            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_viewport"), @floatFromInt(w), @floatFromInt(h));
+            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_rotation"), @sin(rad), @cos(rad));
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
@@ -677,6 +691,8 @@ fn createSdlWindow(width: u32, height: u32) !Ui {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, gl.info.version_minor));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
+    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLEBUFFERS, 1));
+    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLESAMPLES, 16));
 
     const size: c_int = @intCast(@max(width, height) / 2);
 

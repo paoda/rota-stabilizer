@@ -43,6 +43,10 @@ pub fn build(b: *std.Build) !void {
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize, .preferred_link_mode = .static });
     lib_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
+    // tmp: stb_image_write
+    lib_mod.addIncludePath(b.path("lib/stb_image_write/include"));
+    lib_mod.addCSourceFile(.{ .file = b.path("lib/stb_image_write/src/stb_image_write.c") });
+
     switch (target.result.os.tag) {
         .windows => {
             const ffmpeg = b.lazyDependency("ffmpeg", .{}) orelse return error.ffmpeg_missing;

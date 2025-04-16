@@ -7,3 +7,6 @@ zen_workaround.py
 
 # Testing
 **/*.mp4
+**/*.mov
+**/*.png
+**/*.ppm
