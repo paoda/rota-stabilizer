@@ -130,6 +130,9 @@ pub fn main() !void {
     const ring_prog = try opengl_impl.program("shader/ring.vert", "shader/ring.frag");
     defer gl.DeleteProgram(ring_prog);
 
+    const bg_prog = try opengl_impl.program("shader/bg.vert", "shader/bg.frag");
+    defer gl.DeleteProgram(ring_prog);
+
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x40);
     defer queue.deinit(allocator);
@@ -233,6 +236,48 @@ pub fn main() !void {
         //         std.atomic.spinLoopHint(); // TODO: less resource intensive
         //     }
         // }
+
+        {
+            gl.UseProgram(bg_prog);
+            defer gl.UseProgram(0);
+
+            gl.BindVertexArray(vao_ids[0]);
+            defer gl.BindVertexArray(0);
+
+            gl.ActiveTexture(gl.TEXTURE0);
+            defer gl.ActiveTexture(0);
+
+            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
+            defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+            gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
+
+            gl.TexSubImage2D(
+                gl.TEXTURE_2D,
+                0,
+                0,
+                0,
+                frame.width,
+                frame.height,
+                gl.RGB, // match the format of frame data
+                gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
+                frame.data[0][0..],
+            );
+
+            const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+
+            // TODO: make sure this is minimum size
+            const min_thing = (1.0 / @min(ratio[0], ratio[1])) * (@abs(@cos(std.math.pi / 4.0)) + @abs(@sin(std.math.pi / 4.0)));
+
+            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_scale"), 1, gl.FALSE, &[_]f32{ min_thing, 0, 0, min_thing });
+            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_aspect"), 1, gl.FALSE, &[_]f32{ ratio[0], 0, 0, ratio[1] });
+            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_rotation"), 1, gl.FALSE, &[_]f32{ @cos(rad), -@sin(rad), @sin(rad), @cos(rad) });
+            gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_screen"), 0);
+
+            gl.Uniform2f(gl.GetUniformLocation(bg_prog, "u_dimension"), 1.0 / @as(f32, @floatFromInt(vid_width)), 1.0 / @as(f32, @floatFromInt(vid_height)));
+
+            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
 
         {
             gl.UseProgram(ring_prog);
