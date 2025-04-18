@@ -62,11 +62,14 @@ pub fn main() !void {
     // zig fmt: on
 
     // -- opengl --
-    var vao_ids = opengl_impl.vao(2);
-    defer gl.DeleteVertexArrays(2, vao_ids[0..]);
+    gl.Enable(gl.BLEND);
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    var vbo_ids = opengl_impl.vbo(2);
-    defer gl.DeleteBuffers(2, vbo_ids[0..]);
+    var vao_ids = opengl_impl.vao(3);
+    defer gl.DeleteVertexArrays(3, vao_ids[0..]);
+
+    var vbo_ids = opengl_impl.vbo(3);
+    defer gl.DeleteBuffers(3, vbo_ids[0..]);
 
     {
         gl.BindVertexArray(vao_ids[0]);
@@ -121,6 +124,23 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(0);
     }
 
+    // TODO: by messing with stride I think there's a way to combine the two ArrayLists
+    // TODO: make the radius of the puck a runtime thing (scaling matrix + uniform)
+    const circle_vertices = try circle(allocator, radius * 1.05, 0x400);
+    defer circle_vertices.deinit();
+
+    {
+        gl.BindVertexArray(vao_ids[2]);
+        defer gl.BindVertexArray(0);
+
+        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_ids[2]);
+        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(circle_vertices.items.len * @sizeOf(f32)), circle_vertices.items[0..].ptr, gl.STATIC_DRAW);
+        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
+        gl.EnableVertexAttribArray(0);
+    }
+
     var tex_id = opengl_impl.vidTex(@intCast(vid_width), @intCast(vid_height));
     defer gl.DeleteTextures(1, tex_id[0..]);
 
@@ -128,6 +148,9 @@ pub fn main() !void {
     defer gl.DeleteProgram(tex_prog);
 
     const ring_prog = try opengl_impl.program("shader/ring.vert", "shader/ring.frag");
+    defer gl.DeleteProgram(ring_prog);
+
+    const circle_prog = try opengl_impl.program("shader/ring.vert", "shader/circle.frag");
     defer gl.DeleteProgram(ring_prog);
 
     const bg_prog = try opengl_impl.program("shader/bg.vert", "shader/bg.frag");
@@ -272,22 +295,28 @@ pub fn main() !void {
             gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_scale"), 1, gl.FALSE, &[_]f32{ min_thing, 0, 0, min_thing });
             gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_aspect"), 1, gl.FALSE, &[_]f32{ ratio[0], 0, 0, ratio[1] });
             gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_rotation"), 1, gl.FALSE, &[_]f32{ @cos(rad), -@sin(rad), @sin(rad), @cos(rad) });
-            gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_screen"), 0);
-
             gl.Uniform2f(gl.GetUniformLocation(bg_prog, "u_dimension"), 1.0 / @as(f32, @floatFromInt(vid_width)), 1.0 / @as(f32, @floatFromInt(vid_height)));
+            gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_screen"), 0);
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
 
         {
-            gl.UseProgram(ring_prog);
+            // Draw Transparent Puck
+            gl.UseProgram(circle_prog);
             defer gl.UseProgram(0);
 
-            gl.BindVertexArray(vao_ids[1]);
+            gl.BindVertexArray(vao_ids[2]);
             defer gl.BindVertexArray(0);
 
-            gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_scale"), scale);
+            gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_scale"), scale);
+            gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(ring_vertices.items.len));
 
+            // Draw Ring (matches ring in gameplay)
+            gl.UseProgram(ring_prog);
+            gl.BindVertexArray(vao_ids[1]);
+
+            gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_scale"), scale);
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(ring_vertices.items.len));
         }
 
@@ -320,12 +349,12 @@ pub fn main() !void {
 
             const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
 
-            gl.Uniform1f(gl.GetUniformLocation(tex_prog, "u_radius"), inner_radius);
+            // gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_scale"), 1, gl.FALSE, &[_]f32{ scale, 0, 0, scale });
+            // gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_aspect"), 1, gl.FALSE, &[_]f32{ ratio[0], 0, 0, ratio[1] });
+            // gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_rotation"), 1, gl.FALSE, &[_]f32{ @cos(rad), -@sin(rad), @sin(rad), @cos(rad) });
             gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_aspect"), ratio[0], ratio[1]);
             gl.Uniform1f(gl.GetUniformLocation(tex_prog, "u_scale"), scale);
             gl.Uniform1i(gl.GetUniformLocation(tex_prog, "u_screen"), 0);
-
-            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_viewport"), @floatFromInt(w), @floatFromInt(h));
             gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_rotation"), @sin(rad), @cos(rad));
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -648,6 +677,27 @@ inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(valu
     };
 }
 
+fn circle(allocator: std.mem.Allocator, radius: f32, len: usize) !std.ArrayList(f32) {
+    var list: std.ArrayList(f32) = .init(allocator);
+    errdefer list.deinit();
+
+    const _len: f32 = @floatFromInt(len);
+
+    try list.appendSlice(&.{ 0.0, 0.0 });
+
+    for (0..len) |i| {
+        const _angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / _len;
+        const x = @cos(_angle);
+        const y = @sin(_angle);
+
+        try list.append(x * radius);
+        try list.append(y * radius);
+    }
+
+    try list.appendSlice(list.items[2..][0..2]); // complete the loop
+    return list;
+}
+
 fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len: usize) !std.ArrayList(f32) {
     var list = std.ArrayList(f32).init(allocator);
     errdefer list.deinit();
@@ -737,7 +787,7 @@ fn createSdlWindow(width: u32, height: u32) !Ui {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLEBUFFERS, 1));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLESAMPLES, 16));
+    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLESAMPLES, 4));
 
     const size: c_int = @intCast(@max(width, height) / 2);
 
