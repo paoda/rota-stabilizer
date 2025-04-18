@@ -65,13 +65,13 @@ pub fn main() !void {
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    var vao_ids = opengl_impl.vao(3);
+    var vao_ids = opengl_impl.vao(4);
     defer gl.DeleteVertexArrays(3, vao_ids[0..]);
 
     var vbo_ids = opengl_impl.vbo(3);
     defer gl.DeleteBuffers(3, vbo_ids[0..]);
 
-    {
+    { // Setup for FFMPEG Texture
         gl.BindVertexArray(vao_ids[0]);
         defer gl.BindVertexArray(0);
 
@@ -109,13 +109,12 @@ pub fn main() !void {
 
     const u_scale = Mat2.scale(scale);
     const u_aspect = Mat2.scaleXy(ratio[0], ratio[1]);
-
     const u_inv_scale = Mat2.scale((1.0 / @min(ratio[0], ratio[1])) * std.math.sqrt2); // |cos(π/4)| + |sin(π/4)| == sqrt(2)
 
     const ring_vertices = try ring(allocator, inner_radius, radius, 0x400);
     defer ring_vertices.deinit();
 
-    {
+    { // Setup for Ring
         gl.BindVertexArray(vao_ids[1]);
         defer gl.BindVertexArray(0);
 
@@ -132,7 +131,7 @@ pub fn main() !void {
     const circle_vertices = try circle(allocator, radius * 1.05, 0x400);
     defer circle_vertices.deinit();
 
-    {
+    { // Setup for Circle
         gl.BindVertexArray(vao_ids[2]);
         defer gl.BindVertexArray(0);
 
@@ -143,6 +142,9 @@ pub fn main() !void {
         gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
         gl.EnableVertexAttribArray(0);
     }
+
+    const blurred = opengl_impl.setupBlur(@intCast(vid_width), @intCast(vid_height));
+    defer for (blurred) |b| b.deinit();
 
     var tex_id = opengl_impl.vidTex(@intCast(vid_width), @intCast(vid_height));
     defer gl.DeleteTextures(1, tex_id[0..]);
@@ -158,6 +160,9 @@ pub fn main() !void {
 
     const circle_prog = try opengl_impl.program("shader/ring.vert", "shader/circle.frag");
     defer gl.DeleteProgram(circle_prog);
+
+    const blur_prog = try opengl_impl.program("shader/blur.vert", "shader/blur.frag");
+    defer gl.DeleteProgram(blur_prog);
 
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x40);
@@ -184,30 +189,21 @@ pub fn main() !void {
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
 
-        // Now do your regular OpenGL render pass.
-        var w: c_int, var h: c_int = .{ undefined, undefined };
-        try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
-
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
                 c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
                 c.SDL_EVENT_KEY_DOWN => {
-                    const buf = try allocator.alloc(u8, @intCast(w * h * @sizeOf(u8) * 4));
-                    defer allocator.free(buf);
+                    // const buf = try allocator.alloc(u8, @intCast(w * h * @sizeOf(u8) * 4));
+                    // defer allocator.free(buf);
 
-                    gl.ReadPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf.ptr);
-                    _ = c.stbi_write_png("out.png", w, h, 4, buf.ptr, w * 4);
+                    // gl.ReadPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf.ptr);
+                    // _ = c.stbi_write_png("out.png", w, h, 4, buf.ptr, w * 4);
 
-                    should_quit.store(true, .monotonic);
+                    // should_quit.store(true, .monotonic);
                 },
                 else => {},
             }
         }
-
-        gl.Viewport(0, 0, w, h);
-
-        gl.ClearColor(0, 0, 0, 0);
-        gl.Clear(gl.COLOR_BUFFER_BIT);
 
         // blocking: while (true) {
         //     current_frame = queue.pop() orelse continue :blocking;
@@ -263,18 +259,16 @@ pub fn main() !void {
         //     }
         // }
 
-        const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+        var w: c_int, var h: c_int = .{ undefined, undefined };
+        try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
 
-        {
-            gl.UseProgram(bg_prog);
-            defer gl.UseProgram(0);
+        gl.Viewport(0, 0, w, h);
 
-            gl.BindVertexArray(vao_ids[0]);
-            defer gl.BindVertexArray(0);
+        gl.ClearColor(0, 0, 0, 0);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
 
+        { // Update the FFMPEG Texture
             gl.ActiveTexture(gl.TEXTURE0);
-            defer gl.ActiveTexture(0);
-
             gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
             defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
@@ -291,13 +285,28 @@ pub fn main() !void {
                 gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
                 frame.data[0][0..],
             );
+        }
+
+        const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+
+        {
+            blur(blurred, blur_prog, vao_ids[3], tex_id[0], vid_width, vid_height);
+
+            gl.UseProgram(bg_prog);
+            defer gl.UseProgram(0);
+
+            gl.BindVertexArray(vao_ids[0]);
+            defer gl.BindVertexArray(0);
+
+            gl.ActiveTexture(gl.TEXTURE0);
+
+            gl.BindTexture(gl.TEXTURE_2D, blurred[0].tex);
+            defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
             const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
             const u_transform = u_rotation.mul(u_inv_scale).mul(u_aspect);
 
             gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
-
-            gl.Uniform2f(gl.GetUniformLocation(bg_prog, "u_dimension"), 1.0 / @as(f32, @floatFromInt(vid_width)), 1.0 / @as(f32, @floatFromInt(vid_height)));
             gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_screen"), 0);
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -330,24 +339,9 @@ pub fn main() !void {
             defer gl.BindVertexArray(0);
 
             gl.ActiveTexture(gl.TEXTURE0);
-            defer gl.ActiveTexture(0);
 
             gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
             defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-            gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
-
-            gl.TexSubImage2D(
-                gl.TEXTURE_2D,
-                0,
-                0,
-                0,
-                frame.width,
-                frame.height,
-                gl.RGB, // match the format of frame data
-                gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
-                frame.data[0][0..],
-            );
 
             const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
             const u_transform = u_rotation.mul(u_scale).mul(u_aspect);
@@ -565,6 +559,63 @@ fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]
     return sum;
 }
 
+const Blur = struct {
+    fbo: c_uint,
+    tex: c_uint,
+
+    fn deinit(self: @This()) void {
+        var fbo_id: [1]c_uint = .{self.fbo};
+        gl.DeleteFramebuffers(1, fbo_id[0..]);
+
+        var tex_id: [1]c_uint = .{self.tex};
+        gl.DeleteTextures(1, tex_id[0..]);
+    }
+};
+
+fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: u32, height: u32) void {
+    const passes = 10;
+    std.debug.assert(passes % 2 == 0);
+
+    const view_cache: *[2]c_int = blk: {
+        var buf: [4]c_int = undefined;
+        gl.GetIntegerv(gl.VIEWPORT, &buf);
+
+        break :blk buf[2..4];
+    };
+
+    gl.Viewport(0, 0, @intCast(width), @intCast(height));
+    defer gl.Viewport(0, 0, view_cache[0], view_cache[1]);
+
+    gl.UseProgram(prog);
+    defer gl.UseProgram(0);
+
+    gl.Uniform2f(gl.GetUniformLocation(prog, "u_resolution"), @floatFromInt(width), @floatFromInt(height));
+    gl.Uniform1i(gl.GetUniformLocation(prog, "u_screen"), 0);
+
+    const horiz_loc = gl.GetUniformLocation(prog, "u_horizontal");
+    for (0..passes) |i| {
+        const current = b[i % 2];
+        const other = b[1 - i % 2];
+
+        gl.BindFramebuffer(gl.FRAMEBUFFER, current.fbo);
+        gl.ActiveTexture(gl.TEXTURE0);
+
+        gl.Uniform1i(horiz_loc, @intFromBool(i % 2 == 0));
+
+        switch (i) {
+            0 => gl.BindTexture(gl.TEXTURE_2D, src_tex),
+            else => gl.BindTexture(gl.TEXTURE_2D, other.tex),
+        }
+
+        gl.BindVertexArray(src_vao);
+        gl.DrawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+    defer gl.BindTexture(gl.TEXTURE_2D, 0);
+    defer gl.BindVertexArray(0);
+}
+
 const opengl_impl = struct {
     fn vao(n: comptime_int) [n]c_uint {
         var ids: [n]c_uint = undefined;
@@ -578,6 +629,47 @@ const opengl_impl = struct {
         gl.GenBuffers(n, ids[0..]);
 
         return ids;
+    }
+
+    fn setupBlur(width: c_int, height: c_int) [2]Blur {
+        var fbo_ids: [2]c_uint = undefined;
+        gl.GenFramebuffers(2, &fbo_ids);
+
+        // TODO: do we need these? what's going on
+        var tex_ids: [2]c_uint = undefined;
+        gl.GenTextures(2, &tex_ids);
+
+        for (fbo_ids, tex_ids) |fbo, tex| {
+            gl.BindFramebuffer(gl.FRAMEBUFFER, fbo);
+            defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+
+            gl.BindTexture(gl.TEXTURE_2D, tex);
+            defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+            gl.TexImage2D(
+                gl.TEXTURE_2D,
+                0,
+                gl.RGBA,
+                width,
+                height,
+                0,
+                gl.RGB,
+                gl.UNSIGNED_BYTE,
+                null,
+            );
+
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+            gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+            const ret = gl.CheckFramebufferStatus(gl.FRAMEBUFFER);
+            if (ret != gl.FRAMEBUFFER_COMPLETE) @panic("FIXME: Framebuffer incomplete");
+        }
+
+        return [_]Blur{ .{ .fbo = fbo_ids[0], .tex = tex_ids[0] }, .{ .fbo = fbo_ids[1], .tex = tex_ids[1] } };
     }
 
     fn vidTex(width: c_int, height: c_int) [1]c_uint {
@@ -851,10 +943,10 @@ const Mat2 = struct {
 
         return .{
             .inner = .{
-                l[0] * r[0] + l[2] * r[1], // result[0,0]
-                l[1] * r[0] + l[3] * r[1], // result[1,0]
-                l[0] * r[2] + l[2] * r[3], // result[0,1]
-                l[1] * r[2] + l[3] * r[3], // result[1,1]
+                l[0] * r[0] + l[2] * r[1],
+                l[1] * r[0] + l[3] * r[1],
+                l[0] * r[2] + l[2] * r[3],
+                l[1] * r[2] + l[3] * r[3],
             },
         };
     }
