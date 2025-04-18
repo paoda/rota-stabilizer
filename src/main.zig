@@ -107,7 +107,10 @@ pub fn main() !void {
     const radius_thickness = rota_height * magic_thickness;
     const inner_radius = @max(radius - radius_thickness, 0.0);
 
-    log.debug("inner_radius: {d:.5}", .{inner_radius});
+    const u_scale = Mat2.scale(scale);
+    const u_aspect = Mat2.scaleXy(ratio[0], ratio[1]);
+
+    const u_inv_scale = Mat2.scale((1.0 / @min(ratio[0], ratio[1])) * std.math.sqrt2); // |cos(π/4)| + |sin(π/4)| == sqrt(2)
 
     const ring_vertices = try ring(allocator, inner_radius, radius, 0x400);
     defer ring_vertices.deinit();
@@ -147,14 +150,14 @@ pub fn main() !void {
     const tex_prog = try opengl_impl.program("shader/texture.vert", "shader/texture.frag");
     defer gl.DeleteProgram(tex_prog);
 
+    const bg_prog = try opengl_impl.program("shader/texture.vert", "shader/bg.frag");
+    defer gl.DeleteProgram(bg_prog);
+
     const ring_prog = try opengl_impl.program("shader/ring.vert", "shader/ring.frag");
     defer gl.DeleteProgram(ring_prog);
 
     const circle_prog = try opengl_impl.program("shader/ring.vert", "shader/circle.frag");
-    defer gl.DeleteProgram(ring_prog);
-
-    const bg_prog = try opengl_impl.program("shader/bg.vert", "shader/bg.frag");
-    defer gl.DeleteProgram(ring_prog);
+    defer gl.DeleteProgram(circle_prog);
 
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x40);
@@ -260,6 +263,8 @@ pub fn main() !void {
         //     }
         // }
 
+        const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+
         {
             gl.UseProgram(bg_prog);
             defer gl.UseProgram(0);
@@ -287,14 +292,11 @@ pub fn main() !void {
                 frame.data[0][0..],
             );
 
-            const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+            const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+            const u_transform = u_rotation.mul(u_inv_scale).mul(u_aspect);
 
-            // TODO: make sure this is minimum size
-            const min_thing = (1.0 / @min(ratio[0], ratio[1])) * (@abs(@cos(std.math.pi / 4.0)) + @abs(@sin(std.math.pi / 4.0)));
+            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
 
-            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_scale"), 1, gl.FALSE, &[_]f32{ min_thing, 0, 0, min_thing });
-            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_aspect"), 1, gl.FALSE, &[_]f32{ ratio[0], 0, 0, ratio[1] });
-            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_rotation"), 1, gl.FALSE, &[_]f32{ @cos(rad), -@sin(rad), @sin(rad), @cos(rad) });
             gl.Uniform2f(gl.GetUniformLocation(bg_prog, "u_dimension"), 1.0 / @as(f32, @floatFromInt(vid_width)), 1.0 / @as(f32, @floatFromInt(vid_height)));
             gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_screen"), 0);
 
@@ -310,7 +312,7 @@ pub fn main() !void {
             defer gl.BindVertexArray(0);
 
             gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_scale"), scale);
-            gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(ring_vertices.items.len));
+            gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(circle_vertices.items.len));
 
             // Draw Ring (matches ring in gameplay)
             gl.UseProgram(ring_prog);
@@ -347,15 +349,11 @@ pub fn main() !void {
                 frame.data[0][0..],
             );
 
-            const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+            const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+            const u_transform = u_rotation.mul(u_scale).mul(u_aspect);
 
-            // gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_scale"), 1, gl.FALSE, &[_]f32{ scale, 0, 0, scale });
-            // gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_aspect"), 1, gl.FALSE, &[_]f32{ ratio[0], 0, 0, ratio[1] });
-            // gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_rotation"), 1, gl.FALSE, &[_]f32{ @cos(rad), -@sin(rad), @sin(rad), @cos(rad) });
-            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_aspect"), ratio[0], ratio[1]);
-            gl.Uniform1f(gl.GetUniformLocation(tex_prog, "u_scale"), scale);
+            gl.UniformMatrix2fv(gl.GetUniformLocation(tex_prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
             gl.Uniform1i(gl.GetUniformLocation(tex_prog, "u_screen"), 0);
-            gl.Uniform2f(gl.GetUniformLocation(tex_prog, "u_rotation"), @sin(rad), @cos(rad));
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
@@ -832,4 +830,36 @@ fn createSdlAudioStream(ctx: *const c.AVCodecContext) !SdlAudioStream {
     errdefer c.SDL_DestroyAudioStream(stream);
 
     return .{ .inner = stream };
+}
+
+const Mat2 = struct {
+    inner: [4]f32,
+
+    const identity: @This() = .{ .inner = .{ 1, 0, 0, 1 } };
+
+    fn scale(s: f32) @This() {
+        return .{ .inner = .{ s, 0, 0, s } };
+    }
+
+    fn scaleXy(sx: f32, sy: f32) @This() {
+        return .{ .inner = .{ sx, 0, 0, sy } };
+    }
+
+    fn mul(left: @This(), right: @This()) @This() {
+        const l = left.inner;
+        const r = right.inner;
+
+        return .{
+            .inner = .{
+                l[0] * r[0] + l[2] * r[1], // result[0,0]
+                l[1] * r[0] + l[3] * r[1], // result[1,0]
+                l[0] * r[2] + l[2] * r[3], // result[0,1]
+                l[1] * r[2] + l[3] * r[3], // result[1,1]
+            },
+        };
+    }
+};
+
+fn mat2(m00: f32, m01: f32, m10: f32, m11: f32) Mat2 {
+    return .{ .inner = .{ m00, m01, m10, m11 } };
 }
