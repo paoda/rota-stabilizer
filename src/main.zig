@@ -143,7 +143,7 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(0);
     }
 
-    const blurred = opengl_impl.setupBlur(@intCast(vid_width), @intCast(vid_height));
+    const blurred = opengl_impl.setupBlur(@intCast(vid_width / 2), @intCast(vid_height / 2));
     defer for (blurred) |b| b.deinit();
 
     var tex_id = opengl_impl.vidTex(@intCast(vid_width), @intCast(vid_height));
@@ -290,7 +290,7 @@ pub fn main() !void {
         const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
 
         {
-            blur(blurred, blur_prog, vao_ids[3], tex_id[0], vid_width, vid_height);
+            blur(blurred, blur_prog, vao_ids[3], tex_id[0], vid_width / 2, vid_height / 2);
 
             gl.UseProgram(bg_prog);
             defer gl.UseProgram(0);
