@@ -17,6 +17,6 @@ void main() {
 		return;
 	}
 
-	frag_color = vec4(vec3(0.5), 0.7); // TODO: make alpha channel runtime available?
+	frag_color = vec4(vec3(1.0), 0.4); // TODO: make alpha channel runtime available?
 }
 
