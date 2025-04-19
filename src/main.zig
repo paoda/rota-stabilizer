@@ -3,6 +3,7 @@ const gl = @import("gl");
 
 const c = @import("librota").c;
 
+const sleep = @import("librota").sleep;
 const libavError = @import("librota").libavError;
 const FrameQueue = @import("librota").FrameQueue;
 
@@ -235,26 +236,15 @@ pub fn main() !void {
             const diff = pt_in_seconds - audio_time;
 
             if (diff < -threshold) {
-                // Frame is too old (more than 100ms behind audio)
-                log.debug("Skip late frame: v={d:.3} a={d:.3} diff={d:.3}", .{ pt_in_seconds, audio_time, diff });
-                break :skip; // go to new frame
+                break :skip;
+                //log.debug("frame skipped. v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
             }
 
-            // If we're ahead of audio, sleep until it's time to show this frame
             if (diff > threshold * 0.1) {
-                const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s);
-                std.time.sleep(@intFromFloat(wait_ns));
-
-                log.debug("Waited {d:.1}ms for frame: v={d:.3} a={d:.3}", .{ wait_ns / std.time.ns_per_ms, pt_in_seconds, audio_time });
+                const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s); // TODO: 1 second is way too long?
+                sleep(@intFromFloat(wait_ns));
+                // log.debug("frame wait: v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
             }
-
-            // while (true) {
-            //     const audio_time = audio_clock.seconds_passed();
-            //     const diff = pt_in_seconds - audio_time;
-
-            //     if (diff < -threshold) break :skip;
-            //     if (diff < threshold * 0.1) break;
-            // }
 
             try render(
                 frame,
@@ -599,13 +589,17 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
                     dst_frame.pkt_dts = src_frame.pkt_dts;
                     dst_frame.best_effort_timestamp = src_frame.best_effort_timestamp;
 
-                    blocking: while (true) {
+                    while (true) {
                         frame_queue.push(dst_frame) catch |e| {
-                            if (e == error.full) continue :blocking;
-                            std.debug.panic("error: {}", .{e});
+                            if (e == error.full) {
+                                std.Thread.sleep(5 * std.time.ns_per_ms);
+                                continue;
+                            }
+
+                            std.debug.panic("err: {}", .{e});
                         };
 
-                        break :blocking;
+                        break;
                     }
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
