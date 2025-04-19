@@ -300,14 +300,21 @@ pub fn main() !void {
 
             gl.ActiveTexture(gl.TEXTURE0);
 
-            gl.BindTexture(gl.TEXTURE_2D, blurred[0].tex);
+            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
             defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+            gl.ActiveTexture(gl.TEXTURE1);
+            gl.BindTexture(gl.TEXTURE_2D, blurred[0].tex);
 
             const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
             const u_transform = u_rotation.mul(u_inv_scale).mul(u_aspect);
 
             gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
             gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_screen"), 0);
+            gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_blurred"), 1);
+
+            gl.Uniform2f(gl.GetUniformLocation(bg_prog, "u_viewport"), @floatFromInt(w), @floatFromInt(h));
+            gl.Uniform1f(gl.GetUniformLocation(bg_prog, "u_radius"), scale * radius * 1.05);
 
             gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
