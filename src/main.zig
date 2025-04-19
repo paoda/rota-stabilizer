@@ -201,9 +201,6 @@ pub fn main() !void {
 
         gl.Viewport(0, 0, w, h);
 
-        gl.ClearColor(0, 0, 0, 0);
-        gl.Clear(gl.COLOR_BUFFER_BIT);
-
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
                 c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
@@ -225,43 +222,40 @@ pub fn main() !void {
         //     break :blocking;
         // }
 
-        const did_copy = try queue.pop(frame);
-
-        if (did_copy) skip: {
+        if (try queue.pop(frame)) skip: {
             defer did_render_once = true;
 
-            {
-                const threshold = 0.1;
+            const threshold = 0.1;
 
-                const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
-                const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
+            const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
+            const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
-                // Skip frames that are too old
-                const audio_time = audio_clock.seconds_passed();
-                const diff = pt_in_seconds - audio_time;
+            // Skip frames that are too old
+            const audio_time = audio_clock.seconds_passed();
+            const diff = pt_in_seconds - audio_time;
 
-                if (diff < -threshold) {
-                    // Frame is too old (more than 100ms behind audio)
-                    log.debug("Skip late frame: v={d:.3} a={d:.3} diff={d:.3}", .{ pt_in_seconds, audio_time, diff });
-                    break :skip; // go to new frame
-                }
-
-                // If we're ahead of audio, sleep until it's time to show this frame
-                if (diff > threshold * 0.1) {
-                    const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s);
-                    std.time.sleep(@intFromFloat(wait_ns));
-
-                    log.debug("Waited {d:.1}ms for frame: v={d:.3} a={d:.3}", .{ wait_ns / std.time.ns_per_ms, pt_in_seconds, audio_time });
-                }
-
-                // while (true) {
-                //     const audio_time = audio_clock.seconds_passed();
-                //     const diff = pt_in_seconds - audio_time;
-
-                //     if (diff < -threshold) break :skip;
-                //     if (diff < threshold * 0.1) break;
-                // }
+            if (diff < -threshold) {
+                // Frame is too old (more than 100ms behind audio)
+                log.debug("Skip late frame: v={d:.3} a={d:.3} diff={d:.3}", .{ pt_in_seconds, audio_time, diff });
+                break :skip; // go to new frame
             }
+
+            // If we're ahead of audio, sleep until it's time to show this frame
+            if (diff > threshold * 0.1) {
+                const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s);
+                std.time.sleep(@intFromFloat(wait_ns));
+
+                log.debug("Waited {d:.1}ms for frame: v={d:.3} a={d:.3}", .{ wait_ns / std.time.ns_per_ms, pt_in_seconds, audio_time });
+            }
+
+            // while (true) {
+            //     const audio_time = audio_clock.seconds_passed();
+            //     const diff = pt_in_seconds - audio_time;
+
+            //     if (diff < -threshold) break :skip;
+            //     if (diff < threshold * 0.1) break;
+            // }
+
             try render(
                 frame,
                 blurred,
@@ -323,6 +317,9 @@ fn render(
     circle_vertices_len: usize,
     ring_vertices_len: usize,
 ) !void {
+    gl.ClearColor(0, 0, 0, 0);
+    gl.Clear(gl.COLOR_BUFFER_BIT);
+
     { // Update the FFMPEG Texture
         gl.ActiveTexture(gl.TEXTURE0);
         gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
@@ -713,6 +710,13 @@ fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: u32, 
         break :blk buf[2..4];
     };
 
+    const fbo_cache: c_uint = blk: {
+        var buf: [1]c_int = undefined;
+        gl.GetIntegerv(gl.FRAMEBUFFER_BINDING, &buf);
+
+        break :blk @intCast(buf[0]);
+    };
+
     gl.Viewport(0, 0, @intCast(width), @intCast(height));
     defer gl.Viewport(0, 0, view_cache[0], view_cache[1]);
 
@@ -741,7 +745,7 @@ fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: u32, 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
 
-    defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+    defer gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_cache);
     defer gl.BindTexture(gl.TEXTURE_2D, 0);
     defer gl.BindVertexArray(0);
 }
