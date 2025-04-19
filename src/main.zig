@@ -49,7 +49,14 @@ pub fn main() !void {
     const sdl_stream = try createSdlAudioStream(aud_codec_ctx);
     defer sdl_stream.deinit();
 
-    const audio_start_timestamp = sdl_stream.play();
+    var audio_clock = AudioClock.init(
+        sdl_stream,
+        @intCast(aud_codec_ctx.sample_rate),
+        @intCast(aud_codec_ctx.ch_layout.nb_channels),
+        c.AV_SAMPLE_FMT_FLT,
+    );
+
+    // -- opengl --
 
     // zig fmt: off
     const vertices: [16]f32 = .{
@@ -61,31 +68,8 @@ pub fn main() !void {
     };
     // zig fmt: on
 
-    // -- opengl --
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-    var vao_ids = opengl_impl.vao(4);
-    defer gl.DeleteVertexArrays(3, vao_ids[0..]);
-
-    var vbo_ids = opengl_impl.vbo(3);
-    defer gl.DeleteBuffers(3, vbo_ids[0..]);
-
-    { // Setup for FFMPEG Texture
-        gl.BindVertexArray(vao_ids[0]);
-        defer gl.BindVertexArray(0);
-
-        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_ids[0]);
-        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-
-        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), vertices[0..].ptr, gl.STATIC_DRAW);
-
-        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 0);
-        gl.EnableVertexAttribArray(0);
-
-        gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 2 * @sizeOf(f32));
-        gl.EnableVertexAttribArray(1);
-    }
 
     const aspect = @as(f32, @floatFromInt(vid_width)) / @as(f32, @floatFromInt(vid_height));
     const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
@@ -114,37 +98,16 @@ pub fn main() !void {
     const ring_vertices = try ring(allocator, inner_radius, radius, 0x400);
     defer ring_vertices.deinit();
 
-    { // Setup for Ring
-        gl.BindVertexArray(vao_ids[1]);
-        defer gl.BindVertexArray(0);
-
-        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_ids[1]);
-        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(ring_vertices.items.len * @sizeOf(f32)), ring_vertices.items[0..].ptr, gl.STATIC_DRAW);
-        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
-        gl.EnableVertexAttribArray(0);
-    }
-
     // TODO: by messing with stride I think there's a way to combine the two ArrayLists
     // TODO: make the radius of the puck a runtime thing (scaling matrix + uniform)
     const circle_vertices = try circle(allocator, radius * 1.05, 0x400);
     defer circle_vertices.deinit();
 
-    { // Setup for Circle
-        gl.BindVertexArray(vao_ids[2]);
-        defer gl.BindVertexArray(0);
+    var vao_id = opengl_impl.vao(4);
+    defer gl.DeleteVertexArrays(3, vao_id[0..]);
 
-        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_ids[2]);
-        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(circle_vertices.items.len * @sizeOf(f32)), circle_vertices.items[0..].ptr, gl.STATIC_DRAW);
-        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
-        gl.EnableVertexAttribArray(0);
-    }
-
-    const blurred = opengl_impl.setupBlur(@intCast(vid_width / 2), @intCast(vid_height / 2));
-    defer for (blurred) |b| b.deinit();
+    var vbo_id = opengl_impl.vbo(3);
+    defer gl.DeleteBuffers(3, vbo_id[0..]);
 
     var tex_id = opengl_impl.vidTex(@intCast(vid_width), @intCast(vid_height));
     defer gl.DeleteTextures(1, tex_id[0..]);
@@ -164,30 +127,78 @@ pub fn main() !void {
     const blur_prog = try opengl_impl.program("shader/blur.vert", "shader/blur.frag");
     defer gl.DeleteProgram(blur_prog);
 
+    const prog_id: [5]c_uint = [_]c_uint{ tex_prog, ring_prog, circle_prog, bg_prog, blur_prog };
+
+    { // Setup for FFMPEG Texture
+        gl.BindVertexArray(vao_id[@intFromEnum(Id.texture)]);
+        defer gl.BindVertexArray(0);
+
+        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_id[@intFromEnum(Id.texture)]);
+        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+
+        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), vertices[0..].ptr, gl.STATIC_DRAW);
+
+        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 0);
+        gl.EnableVertexAttribArray(0);
+
+        gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 2 * @sizeOf(f32));
+        gl.EnableVertexAttribArray(1);
+    }
+
+    { // Setup for Ring
+        gl.BindVertexArray(vao_id[@intFromEnum(Id.ring)]);
+        defer gl.BindVertexArray(0);
+
+        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_id[@intFromEnum(Id.ring)]);
+        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(ring_vertices.items.len * @sizeOf(f32)), ring_vertices.items[0..].ptr, gl.STATIC_DRAW);
+        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
+        gl.EnableVertexAttribArray(0);
+    }
+
+    { // Setup for Circle
+        gl.BindVertexArray(vao_id[@intFromEnum(Id.circle)]);
+        defer gl.BindVertexArray(0);
+
+        gl.BindBuffer(gl.ARRAY_BUFFER, vbo_id[@intFromEnum(Id.circle)]);
+        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(circle_vertices.items.len * @sizeOf(f32)), circle_vertices.items[0..].ptr, gl.STATIC_DRAW);
+        gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
+        gl.EnableVertexAttribArray(0);
+    }
+
+    const blurred = opengl_impl.setupBlur(@intCast(vid_width / 2), @intCast(vid_height / 2));
+    defer for (blurred) |b| b.deinit();
+
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x40);
     defer queue.deinit(allocator);
 
     var should_quit: std.atomic.Value(bool) = .init(false);
 
-    const video_decode = try std.Thread.spawn(
-        .{},
-        decodeVideo,
-        .{ &queue, DecodeContext{ .bundle = vid_bundle, .fmt_ctx = vid_fmt_ctx.ptr(), .should_quit = &should_quit } },
-    );
+    const vid_decode: DecodeContext = .{ .bundle = vid_bundle, .fmt_ctx = vid_fmt_ctx.ptr(), .should_quit = &should_quit };
+    const aud_decode: DecodeContext = .{ .bundle = aud_bundle, .fmt_ctx = aud_fmt_ctx.ptr(), .should_quit = &should_quit };
+
+    const video_decode = try std.Thread.spawn(.{}, decodeVideo, .{ &queue, vid_decode });
     defer video_decode.join();
 
-    const audio_decode = try std.Thread.spawn(
-        .{},
-        decodeAudio,
-        .{ sdl_stream.inner, DecodeContext{ .bundle = aud_bundle, .fmt_ctx = aud_fmt_ctx.ptr(), .should_quit = &should_quit } },
-    );
+    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ sdl_stream.inner, &audio_clock.bytes_sent, aud_decode });
     defer audio_decode.join();
 
     var current_frame: ?*c.AVFrame = null;
 
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
+
+        var w: c_int, var h: c_int = .{ undefined, undefined };
+        try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
+
+        gl.Viewport(0, 0, w, h);
+
+        gl.ClearColor(0, 0, 0, 0);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
 
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
@@ -213,7 +224,7 @@ pub fn main() !void {
         if (queue.pop()) |frame| current_frame = frame;
 
         const frame = current_frame orelse {
-            log.debug("queue empty, repeated frame", .{});
+            log.debug("queue empty, no previous frame to render", .{});
 
             try errify(c.SDL_GL_SwapWindow(ui.window));
             continue;
@@ -222,129 +233,161 @@ pub fn main() !void {
         {
             const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
             const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
+            _ = pt_in_seconds;
 
-            const bytes_per_sec: f64 = @floatFromInt(aud_codec_ctx.sample_rate * aud_codec_ctx.ch_layout.nb_channels * c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT));
-            const hz: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
+            // while (true) {
+            //     const bytes_in_seconds = audio_clock.seconds_passed();
+            //     const diff = pt_in_seconds - bytes_in_seconds;
 
-            const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamAvailable(sdl_stream.inner));
+            //     log.debug("video_time: {d:.5}", .{pt_in_seconds});
+            //     log.debug("audio_time: {d:.5}", .{bytes_in_seconds});
+            //     log.debug("diff: {d:.5}\n", .{diff});
 
-            while (true) {
-                const elapsed_time: f64 = @as(f64, @floatFromInt((c.SDL_GetPerformanceCounter() - audio_start_timestamp))) / hz;
-                const actual_time = elapsed_time - (queued / bytes_per_sec);
-                _ = actual_time;
+            //     if (diff < -0.1) continue :ui_loop;
+            //     if (diff < 0.1) break;
 
-                // log.debug("video_time: {d:.5}", .{pt_in_seconds});
-                // log.debug("audio_time: {d:.5}", .{actual_time});
-
-                // log.debug("elapsed_time :{d:.5}", .{elapsed_time});
-                // log.debug("queued_time: {d:.5}\n", .{queued / bytes_per_sec});
-
-                const distance = @abs(pt_in_seconds - elapsed_time);
-                if (distance < std.math.floatEps(f64) or pt_in_seconds <= elapsed_time) break;
-            }
+            //     std.atomic.spinLoopHint();
+            // }
         }
 
-        var w: c_int, var h: c_int = .{ undefined, undefined };
-        try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
-
-        gl.Viewport(0, 0, w, h);
-
-        gl.ClearColor(0, 0, 0, 0);
-        gl.Clear(gl.COLOR_BUFFER_BIT);
-
-        { // Update the FFMPEG Texture
-            gl.ActiveTexture(gl.TEXTURE0);
-            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-            defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-            gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
-
-            gl.TexSubImage2D(
-                gl.TEXTURE_2D,
-                0,
-                0,
-                0,
-                frame.width,
-                frame.height,
-                gl.RGB, // match the format of frame data
-                gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
-                frame.data[0][0..],
-            );
-        }
-
-        const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
-
-        {
-            blur(blurred, blur_prog, vao_ids[3], tex_id[0], vid_width / 2, vid_height / 2);
-
-            gl.UseProgram(bg_prog);
-            defer gl.UseProgram(0);
-
-            gl.BindVertexArray(vao_ids[0]);
-            defer gl.BindVertexArray(0);
-
-            gl.ActiveTexture(gl.TEXTURE0);
-
-            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-            defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-            gl.ActiveTexture(gl.TEXTURE1);
-            gl.BindTexture(gl.TEXTURE_2D, blurred[0].tex);
-
-            const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
-            const u_transform = u_rotation.mul(u_inv_scale).mul(u_aspect);
-
-            gl.UniformMatrix2fv(gl.GetUniformLocation(bg_prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
-            gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_screen"), 0);
-            gl.Uniform1i(gl.GetUniformLocation(bg_prog, "u_blurred"), 1);
-
-            gl.Uniform2f(gl.GetUniformLocation(bg_prog, "u_viewport"), @floatFromInt(w), @floatFromInt(h));
-            gl.Uniform1f(gl.GetUniformLocation(bg_prog, "u_radius"), scale * radius * 1.05);
-
-            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        }
-
-        {
-            // Draw Transparent Puck
-            gl.UseProgram(circle_prog);
-            defer gl.UseProgram(0);
-
-            gl.BindVertexArray(vao_ids[2]);
-            defer gl.BindVertexArray(0);
-
-            gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_scale"), scale);
-            gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(circle_vertices.items.len));
-
-            // Draw Ring (matches ring in gameplay)
-            gl.UseProgram(ring_prog);
-            gl.BindVertexArray(vao_ids[1]);
-
-            gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_scale"), scale);
-            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(ring_vertices.items.len));
-        }
-
-        {
-            gl.UseProgram(tex_prog);
-            defer gl.UseProgram(0);
-
-            gl.BindVertexArray(vao_ids[0]);
-            defer gl.BindVertexArray(0);
-
-            gl.ActiveTexture(gl.TEXTURE0);
-
-            gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-            defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-            const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
-            const u_transform = u_rotation.mul(u_scale).mul(u_aspect);
-
-            gl.UniformMatrix2fv(gl.GetUniformLocation(tex_prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
-            gl.Uniform1i(gl.GetUniformLocation(tex_prog, "u_screen"), 0);
-
-            gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        }
+        try render(
+            frame,
+            blurred,
+            vao_id[0..],
+            tex_id[0..],
+            prog_id[0..],
+            u_inv_scale,
+            u_aspect,
+            u_scale,
+            .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
+            radius * 1.05,
+            circle_vertices.items.len,
+            ring_vertices.items.len,
+        );
 
         try errify(c.SDL_GL_SwapWindow(ui.window));
+    }
+}
+
+const Id = enum(usize) {
+    texture = 0,
+    ring,
+    circle,
+    background,
+    blur,
+};
+
+fn render(
+    frame: *const c.AVFrame,
+    blurred: [2]Blur,
+    vao_id: *const [4]c_uint,
+    tex_id: *const [1]c_uint,
+    prog_id: *const [5]c_uint,
+    u_inv_scale: Mat2,
+    u_aspect: Mat2,
+    u_scale: Mat2,
+    u_viewport: Vec2,
+    puck_radius: f32,
+    circle_vertices_len: usize,
+    ring_vertices_len: usize,
+) !void {
+    { // Update the FFMPEG Texture
+        gl.ActiveTexture(gl.TEXTURE0);
+        gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
+
+        gl.TexSubImage2D(
+            gl.TEXTURE_2D,
+            0,
+            0,
+            0,
+            frame.width,
+            frame.height,
+            gl.RGB, // match the format of frame data
+            gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
+            frame.data[0][0..],
+        );
+    }
+
+    const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+
+    {
+        blur(
+            blurred,
+            prog_id[@intFromEnum(Id.blur)],
+            vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
+            tex_id[@intFromEnum(Id.texture)],
+            @intCast(@divTrunc(frame.width, 2)),
+            @intCast(@divTrunc(frame.height, 2)),
+        );
+
+        gl.UseProgram(prog_id[@intFromEnum(Id.background)]);
+        defer gl.UseProgram(0);
+
+        gl.BindVertexArray(vao_id[@intFromEnum(Id.texture)]);
+        defer gl.BindVertexArray(0);
+
+        gl.ActiveTexture(gl.TEXTURE0);
+
+        gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.ActiveTexture(gl.TEXTURE1);
+        gl.BindTexture(gl.TEXTURE_2D, blurred[0].tex); // guaranteed to be the last modified texture
+
+        const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+        const u_transform = u_rotation.mul(u_inv_scale).mul(u_aspect);
+
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_screen"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_blurred"), 1);
+
+        gl.Uniform2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_viewport"), 1, &u_viewport.inner);
+        gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_radius"), u_scale.inner[0] * puck_radius);
+
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    {
+        // Draw Transparent Puck
+        gl.UseProgram(prog_id[@intFromEnum(Id.circle)]);
+        defer gl.UseProgram(0);
+
+        gl.BindVertexArray(vao_id[@intFromEnum(Id.circle)]);
+        defer gl.BindVertexArray(0);
+
+        gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.circle)], "u_scale"), u_scale.inner[0]);
+        gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(circle_vertices_len));
+
+        // Draw Ring (matches ring in gameplay)
+        gl.UseProgram(prog_id[@intFromEnum(Id.ring)]);
+        gl.BindVertexArray(vao_id[@intFromEnum(Id.ring)]);
+
+        gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.ring)], "u_scale"), u_scale.inner[0]);
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(ring_vertices_len));
+    }
+
+    {
+        gl.UseProgram(prog_id[@intFromEnum(Id.texture)]);
+        defer gl.UseProgram(0);
+
+        gl.BindVertexArray(vao_id[@intFromEnum(Id.texture)]);
+        defer gl.BindVertexArray(0);
+
+        gl.ActiveTexture(gl.TEXTURE0);
+
+        gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+        const u_transform = u_rotation.mul(u_scale).mul(u_aspect);
+
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_screen"), 0);
+
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 }
 
@@ -364,7 +407,7 @@ const AvBundle = struct {
     }
 };
 
-fn decodeAudio(sample_queue: *c.SDL_AudioStream, decode_ctx: DecodeContext) !void {
+fn decodeAudio(sample_queue: *c.SDL_AudioStream, bytes_sent: *std.atomic.Value(u64), decode_ctx: DecodeContext) !void {
     const log = std.log.scoped(.decode);
 
     log.info("audio decode thread start", .{});
@@ -413,6 +456,8 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, decode_ctx: DecodeContext) !voi
                     // std.debug.print("delay (ms): {}\n\n", .{c.swr_get_delay(swr, 1000)});
 
                     const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
+                    _ = bytes_sent.fetchAdd(@intCast(len), .monotonic);
+
                     _ = c.SDL_PutAudioStreamData(sample_queue, dst_frame.data[0], len);
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
@@ -947,12 +992,6 @@ const SdlAudioStream = struct {
     fn deinit(self: @This()) void {
         c.SDL_DestroyAudioStream(self.inner);
     }
-
-    fn play(self: @This()) u64 {
-        _ = c.SDL_ResumeAudioStreamDevice(self.inner);
-
-        return c.SDL_GetPerformanceCounter();
-    }
 };
 
 fn createSdlAudioStream(ctx: *const c.AVCodecContext) !SdlAudioStream {
@@ -966,6 +1005,8 @@ fn createSdlAudioStream(ctx: *const c.AVCodecContext) !SdlAudioStream {
 
     return .{ .inner = stream };
 }
+
+const Vec2 = struct { inner: [2]f32 };
 
 const Mat2 = struct {
     inner: [4]f32,
@@ -992,6 +1033,45 @@ const Mat2 = struct {
                 l[1] * r[2] + l[3] * r[3],
             },
         };
+    }
+};
+
+const AudioClock = struct {
+    bytes_sent: std.atomic.Value(u64) = .init(0),
+    start_time: u64,
+
+    sample_rate: u16,
+    channels: u8,
+    bytes_per_sample: u32,
+
+    stream: SdlAudioStream,
+
+    pub fn init(stream: SdlAudioStream, sample_rate: u16, channels: u8, fmt: c.AVSampleFormat) @This() {
+        defer _ = c.SDL_ResumeAudioStreamDevice(stream.inner);
+
+        return .{
+            .start_time = c.SDL_GetPerformanceCounter(),
+            .sample_rate = sample_rate,
+            .channels = channels,
+            .bytes_per_sample = @intCast(c.av_get_bytes_per_sample(fmt)),
+
+            .stream = stream,
+        };
+    }
+
+    fn seconds_passed(self: @This()) f64 {
+        const f_sample_rate: f64 = @floatFromInt(self.sample_rate);
+        const f_channels: f64 = @floatFromInt(self.channels);
+        const f_bytes_per_sample: f64 = @floatFromInt(self.bytes_per_sample);
+
+        const bytes_per_sec = f_sample_rate * f_channels * f_bytes_per_sample;
+        const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamAvailable(self.stream.inner));
+
+        const f_bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
+
+        const pos = f_bytes_sent - queued;
+
+        return pos / bytes_per_sec;
     }
 };
 
