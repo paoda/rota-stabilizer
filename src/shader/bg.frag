@@ -3,8 +3,8 @@
 in vec2 uv;
 out vec4 frag_colour;
 
-uniform sampler2D u_screen; 
-uniform sampler2D u_blurred; 
+uniform sampler2D u_outer; 
+uniform sampler2D u_inner; 
 
 uniform vec2 u_viewport; 
 uniform float u_radius;
@@ -19,9 +19,9 @@ void main() {
     
     vec3 tinted;
     if (dist < u_radius) {
-        tinted = mix(texture(u_screen, uv).rgb, vec3(0), u_darkness);
+        tinted = mix(texture(u_inner, uv).rgb, vec3(0), u_darkness);
     } else {
-        tinted = mix(texture(u_blurred, uv).rgb, vec3(0), u_darkness);
+        tinted = mix(texture(u_outer, uv).rgb, vec3(0), u_darkness);
         // vec3 tmp = mix(texture(u_blurred, uv).rgb, vec3(0), u_darkness);
         
         // float luminance = dot(tmp.rgb, vec3(0.299, 0.587, 0.114));

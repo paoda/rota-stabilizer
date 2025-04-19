@@ -170,8 +170,11 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(0);
     }
 
-    const blurred = opengl_impl.setupBlur(@intCast(vid_width / 2), @intCast(vid_height / 2));
-    defer for (blurred) |b| b.deinit();
+    const outer_blur = opengl_impl.setupBlur(vid_codec_ctx.width >> 1, vid_codec_ctx.height >> 1);
+    defer for (outer_blur) |b| b.deinit();
+
+    const inner_blur = opengl_impl.setupBlur(vid_codec_ctx.width, vid_codec_ctx.height);
+    defer for (inner_blur) |b| b.deinit();
 
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x40);
@@ -248,7 +251,8 @@ pub fn main() !void {
 
             try render(
                 frame,
-                blurred,
+                outer_blur,
+                inner_blur,
                 vao_id[0..],
                 tex_id[0..],
                 prog_id[0..],
@@ -267,7 +271,8 @@ pub fn main() !void {
 
             try render(
                 frame,
-                blurred,
+                outer_blur,
+                inner_blur,
                 vao_id[0..],
                 tex_id[0..],
                 prog_id[0..],
@@ -295,7 +300,8 @@ const Id = enum(usize) {
 
 fn render(
     frame: *const c.AVFrame,
-    blurred: [2]Blur,
+    outer_blur: [2]Blur,
+    inner_blur: [2]Blur,
     vao_id: *const [4]c_uint,
     tex_id: *const [1]c_uint,
     prog_id: *const [5]c_uint,
@@ -334,12 +340,23 @@ fn render(
 
     {
         blur(
-            blurred,
+            outer_blur,
             prog_id[@intFromEnum(Id.blur)],
             vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
             tex_id[@intFromEnum(Id.texture)],
-            @intCast(@divTrunc(frame.width, 2)),
-            @intCast(@divTrunc(frame.height, 2)),
+            frame.width >> 1,
+            frame.height >> 1,
+            10,
+        );
+
+        blur(
+            inner_blur,
+            prog_id[@intFromEnum(Id.blur)],
+            vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
+            tex_id[@intFromEnum(Id.texture)],
+            frame.width,
+            frame.height,
+            4,
         );
 
         gl.UseProgram(prog_id[@intFromEnum(Id.background)]);
@@ -349,19 +366,17 @@ fn render(
         defer gl.BindVertexArray(0);
 
         gl.ActiveTexture(gl.TEXTURE0);
-
-        gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
-        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+        gl.BindTexture(gl.TEXTURE_2D, outer_blur[0].tex); // guaranteed to be the last modified texture
 
         gl.ActiveTexture(gl.TEXTURE1);
-        gl.BindTexture(gl.TEXTURE_2D, blurred[0].tex); // guaranteed to be the last modified texture
+        gl.BindTexture(gl.TEXTURE_2D, inner_blur[0].tex); // guaranteed to be the last modified texture
 
         const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
         const u_transform = u_rotation.mul(u_inv_scale).mul(u_aspect);
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
-        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_screen"), 0);
-        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_blurred"), 1);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_outer"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_inner"), 1);
 
         gl.Uniform2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_viewport"), 1, &u_viewport.inner);
         gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_radius"), u_scale.inner[0] * puck_radius);
@@ -693,8 +708,7 @@ const Blur = struct {
     }
 };
 
-fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: u32, height: u32) void {
-    const passes = 10;
+fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int, height: c_int, passes: u32) void {
     std.debug.assert(passes % 2 == 0);
 
     const view_cache: *[2]c_int = blk: {
@@ -711,7 +725,7 @@ fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: u32, 
         break :blk @intCast(buf[0]);
     };
 
-    gl.Viewport(0, 0, @intCast(width), @intCast(height));
+    gl.Viewport(0, 0, width, height);
     defer gl.Viewport(0, 0, view_cache[0], view_cache[1]);
 
     gl.UseProgram(prog);
@@ -763,7 +777,6 @@ const opengl_impl = struct {
         var fbo_ids: [2]c_uint = undefined;
         gl.GenFramebuffers(2, &fbo_ids);
 
-        // TODO: do we need these? what's going on
         var tex_ids: [2]c_uint = undefined;
         gl.GenTextures(2, &tex_ids);
 
