@@ -813,8 +813,8 @@ const opengl_impl = struct {
         gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
         gl.TexImage2D(
             gl.TEXTURE_2D,
