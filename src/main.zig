@@ -505,40 +505,68 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
 
     const sws = maybe_sws orelse return error.out_of_memory;
 
-    while (c.av_read_frame(decode_ctx.fmt_ctx, pkt) >= 0) {
-        defer c.av_packet_unref(pkt);
-        if (decode_ctx.should_quit.load(.monotonic)) return;
-        if (pkt.stream_index != decode_ctx.bundle.stream) continue;
+    var end_of_file = false;
 
-        const send_ret = c.avcodec_send_packet(video_ctx, pkt);
-        if (send_ret == c.AVERROR_EOF) return;
-        if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
-        if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
+    // TODO: using a fn ptr I think we can deduplicate this massive loop
+    while (!decode_ctx.should_quit.load(.monotonic)) {
+        // Try to receive a frame first if we have packets already in the decoder
+        recv_loop: while (true) {
+            switch (c.avcodec_receive_frame(video_ctx, src_frame)) {
+                0 => { // got a frame
+                    defer c.av_frame_unref(src_frame);
 
-        const recv_ret = c.avcodec_receive_frame(video_ctx, src_frame);
-        if (recv_ret == c.AVERROR_EOF) return;
-        if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
-        if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_receive_frame");
+                    _ = c.sws_scale(
+                        sws,
+                        src_frame.data[0..],
+                        src_frame.linesize[0..],
+                        0,
+                        src_frame.height, // TODO: this should be src_frame
+                        dst_frame.data[0..],
+                        dst_frame.linesize[0..],
+                    );
 
-        dst_frame.pts = src_frame.pts; // for timing
+                    // timing
+                    dst_frame.pts = src_frame.pts;
+                    dst_frame.pkt_dts = src_frame.pkt_dts;
+                    dst_frame.best_effort_timestamp = src_frame.best_effort_timestamp;
 
-        _ = c.sws_scale(
-            sws,
-            src_frame.data[0..],
-            src_frame.linesize[0..],
-            0,
-            src_frame.height, // TODO: this should be src_frame
-            dst_frame.data[0..],
-            dst_frame.linesize[0..],
-        );
+                    blocking: while (true) {
+                        frame_queue.push(dst_frame) catch |e| {
+                            if (e == error.full) continue :blocking;
+                            std.debug.panic("error: {}", .{e});
+                        };
 
-        blocking: while (true) {
-            frame_queue.push(dst_frame) catch |e| {
-                if (e == error.full) continue :blocking;
-                std.debug.panic("error: {}", .{e});
-            };
+                        break :blocking;
+                    }
+                },
+                c.AVERROR(c.EAGAIN) => break :recv_loop,
+                c.AVERROR_EOF => return,
+                else => return error.ffmpeg_error,
+            }
+        }
 
-            break :blocking;
+        if (end_of_file) return; // can be set by code below
+
+        // Read the next packet
+        switch (c.av_read_frame(decode_ctx.fmt_ctx, pkt)) {
+            0...std.math.maxInt(c_int) => {
+                defer c.av_packet_unref(pkt);
+
+                if (pkt.stream_index != decode_ctx.bundle.stream) continue;
+
+                const send_ret = c.avcodec_send_packet(video_ctx, pkt);
+                if (send_ret == c.AVERROR_EOF) return;
+                if (send_ret == c.AVERROR(c.EAGAIN)) continue;
+                if (send_ret < 0) return error.ffmpeg_error;
+            },
+            c.AVERROR_EOF => {
+                defer end_of_file = true;
+
+                // TODO: make this work with libavError
+                const flush_ret = c.avcodec_send_packet(video_ctx, null);
+                if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) return error.ffmpeg_error;
+            },
+            else => return error.ffmpeg_error,
         }
     }
 }
