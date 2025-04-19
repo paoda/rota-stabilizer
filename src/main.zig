@@ -221,7 +221,7 @@ pub fn main() !void {
 
         {
             const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
-            const pt_in_seconds = @as(f64, @floatFromInt(frame.pts)) * time_base;
+            const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
             const bytes_per_sec: f64 = @floatFromInt(aud_codec_ctx.sample_rate * aud_codec_ctx.ch_layout.nb_channels * c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT));
             const hz: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
@@ -243,21 +243,6 @@ pub fn main() !void {
                 if (distance < std.math.floatEps(f64) or pt_in_seconds <= elapsed_time) break;
             }
         }
-
-        // video_sync: {
-        //     const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
-        //     const pt_in_seconds = @as(f64, @floatFromInt(frame.pts)) * time_base;
-
-        //     if (start_time == null) break :video_sync;
-        //     if (start_time == 0) start_time = c.SDL_GetPerformanceCounter();
-
-        //     while (true) {
-        //         const elapsed_seconds = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - start_time.?)) / @as(f64, @floatFromInt(c.SDL_GetPerformanceFrequency()));
-        //         if (@abs(pt_in_seconds - elapsed_seconds) < std.math.floatEps(f64) or pt_in_seconds < elapsed_seconds) break;
-
-        //         std.atomic.spinLoopHint(); // TODO: less resource intensive
-        //     }
-        // }
 
         var w: c_int, var h: c_int = .{ undefined, undefined };
         try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
