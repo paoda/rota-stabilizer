@@ -187,7 +187,11 @@ pub fn main() !void {
     const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ sdl_stream.inner, &audio_clock.bytes_sent, aud_decode });
     defer audio_decode.join();
 
-    var current_frame: ?*c.AVFrame = null;
+    var maybe_frame: ?*c.AVFrame = c.av_frame_alloc();
+    defer c.av_frame_free(&maybe_frame);
+
+    const frame = maybe_frame orelse return error.out_of_memory;
+    var did_render_once = false;
 
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
@@ -221,49 +225,67 @@ pub fn main() !void {
         //     break :blocking;
         // }
 
-        if (queue.pop()) |frame| current_frame = frame;
+        const did_copy = try queue.pop(frame);
 
-        const frame = current_frame orelse {
-            log.debug("queue empty, no previous frame to render", .{});
+        if (did_copy) skip: {
+            defer did_render_once = true;
 
-            try errify(c.SDL_GL_SwapWindow(ui.window));
-            continue;
-        };
+            {
+                const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
+                const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
-        {
-            const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
-            const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
-            _ = pt_in_seconds;
+                // Skip frames that are too old
+                const audio_time = audio_clock.seconds_passed();
+                const diff = pt_in_seconds - audio_time;
 
-            // while (true) {
-            //     const bytes_in_seconds = audio_clock.seconds_passed();
-            //     const diff = pt_in_seconds - bytes_in_seconds;
+                if (diff < -0.1) {
+                    // Frame is too old (more than 100ms behind audio)
+                    log.debug("Skip late frame: v={d:.3} a={d:.3} diff={d:.3}", .{ pt_in_seconds, audio_time, diff });
+                    break :skip; // go to new frame
+                }
 
-            //     log.debug("video_time: {d:.5}", .{pt_in_seconds});
-            //     log.debug("audio_time: {d:.5}", .{bytes_in_seconds});
-            //     log.debug("diff: {d:.5}\n", .{diff});
+                // If we're ahead of audio, sleep until it's time to show this frame
+                if (diff > 0.01) {
+                    const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s);
+                    std.time.sleep(@intFromFloat(wait_ns));
 
-            //     if (diff < -0.1) continue :ui_loop;
-            //     if (diff < 0.1) break;
+                    log.debug("Waited {d:.1}ms for frame: v={d:.3} a={d:.3}", .{ wait_ns / std.time.ns_per_ms, pt_in_seconds, audio_time });
+                }
+            }
+            try render(
+                frame,
+                blurred,
+                vao_id[0..],
+                tex_id[0..],
+                prog_id[0..],
+                u_inv_scale,
+                u_aspect,
+                u_scale,
+                .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
+                radius * 1.05,
+                circle_vertices.items.len,
+                ring_vertices.items.len,
+            );
+        } else {
+            if (!did_render_once) continue;
 
-            //     std.atomic.spinLoopHint();
-            // }
+            log.debug("queue empty, drawing old frame", .{});
+
+            try render(
+                frame,
+                blurred,
+                vao_id[0..],
+                tex_id[0..],
+                prog_id[0..],
+                u_inv_scale,
+                u_aspect,
+                u_scale,
+                .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
+                radius * 1.05,
+                circle_vertices.items.len,
+                ring_vertices.items.len,
+            );
         }
-
-        try render(
-            frame,
-            blurred,
-            vao_id[0..],
-            tex_id[0..],
-            prog_id[0..],
-            u_inv_scale,
-            u_aspect,
-            u_scale,
-            .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
-            radius * 1.05,
-            circle_vertices.items.len,
-            ring_vertices.items.len,
-        );
 
         try errify(c.SDL_GL_SwapWindow(ui.window));
     }

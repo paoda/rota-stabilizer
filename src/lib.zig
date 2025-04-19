@@ -82,14 +82,34 @@ pub const FrameQueue = struct {
         _ = try libavError(c.av_frame_copy_props(ptr, to_be_copied));
     }
 
-    pub fn pop(self: *@This()) ?*c.AVFrame {
+    pub fn pop(self: *@This(), dst_frame: *c.AVFrame) !bool {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.isEmpty()) return null;
+        if (self.isEmpty()) return false;
         defer self.read_idx += 1;
 
-        return &self.buf[self.mask(self.read_idx)];
+        const src_frame = &self.buf[self.mask(self.read_idx)];
+
+        const valid_buffer =
+            src_frame.width == dst_frame.width and
+            src_frame.height == dst_frame.height and
+            src_frame.format == dst_frame.format;
+
+        if (!valid_buffer) {
+            c.av_frame_unref(dst_frame);
+
+            dst_frame.width = src_frame.width;
+            dst_frame.height = src_frame.height;
+            dst_frame.format = src_frame.format;
+
+            _ = try libavError(c.av_frame_get_buffer(dst_frame, 32));
+        }
+
+        _ = try libavError(c.av_frame_copy(dst_frame, src_frame));
+        _ = try libavError(c.av_frame_copy_props(dst_frame, src_frame));
+
+        return true;
     }
 
     inline fn len(self: @This()) usize {
