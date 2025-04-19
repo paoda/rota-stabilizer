@@ -184,7 +184,7 @@ pub fn main() !void {
     const video_decode = try std.Thread.spawn(.{}, decodeVideo, .{ &queue, vid_decode });
     defer video_decode.join();
 
-    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ sdl_stream.inner, &audio_clock.bytes_sent, aud_decode });
+    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ sdl_stream.inner, &audio_clock, aud_decode });
     defer audio_decode.join();
 
     var maybe_frame: ?*c.AVFrame = c.av_frame_alloc();
@@ -231,6 +231,8 @@ pub fn main() !void {
             defer did_render_once = true;
 
             {
+                const threshold = 0.1;
+
                 const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
                 const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
@@ -238,19 +240,27 @@ pub fn main() !void {
                 const audio_time = audio_clock.seconds_passed();
                 const diff = pt_in_seconds - audio_time;
 
-                if (diff < -0.1) {
+                if (diff < -threshold) {
                     // Frame is too old (more than 100ms behind audio)
                     log.debug("Skip late frame: v={d:.3} a={d:.3} diff={d:.3}", .{ pt_in_seconds, audio_time, diff });
                     break :skip; // go to new frame
                 }
 
                 // If we're ahead of audio, sleep until it's time to show this frame
-                if (diff > 0.01) {
+                if (diff > threshold * 0.1) {
                     const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s);
                     std.time.sleep(@intFromFloat(wait_ns));
 
                     log.debug("Waited {d:.1}ms for frame: v={d:.3} a={d:.3}", .{ wait_ns / std.time.ns_per_ms, pt_in_seconds, audio_time });
                 }
+
+                // while (true) {
+                //     const audio_time = audio_clock.seconds_passed();
+                //     const diff = pt_in_seconds - audio_time;
+
+                //     if (diff < -threshold) break :skip;
+                //     if (diff < threshold * 0.1) break;
+                // }
             }
             try render(
                 frame,
@@ -429,7 +439,7 @@ const AvBundle = struct {
     }
 };
 
-fn decodeAudio(sample_queue: *c.SDL_AudioStream, bytes_sent: *std.atomic.Value(u64), decode_ctx: DecodeContext) !void {
+fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx: DecodeContext) !void {
     const log = std.log.scoped(.decode);
 
     log.info("audio decode thread start", .{});
@@ -477,10 +487,20 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, bytes_sent: *std.atomic.Value(u
                     // std.debug.print("dst nb_channels: {}\n", .{aud_frame.ch_layout.nb_channels});
                     // std.debug.print("delay (ms): {}\n\n", .{c.swr_get_delay(swr, 1000)});
 
+                    const bytes_per_sec = clock.sample_rate * clock.bytes_per_sample * clock.channels;
+                    const max_len = 1 * bytes_per_sec;
+
+                    while (true) {
+                        const queued_len = c.SDL_GetAudioStreamQueued(sample_queue);
+                        if (queued_len < max_len) break;
+
+                        std.Thread.sleep(5 * std.time.ns_per_ms);
+                    }
+
                     const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
-                    _ = bytes_sent.fetchAdd(@intCast(len), .monotonic);
 
                     _ = c.SDL_PutAudioStreamData(sample_queue, dst_frame.data[0], len);
+                    _ = clock.bytes_sent.fetchAdd(@intCast(len), .monotonic);
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
                 c.AVERROR_EOF => return,
@@ -1068,6 +1088,8 @@ const AudioClock = struct {
 
     stream: SdlAudioStream,
 
+    const log = std.log.scoped(.audio_clock);
+
     pub fn init(stream: SdlAudioStream, sample_rate: u16, channels: u8, fmt: c.AVSampleFormat) @This() {
         defer _ = c.SDL_ResumeAudioStreamDevice(stream.inner);
 
@@ -1082,17 +1104,12 @@ const AudioClock = struct {
     }
 
     fn seconds_passed(self: @This()) f64 {
-        const f_sample_rate: f64 = @floatFromInt(self.sample_rate);
-        const f_channels: f64 = @floatFromInt(self.channels);
-        const f_bytes_per_sample: f64 = @floatFromInt(self.bytes_per_sample);
+        const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
 
-        const bytes_per_sec = f_sample_rate * f_channels * f_bytes_per_sample;
-        const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamAvailable(self.stream.inner));
+        const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream.inner));
+        const bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
 
-        const f_bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
-
-        const pos = f_bytes_sent - queued;
-
+        const pos = bytes_sent - queued;
         return pos / bytes_per_sec;
     }
 };
