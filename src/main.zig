@@ -409,33 +409,56 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, decode_ctx: DecodeContext) !voi
 
     const swr = maybe_swr orelse return error.out_of_memory;
 
-    while (c.av_read_frame(decode_ctx.fmt_ctx, pkt) >= 0) {
-        defer c.av_packet_unref(pkt);
-        if (decode_ctx.should_quit.load(.monotonic)) return;
-        if (pkt.stream_index != decode_ctx.bundle.stream) continue;
+    var end_of_file = false;
+    while (!decode_ctx.should_quit.load(.monotonic)) {
+        // Try to receive a frame first if we have packets already in the decoder
+        recv_loop: while (true) {
+            switch (c.avcodec_receive_frame(audio_ctx, src_frame)) {
+                0 => { // got a frame
+                    defer c.av_frame_unref(src_frame);
 
-        const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
-        if (send_ret == c.AVERROR_EOF) return;
-        if (send_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
-        if (send_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
+                    _ = c.swr_convert_frame(swr, dst_frame, src_frame);
 
-        const recv_ret = c.avcodec_receive_frame(audio_ctx, src_frame);
-        if (recv_ret == c.AVERROR_EOF) return;
-        if (recv_ret == c.AVERROR(c.EAGAIN)) @panic("TODO: handle EAGAIN");
-        if (recv_ret != 0) @panic("TODO: unrecoverable error in avcodec_send_packet");
+                    // std.debug.print("src sample_rate: {}Hz\n", .{src_frame.sample_rate});
+                    // std.debug.print("src nb_channels: {}\n", .{src_frame.ch_layout.nb_channels});
+                    // std.debug.print("src format: {s}\n", .{c.av_get_sample_fmt_name(src_frame.format)});
+                    // std.debug.print("dst sample_rate: {}Hz\n", .{aud_frame.sample_rate});
+                    // std.debug.print("dst format: {s}\n", .{c.av_get_sample_fmt_name(aud_frame.format)});
+                    // std.debug.print("dst nb_channels: {}\n", .{aud_frame.ch_layout.nb_channels});
+                    // std.debug.print("delay (ms): {}\n\n", .{c.swr_get_delay(swr, 1000)});
 
-        _ = c.swr_convert_frame(swr, dst_frame, src_frame);
+                    const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
+                    _ = c.SDL_PutAudioStreamData(sample_queue, dst_frame.data[0], len);
+                },
+                c.AVERROR(c.EAGAIN) => break :recv_loop,
+                c.AVERROR_EOF => return,
+                else => return error.ffmpeg_error,
+            }
+        }
 
-        // std.debug.print("src sample_rate: {}Hz\n", .{src_frame.sample_rate});
-        // std.debug.print("src nb_channels: {}\n", .{src_frame.ch_layout.nb_channels});
-        // std.debug.print("src format: {s}\n", .{c.av_get_sample_fmt_name(src_frame.format)});
-        // std.debug.print("dst sample_rate: {}Hz\n", .{aud_frame.sample_rate});
-        // std.debug.print("dst format: {s}\n", .{c.av_get_sample_fmt_name(aud_frame.format)});
-        // std.debug.print("dst nb_channels: {}\n", .{aud_frame.ch_layout.nb_channels});
-        // std.debug.print("delay (ms): {}\n\n", .{c.swr_get_delay(swr, 1000)});
+        if (end_of_file) return; // can be set by code below
 
-        const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
-        _ = c.SDL_PutAudioStreamData(sample_queue, dst_frame.data[0], len);
+        // Read the next packet
+        switch (c.av_read_frame(decode_ctx.fmt_ctx, pkt)) {
+            0...std.math.maxInt(c_int) => {
+                defer c.av_packet_unref(pkt);
+
+                if (pkt.stream_index != decode_ctx.bundle.stream) continue;
+
+                const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
+                if (send_ret == c.AVERROR_EOF) return;
+                if (send_ret == c.AVERROR(c.EAGAIN)) continue;
+                if (send_ret < 0) return error.ffmpeg_error;
+            },
+            c.AVERROR_EOF => {
+                defer end_of_file = true;
+
+                // TODO: make this work with libavError
+                const flush_ret = c.avcodec_send_packet(audio_ctx, null);
+                if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) return error.ffmpeg_error;
+            },
+            else => return error.ffmpeg_error,
+        }
     }
 }
 
