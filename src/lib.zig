@@ -15,6 +15,7 @@ pub const c = @cImport({
     @cInclude("libswscale/swscale.h");
     @cInclude("libswresample/swresample.h");
     @cInclude("libavutil/imgutils.h");
+    @cInclude("libavutil/opt.h");
 
     @cInclude("stb_image_write.h");
 });
@@ -31,101 +32,95 @@ pub inline fn libavError(value: c_int) error{ffmpeg_error}!c_int {
 }
 
 pub const FrameQueue = struct {
-    buf: []c.AVFrame,
+    slot: Slot,
     read_idx: usize,
     write_idx: usize,
 
-    mutex: std.Thread.Mutex = .{}, // TODO: switch to atomics
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
 
-    const Error = error{ invalid_size, full, ffmpeg_error } || std.mem.Allocator.Error;
+    const Slot = struct { frame: []c.AVFrame, state: []State };
+    const State = enum { empty, in_use, ready_to_reuse };
+    const Error = error{ ffmpeg_error, invalid_size } || std.mem.Allocator.Error;
 
     pub fn init(allocator: std.mem.Allocator, count: usize) Error!FrameQueue {
         if (!std.math.isPowerOfTwo(count)) return error.invalid_size;
 
-        const buf = try allocator.alloc(c.AVFrame, count);
-        @memset(buf, std.mem.zeroes(c.AVFrame));
+        const frames = try allocator.alloc(c.AVFrame, count);
+        const states = try allocator.alloc(State, count);
 
-        for (buf) |*frame| c.av_frame_unref(frame);
+        for (frames, states) |*frame, *state| {
+            frame.* = std.mem.zeroes(c.AVFrame);
+            c.av_frame_unref(frame);
 
-        return .{ .buf = buf, .read_idx = 0, .write_idx = 0 };
+            state.* = .empty;
+        }
+
+        return .{
+            .slot = .{ .frame = frames, .state = states },
+            .read_idx = 0,
+            .write_idx = 0,
+        };
     }
 
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-        allocator.free(self.buf);
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        for (self.slot.frame) |*frame| c.av_frame_unref(frame);
+
+        allocator.free(self.slot.frame);
+        allocator.free(self.slot.state);
     }
 
-    pub fn push(self: *@This(), to_be_copied: *const c.AVFrame) Error!void {
+    pub fn push(self: *@This(), new_frame: *const c.AVFrame) Error!void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.isFull()) return error.full;
+        const idx = self.mask(self.write_idx);
+
+        while (self.slot.state[idx] != .empty) self.cond.wait(&self.mutex);
+        defer self.cond.signal();
         defer self.write_idx += 1;
 
-        const ptr = &self.buf[self.mask(self.write_idx)];
+        const frame = &self.slot.frame[idx];
+        self.slot.state[idx] = .in_use;
 
-        const valid_buffer =
-            to_be_copied.width == ptr.width and
-            to_be_copied.height == ptr.height and
-            to_be_copied.format == ptr.format;
-
-        if (!valid_buffer) {
-            c.av_frame_unref(ptr);
-
-            ptr.width = to_be_copied.width;
-            ptr.height = to_be_copied.height;
-            ptr.format = to_be_copied.format;
-
-            _ = try libavError(c.av_frame_get_buffer(ptr, 32));
-        }
-
-        _ = try libavError(c.av_frame_copy(ptr, to_be_copied));
-        _ = try libavError(c.av_frame_copy_props(ptr, to_be_copied));
+        _ = try libavError(c.av_frame_ref(frame, new_frame));
     }
 
-    pub fn pop(self: *@This(), dst_frame: *c.AVFrame) !bool {
+    pub fn pop(self: *@This()) ?*c.AVFrame {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.isEmpty()) return false;
+        const idx = self.mask(self.read_idx);
+
+        if (self.slot.state[idx] != .in_use) return null;
+        defer self.cond.broadcast();
         defer self.read_idx += 1;
 
-        const src_frame = &self.buf[self.mask(self.read_idx)];
+        const frame = &self.slot.frame[idx];
+        self.slot.state[idx] = .ready_to_reuse;
 
-        const valid_buffer =
-            src_frame.width == dst_frame.width and
-            src_frame.height == dst_frame.height and
-            src_frame.format == dst_frame.format;
-
-        if (!valid_buffer) {
-            c.av_frame_unref(dst_frame);
-
-            dst_frame.width = src_frame.width;
-            dst_frame.height = src_frame.height;
-            dst_frame.format = src_frame.format;
-
-            _ = try libavError(c.av_frame_get_buffer(dst_frame, 32));
-        }
-
-        _ = try libavError(c.av_frame_copy(dst_frame, src_frame));
-        _ = try libavError(c.av_frame_copy_props(dst_frame, src_frame));
-
-        return true;
+        return frame;
     }
 
-    inline fn len(self: @This()) usize {
-        return self.write_idx - self.read_idx;
+    pub fn recycle(self: *@This(), used_frame: *c.AVFrame) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.slot.frame, self.slot.state) |*frame, *state| {
+            if (frame != used_frame) continue;
+            std.debug.assert(state.* == .ready_to_reuse);
+
+            state.* = .empty;
+            c.av_frame_unref(frame);
+            self.cond.signal();
+            return;
+        }
+
+        std.debug.panic("attempted to recycle a frame that was not in the queue", .{});
     }
 
     inline fn mask(self: @This(), idx: usize) usize {
-        return idx & (self.buf.len - 1);
-    }
-
-    inline fn isEmpty(self: @This()) bool {
-        return self.read_idx == self.write_idx;
-    }
-
-    inline fn isFull(self: @This()) bool {
-        return self.len() == self.buf.len;
+        return idx & (self.slot.frame.len - 1);
     }
 };
 

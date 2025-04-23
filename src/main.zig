@@ -10,14 +10,11 @@ const FrameQueue = @import("librota").FrameQueue;
 
 var gl_procs: gl.ProcTable = undefined;
 
-/// for determining perf
-const run_uncapped: bool = false;
-
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
-    .linux => c.AV_HWDEVICE_TYPE_VAAPI,
-    .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
-    .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+    // .linux => c.AV_HWDEVICE_TYPE_VAAPI,
+    // .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
+    // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?
 };
 
@@ -195,7 +192,7 @@ pub fn main() !void {
     defer for (inner_blur) |b| b.deinit();
 
     // -- opengl end --
-    var queue = try FrameQueue.init(allocator, 0x40);
+    var queue = try FrameQueue.init(allocator, 0x80); // 1s at 120fps?
     defer queue.deinit(allocator);
 
     var should_quit: std.atomic.Value(bool) = .init(false);
@@ -209,19 +206,13 @@ pub fn main() !void {
     const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ sdl_stream.inner, &audio_clock, aud_decode });
     defer audio_decode.join();
 
-    var maybe_frame: ?*c.AVFrame = c.av_frame_alloc();
-    defer c.av_frame_free(&maybe_frame);
+    var w: c_int, var h: c_int = .{ undefined, undefined };
+    try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
 
-    const frame = maybe_frame orelse return error.out_of_memory;
-    var did_render_once = false;
+    gl.Viewport(0, 0, w, h);
 
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
-
-        var w: c_int, var h: c_int = .{ undefined, undefined };
-        try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
-
-        gl.Viewport(0, 0, w, h);
 
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
@@ -239,94 +230,48 @@ pub fn main() !void {
             }
         }
 
-        switch (run_uncapped) {
-            true => {
-                while (true) {
-                    defer did_render_once = true;
+        if (queue.pop()) |frame| {
+            defer queue.recycle(frame);
 
-                    const did_get_frame = try queue.pop(frame);
-                    if (!did_get_frame) continue;
+            const threshold = 0.1;
 
-                    try render(
-                        frame,
-                        outer_blur,
-                        inner_blur,
-                        vao_id[0..],
-                        tex_id[0..],
-                        prog_id[0..],
-                        u_inv_scale,
-                        u_aspect,
-                        u_scale,
-                        .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
-                        radius * 1.05,
-                        circle_vertices.items.len,
-                        ring_vertices.items.len,
-                    );
+            const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
+            const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
-                    break;
-                }
-            },
-            false => {
-                if (try queue.pop(frame)) skip: {
-                    defer did_render_once = true;
+            // Skip frames that are too old
+            const audio_time = audio_clock.seconds_passed();
+            const diff = pt_in_seconds - audio_time;
 
-                    const threshold = 0.1;
+            if (diff < -threshold) {
+                // log.debug("frame skipped. v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
+                continue;
+            }
 
-                    const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
-                    const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
+            if (diff > threshold * 0.1) {
+                // log.debug("frame wait: v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
 
-                    // Skip frames that are too old
-                    const audio_time = audio_clock.seconds_passed();
-                    const diff = pt_in_seconds - audio_time;
+                const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s); // TODO: 1 second is way too long?
+                sleep(@intFromFloat(wait_ns));
+            }
 
-                    if (diff < -threshold) {
-                        break :skip;
-                        //log.debug("frame skipped. v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
-                    }
-
-                    if (diff > threshold * 0.1) {
-                        const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s); // TODO: 1 second is way too long?
-                        sleep(@intFromFloat(wait_ns));
-                        // log.debug("frame wait: v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
-                    }
-
-                    try render(
-                        frame,
-                        outer_blur,
-                        inner_blur,
-                        vao_id[0..],
-                        tex_id[0..],
-                        prog_id[0..],
-                        u_inv_scale,
-                        u_aspect,
-                        u_scale,
-                        .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
-                        radius * 1.05,
-                        circle_vertices.items.len,
-                        ring_vertices.items.len,
-                    );
-                } else {
-                    if (!did_render_once) continue;
-
-                    log.debug("queue empty, drawing old frame", .{});
-
-                    try render(
-                        frame,
-                        outer_blur,
-                        inner_blur,
-                        vao_id[0..],
-                        tex_id[0..],
-                        prog_id[0..],
-                        u_inv_scale,
-                        u_aspect,
-                        u_scale,
-                        .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
-                        radius * 1.05,
-                        circle_vertices.items.len,
-                        ring_vertices.items.len,
-                    );
-                }
-            },
+            try render(
+                frame,
+                outer_blur,
+                inner_blur,
+                vao_id[0..],
+                tex_id[0..],
+                prog_id[0..],
+                u_inv_scale,
+                u_aspect,
+                u_scale,
+                .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
+                radius * 1.05,
+                circle_vertices.items.len,
+                ring_vertices.items.len,
+            );
+        } else {
+            std.time.sleep(1 * std.time.ns_per_ms); // TODO: add adaptive sleeping here
+            continue;
         }
 
         try errify(c.SDL_GL_SwapWindow(ui.window));
@@ -574,6 +519,23 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
     }
 }
 
+fn convertFrame(bundle: AvBundle, src_frame: *c.AVFrame, sw_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
+    @setRuntimeSafety(false);
+
+    if (bundle.hw) |hw| {
+        std.debug.assert(src_frame.format == hw.pix_fmt);
+        _ = try libavError(c.av_hwframe_transfer_data(sw_frame, src_frame, 0));
+        _ = try libavError(c.sws_scale_frame(sws, dst_frame, sw_frame));
+    } else {
+        _ = try libavError(c.sws_scale_frame(sws, dst_frame, src_frame));
+    }
+
+    // timing
+    dst_frame.pts = src_frame.pts;
+    dst_frame.pkt_dts = src_frame.pkt_dts;
+    dst_frame.best_effort_timestamp = src_frame.best_effort_timestamp;
+}
+
 fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
     const log = std.log.scoped(.video_decode);
 
@@ -583,41 +545,33 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
     var maybe_pkt: ?*c.AVPacket = c.av_packet_alloc();
     defer c.av_packet_free(&maybe_pkt);
 
-    var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
-    defer c.av_frame_free(&maybe_src_frame);
+    var src_frame: AvFrame = try .init();
+    defer src_frame.deinit();
 
-    var maybe_dst_frame: ?*c.AVFrame = c.av_frame_alloc();
-    defer c.av_frame_free(&maybe_dst_frame);
+    var dst_frame: AvFrame = try .init();
+    defer dst_frame.deinit();
 
-    var maybe_sw_frame: ?*c.AVFrame = c.av_frame_alloc();
-    defer c.av_frame_free(&maybe_sw_frame);
+    var sw_frame: AvFrame = try .init();
+    defer sw_frame.deinit();
 
     const pkt = maybe_pkt orelse return error.out_of_memory;
-    const src_frame = maybe_src_frame orelse return error.out_of_memory;
-    const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
-    const sw_frame = maybe_sw_frame orelse return error.out_of_memory;
-
     const video_ctx = decode_ctx.bundle.codec_ctx.?;
-    const preferred_hw_pix_fmt = c.AV_PIX_FMT_NV12;
 
-    sw_frame.format = preferred_hw_pix_fmt;
+    const opengl_format = c.AV_PIX_FMT_RGB24;
 
-    dst_frame.width = video_ctx.width;
-    dst_frame.height = video_ctx.height;
-    dst_frame.format = c.AV_PIX_FMT_RGB24;
+    try sw_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
+    try dst_frame.setup(video_ctx.width, video_ctx.height, opengl_format);
 
-    _ = try libavError(c.av_frame_get_buffer(dst_frame, 32));
-
-    const sws_src_fmt = if (decode_ctx.bundle.hw) |_| sw_frame.format else video_ctx.pix_fmt;
+    const src_format = if (decode_ctx.bundle.hw) |_| sw_frame.ptr().format else video_ctx.pix_fmt;
 
     const maybe_sws = c.sws_getContext(
         video_ctx.width,
         video_ctx.height,
-        sws_src_fmt,
+        src_format,
         video_ctx.width,
         video_ctx.height,
-        c.AV_PIX_FMT_RGB24,
-        c.SWS_BILINEAR,
+        opengl_format,
+        c.SWS_FAST_BILINEAR,
         null,
         null,
         null,
@@ -626,49 +580,20 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
 
     const sws = maybe_sws orelse return error.out_of_memory;
 
+    // _ = try libavError(c.av_opt_set_int(sws, "threads", @intCast(try std.Thread.getCpuCount()), 0));
+
     var end_of_file = false;
 
     // TODO: using a fn ptr I think we can deduplicate this massive loop
     while (!decode_ctx.should_quit.load(.monotonic)) {
         // Try to receive a frame first if we have packets already in the decoder
         recv_loop: while (true) {
-            switch (c.avcodec_receive_frame(video_ctx, src_frame)) {
-                0 => { // got a frame
-                    defer c.av_frame_unref(src_frame);
+            switch (c.avcodec_receive_frame(video_ctx, src_frame.ptr())) {
+                0 => {
+                    defer c.av_frame_unref(dst_frame.ptr());
 
-                    const sw_src = if (decode_ctx.bundle.hw) |hw| blk: {
-                        std.debug.assert(src_frame.format == hw.pix_fmt);
-                        _ = try libavError(c.av_hwframe_transfer_data(sw_frame, src_frame, 0));
-                        break :blk sw_frame;
-                    } else src_frame;
-
-                    _ = try libavError(c.sws_scale(
-                        sws,
-                        sw_src.data[0..],
-                        sw_src.linesize[0..],
-                        0,
-                        sw_src.height,
-                        dst_frame.data[0..],
-                        dst_frame.linesize[0..],
-                    ));
-
-                    // timing
-                    dst_frame.pts = src_frame.pts;
-                    dst_frame.pkt_dts = src_frame.pkt_dts;
-                    dst_frame.best_effort_timestamp = src_frame.best_effort_timestamp;
-
-                    while (true) {
-                        frame_queue.push(dst_frame) catch |e| {
-                            if (e == error.full) {
-                                std.Thread.sleep(5 * std.time.ns_per_ms);
-                                continue;
-                            }
-
-                            std.debug.panic("err: {}", .{e});
-                        };
-
-                        break;
-                    }
+                    try convertFrame(decode_ctx.bundle, src_frame.ptr(), sw_frame.ptr(), dst_frame.ptr(), sws);
+                    try frame_queue.push(dst_frame.ptr());
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
                 c.AVERROR_EOF => return,
@@ -1272,3 +1197,30 @@ const AudioClock = struct {
 fn mat2(m00: f32, m01: f32, m10: f32, m11: f32) Mat2 {
     return .{ .inner = .{ m00, m01, m10, m11 } };
 }
+
+const AvFrame = struct {
+    inner: ?*c.AVFrame,
+
+    pub fn init() !AvFrame {
+        const p: ?*c.AVFrame = c.av_frame_alloc();
+        if (p == null) return error.out_of_memory;
+
+        return .{ .inner = p };
+    }
+
+    pub fn setup(self: *@This(), width: c_int, height: c_int, fmt: c.AVPixelFormat) !void {
+        self.inner.?.width = width;
+        self.inner.?.height = height;
+        self.inner.?.format = fmt;
+
+        _ = try libavError(c.av_frame_get_buffer(self.inner, 32));
+    }
+
+    pub fn deinit(self: *@This()) void {
+        c.av_frame_free(&self.inner);
+    }
+
+    pub fn ptr(self: @This()) *c.AVFrame {
+        return self.inner.?;
+    }
+};
