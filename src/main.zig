@@ -41,8 +41,9 @@ pub fn main() !void {
 
     const vid_width: u32 = @intCast(vid_codec_ctx.width);
     const vid_height: u32 = @intCast(vid_codec_ctx.height);
+    const win_size = @max(vid_width, vid_height) / 2;
 
-    const ui = try createSdlWindow(vid_width, vid_height);
+    const ui = try createSdlWindow(win_size, win_size);
     defer ui.deinit();
 
     _ = c.SDL_GL_SetSwapInterval(0);
@@ -1020,9 +1021,7 @@ fn createSdlWindow(width: u32, height: u32) !Ui {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLEBUFFERS, 1));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLESAMPLES, 4));
 
-    const size: c_int = @intCast(@max(width, height) / 2);
-
-    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", size, size, c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
+    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", @intCast(width), @intCast(height), c.SDL_WINDOW_OPENGL));
     errdefer c.SDL_DestroyWindow(window);
 
     const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
