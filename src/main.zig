@@ -111,12 +111,12 @@ pub fn main() !void {
     const u_aspect = Mat2.scaleXy(ratio[0], ratio[1]);
     const u_inv_scale = Mat2.scale((1.0 / @min(ratio[0], ratio[1])) * std.math.sqrt2); // |cos(π/4)| + |sin(π/4)| == sqrt(2)
 
-    const ring_vertices = try ring(allocator, inner_radius, radius, 0x400);
+    const ring_vertices = try ring(allocator, inner_radius, radius, 0x80);
     defer ring_vertices.deinit();
 
     // TODO: by messing with stride I think there's a way to combine the two ArrayLists
     // TODO: make the radius of the puck a runtime thing (scaling matrix + uniform)
-    const circle_vertices = try circle(allocator, radius * 1.05, 0x400);
+    const circle_vertices = try circle(allocator, radius * 1.05, 0x80);
     defer circle_vertices.deinit();
 
     var vao_id = opengl_impl.vao(4);
@@ -217,14 +217,32 @@ pub fn main() !void {
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
                 c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
-                c.SDL_EVENT_KEY_DOWN => {
-                    // const buf = try allocator.alloc(u8, @intCast(w * h * @sizeOf(u8) * 4));
-                    // defer allocator.free(buf);
+                c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
+                    c.SDL_SCANCODE_P => {
+                        log.debug("saving screenshot", .{});
+                        const buf = try allocator.alloc(u8, @intCast(w * h * @sizeOf(u8) * 3));
+                        defer allocator.free(buf);
 
-                    // gl.ReadPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf.ptr);
-                    // _ = c.stbi_write_png("out.png", w, h, 4, buf.ptr, w * 4);
+                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
+                        gl.ReadPixels(0, 0, w, h, gl.RGB, gl.UNSIGNED_BYTE, buf.ptr);
 
-                    // should_quit.store(true, .monotonic);
+                        const stride: usize = @intCast(w * 3);
+                        const height: usize = @intCast(h);
+
+                        var temp_row = try allocator.alloc(u8, stride);
+                        defer allocator.free(temp_row);
+
+                        for (0..height / 2) |i| {
+                            const top_row = i * stride;
+                            const bottom_row = (height - i - 1) * stride;
+
+                            @memcpy(temp_row, buf.ptr[top_row..][0..stride]);
+                            @memcpy(buf.ptr[top_row..][0..stride], buf.ptr[bottom_row..][0..stride]);
+                            @memcpy(buf.ptr[bottom_row..][0..stride], temp_row[0..stride]);
+                        }
+                        _ = c.stbi_write_png("out.png", w, h, 3, buf.ptr, w * 3);
+                    },
+                    else => {},
                 },
                 else => {},
             }
@@ -334,7 +352,7 @@ fn render(
             tex_id[@intFromEnum(Id.texture)],
             frame.width >> 1,
             frame.height >> 1,
-            10,
+            8,
         );
 
         blur(
@@ -1090,6 +1108,7 @@ fn createSdlWindow(width: u32, height: u32) !Ui {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLEBUFFERS, 1));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLESAMPLES, 4));
+    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_ALPHA_SIZE, 8));
 
     const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", @intCast(width), @intCast(height), c.SDL_WINDOW_OPENGL));
     errdefer c.SDL_DestroyWindow(window);
