@@ -786,7 +786,7 @@ const opengl_impl = struct {
             gl.TexImage2D(
                 gl.TEXTURE_2D,
                 0,
-                gl.RGBA,
+                gl.RGB,
                 width,
                 height,
                 0,
