@@ -10,6 +10,8 @@ const FrameQueue = @import("librota").FrameQueue;
 
 var gl_procs: gl.ProcTable = undefined;
 
+const RGB24_BPP = 3;
+
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
     // .linux => c.AV_HWDEVICE_TYPE_VAAPI,
@@ -220,13 +222,13 @@ pub fn main() !void {
                 c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
                     c.SDL_SCANCODE_P => {
                         log.debug("saving screenshot", .{});
-                        const buf = try allocator.alloc(u8, @intCast(w * h * @sizeOf(u8) * 3));
+                        const buf = try allocator.alloc(u8, @intCast(w * h * RGB24_BPP));
                         defer allocator.free(buf);
 
                         gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
                         gl.ReadPixels(0, 0, w, h, gl.RGB, gl.UNSIGNED_BYTE, buf.ptr);
 
-                        const stride: usize = @intCast(w * 3);
+                        const stride: usize = @intCast(w * RGB24_BPP);
                         const height: usize = @intCast(h);
 
                         var temp_row = try allocator.alloc(u8, stride);
@@ -240,7 +242,7 @@ pub fn main() !void {
                             @memcpy(buf.ptr[top_row..][0..stride], buf.ptr[bottom_row..][0..stride]);
                             @memcpy(buf.ptr[bottom_row..][0..stride], temp_row[0..stride]);
                         }
-                        _ = c.stbi_write_png("out.png", w, h, 3, buf.ptr, w * 3);
+                        _ = c.stbi_write_png("out.png", w, h, RGB24_BPP, buf.ptr, w * RGB24_BPP);
                     },
                     else => {},
                 },
@@ -286,9 +288,20 @@ pub fn main() !void {
                 const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
 
                 if (pbo) |ptr| {
-                    const len: usize = @intCast(c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, frame.width, frame.height, 32));
+                    // Copy line by line instead of a single large memcpy
+                    const bytes_per_line: usize = @intCast(frame.linesize[0]);
+                    const height: usize = @intCast(frame.height);
 
-                    @memcpy(ptr[0..len], frame.data[0][0..len]);
+                    // Destination stride in the PBO may be different from the source
+                    const dst_stride = @as(usize, @intCast(frame.width * RGB24_BPP));
+
+                    for (0..height) |y| {
+                        const src_offset = y * bytes_per_line;
+                        const dst_offset = y * dst_stride;
+
+                        @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
+                    }
+
                     _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
                 }
 
@@ -369,7 +382,7 @@ const StabilizedFrameBuffer = struct {
     };
 
     pub fn init(width: usize, height: usize) StabilizedFrameBuffer {
-        const len = c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, @intCast(width), @intCast(height), 32);
+        const len: c_int = @intCast(width * height * RGB24_BPP);
 
         return .{
             .tex_id = opengl_impl.vidTex(2, @intCast(width), @intCast(height)),
@@ -765,7 +778,7 @@ fn angle(frame: *const c.AVFrame, width: usize, height: usize) f32 {
 }
 
 fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]usize {
-    var sum = [_]usize{0} ** 3;
+    var sum = [_]usize{0} ** RGB24_BPP;
 
     for (0..size) |dy| {
         for (0..size) |dx| {
@@ -773,7 +786,7 @@ fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]
             const _x = x + dx;
 
             const row = _y * @as(usize, @intCast(frame.linesize[0]));
-            const px = frame.data[0][row + _x * 3 ..][0..3];
+            const px = frame.data[0][row + _x * RGB24_BPP ..][0..RGB24_BPP];
 
             for (&sum, px) |*a, val| a.* += val;
         }
