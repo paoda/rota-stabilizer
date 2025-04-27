@@ -128,6 +128,11 @@ pub fn main() !void {
     var tex_id = opengl_impl.vidTex(@intCast(vid_width), @intCast(vid_height));
     defer gl.DeleteTextures(1, tex_id[0..]);
 
+    const frame_len = c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, @intCast(vid_width), @intCast(vid_height), 32);
+
+    var pbo_id = opengl_impl.pbo(2, frame_len);
+    defer gl.DeleteBuffers(2, pbo_id[0..]);
+
     const tex_prog = try opengl_impl.program("shader/texture.vert", "shader/texture.frag");
     defer gl.DeleteProgram(tex_prog);
 
@@ -211,6 +216,7 @@ pub fn main() !void {
 
     gl.Viewport(0, 0, w, h);
 
+    var pbo_index: usize = 0;
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
 
@@ -272,6 +278,48 @@ pub fn main() !void {
                 sleep(@intFromFloat(wait_ns));
             }
 
+            {
+                gl.ActiveTexture(gl.TEXTURE0);
+
+                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, pbo_id[pbo_index]);
+                defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+                defer pbo_index = (pbo_index + 1) % 2;
+
+                gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
+                defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+                const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+                if (pbo) |ptr| {
+                    const row_length: usize = @intCast(frame.width * 3); // RGB format: 3 bytes per pixel
+                    const src_stride: usize = @intCast(frame.linesize[0]);
+
+                    for (0..@intCast(frame.height)) |row| {
+                        const src_row_start = row * src_stride;
+                        const dst_row_start = row * row_length;
+
+                        @memcpy(
+                            ptr[dst_row_start..][0..row_length],
+                            frame.data[0][src_row_start..][0..row_length],
+                        );
+                    }
+
+                    _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+                }
+
+                gl.TexSubImage2D(
+                    gl.TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    frame.width,
+                    frame.height,
+                    gl.RGB,
+                    gl.UNSIGNED_BYTE,
+                    null, // Data is already in the PBO
+                );
+            }
+
             try render(
                 frame,
                 outer_blur,
@@ -321,26 +369,6 @@ fn render(
 ) !void {
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
-
-    { // Update the FFMPEG Texture
-        gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
-        defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-        gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @divTrunc(frame.linesize[0], 3)); // FIXME: is necesary becaues frame.width or frame.height can be wrong?
-
-        gl.TexSubImage2D(
-            gl.TEXTURE_2D,
-            0,
-            0,
-            0,
-            frame.width,
-            frame.height,
-            gl.RGB, // match the format of frame data
-            gl.UNSIGNED_BYTE, // since RGB24 uses one byte per channel
-            frame.data[0][0..],
-        );
-    }
 
     const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
 
@@ -765,6 +793,20 @@ const opengl_impl = struct {
     fn vbo(n: comptime_int) [n]c_uint {
         var ids: [n]c_uint = undefined;
         gl.GenBuffers(n, ids[0..]);
+
+        return ids;
+    }
+
+    fn pbo(n: comptime_int, len: c_int) [n]c_uint {
+        var ids: [n]c_uint = undefined;
+        gl.GenBuffers(2, ids[0..]);
+
+        for (ids) |pbo_id| {
+            gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, pbo_id);
+            defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+            gl.BufferData(gl.PIXEL_UNPACK_BUFFER, len, null, gl.STREAM_DRAW);
+        }
 
         return ids;
     }
