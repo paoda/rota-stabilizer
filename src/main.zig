@@ -255,10 +255,12 @@ pub fn main() !void {
 
             const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
             const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
+            stable_buffer.set_display_time(pt_in_seconds); // This is the timestamp for the frame currently being sent to the GPU
 
             // Skip frames that are too old
             const audio_time = audio_clock.seconds_passed();
-            const diff = pt_in_seconds - audio_time;
+            const frame_time = stable_buffer.invert().display_time();
+            const diff = frame_time - audio_time;
 
             if (diff < -threshold) {
                 // log.debug("frame skipped. v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
@@ -334,6 +336,7 @@ const StabilizedFrameBuffer = struct {
     pbo_id: [2]c_uint,
 
     angles: [2]f32,
+    display_times: [2]f64,
 
     current: u1,
 
@@ -346,6 +349,7 @@ const StabilizedFrameBuffer = struct {
                     .tex_id = super.tex_id,
                     .pbo_id = super.pbo_id,
                     .angles = super.angles,
+                    .display_times = super.display_times,
                     .current = super.current +% 1,
                 },
             };
@@ -355,12 +359,12 @@ const StabilizedFrameBuffer = struct {
             return self.inner.tex_id[self.inner.current];
         }
 
-        fn pbo(self: @This()) c_uint {
-            return self.inner.pbo_id[self.inner.current];
-        }
-
         fn angle(self: @This()) f32 {
             return self.inner.angles[self.inner.current];
+        }
+
+        fn display_time(self: @This()) f64 {
+            return self.inner.display_times[self.inner.current];
         }
     };
 
@@ -370,7 +374,8 @@ const StabilizedFrameBuffer = struct {
         return .{
             .tex_id = opengl_impl.vidTex(2, @intCast(width), @intCast(height)),
             .pbo_id = opengl_impl.pbo(2, len),
-            .angles = [_]f32{ 0.0, 0.0 },
+            .angles = .{ 0.0, 0.0 },
+            .display_times = .{ 0.0, 0.0 },
             .current = 0,
         };
     }
@@ -392,8 +397,8 @@ const StabilizedFrameBuffer = struct {
         self.angles[self.current] = rad;
     }
 
-    fn angle(self: @This()) f32 {
-        return self.angles[self.current];
+    fn set_display_time(self: *@This(), in_seconds: f64) void {
+        self.display_times[self.current] = in_seconds;
     }
 
     fn invert(self: @This()) Inverted {
