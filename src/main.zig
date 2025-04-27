@@ -125,13 +125,8 @@ pub fn main() !void {
     var vbo_id = opengl_impl.vbo(3);
     defer gl.DeleteBuffers(3, vbo_id[0..]);
 
-    var tex_id = opengl_impl.vidTex(@intCast(vid_width), @intCast(vid_height));
-    defer gl.DeleteTextures(1, tex_id[0..]);
-
-    const frame_len = c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, @intCast(vid_width), @intCast(vid_height), 32);
-
-    var pbo_id = opengl_impl.pbo(2, frame_len);
-    defer gl.DeleteBuffers(2, pbo_id[0..]);
+    var stable_buffer = StabilizedFrameBuffer.init(vid_width, vid_height);
+    defer stable_buffer.deinit();
 
     const tex_prog = try opengl_impl.program("shader/texture.vert", "shader/texture.frag");
     defer gl.DeleteProgram(tex_prog);
@@ -216,7 +211,6 @@ pub fn main() !void {
 
     gl.Viewport(0, 0, w, h);
 
-    var pbo_index: usize = 0;
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
 
@@ -281,29 +275,18 @@ pub fn main() !void {
             {
                 gl.ActiveTexture(gl.TEXTURE0);
 
-                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, pbo_id[pbo_index]);
+                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo());
                 defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
-                defer pbo_index = (pbo_index + 1) % 2;
 
-                gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
+                gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex());
                 defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
                 const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
 
                 if (pbo) |ptr| {
-                    const row_length: usize = @intCast(frame.width * 3); // RGB format: 3 bytes per pixel
-                    const src_stride: usize = @intCast(frame.linesize[0]);
+                    const len: usize = @intCast(c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, frame.width, frame.height, 32));
 
-                    for (0..@intCast(frame.height)) |row| {
-                        const src_row_start = row * src_stride;
-                        const dst_row_start = row * row_length;
-
-                        @memcpy(
-                            ptr[dst_row_start..][0..row_length],
-                            frame.data[0][src_row_start..][0..row_length],
-                        );
-                    }
-
+                    @memcpy(ptr[0..len], frame.data[0][0..len]);
                     _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
                 }
 
@@ -316,16 +299,16 @@ pub fn main() !void {
                     frame.height,
                     gl.RGB,
                     gl.UNSIGNED_BYTE,
-                    null, // Data is already in the PBO
+                    null,
                 );
             }
 
             try render(
                 frame,
+                &stable_buffer,
                 outer_blur,
                 inner_blur,
                 vao_id[0..],
-                tex_id[0..],
                 prog_id[0..],
                 u_inv_scale,
                 u_aspect,
@@ -335,14 +318,92 @@ pub fn main() !void {
                 circle_vertices.items.len,
                 ring_vertices.items.len,
             );
+
+            stable_buffer.swap();
         } else {
-            std.time.sleep(1 * std.time.ns_per_ms); // TODO: add adaptive sleeping here
+            // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
             continue;
         }
 
         try errify(c.SDL_GL_SwapWindow(ui.window));
     }
 }
+
+const StabilizedFrameBuffer = struct {
+    tex_id: [2]c_uint,
+    pbo_id: [2]c_uint,
+
+    angles: [2]f32,
+
+    current: u1,
+
+    const Inverted = struct {
+        inner: StabilizedFrameBuffer,
+
+        fn from(super: StabilizedFrameBuffer) Inverted {
+            return .{
+                .inner = .{
+                    .tex_id = super.tex_id,
+                    .pbo_id = super.pbo_id,
+                    .angles = super.angles,
+                    .current = super.current +% 1,
+                },
+            };
+        }
+
+        fn tex(self: @This()) c_uint {
+            return self.inner.tex_id[self.inner.current];
+        }
+
+        fn pbo(self: @This()) c_uint {
+            return self.inner.pbo_id[self.inner.current];
+        }
+
+        fn angle(self: @This()) f32 {
+            return self.inner.angles[self.inner.current];
+        }
+    };
+
+    pub fn init(width: usize, height: usize) StabilizedFrameBuffer {
+        const len = c.av_image_get_buffer_size(c.AV_PIX_FMT_RGB24, @intCast(width), @intCast(height), 32);
+
+        return .{
+            .tex_id = opengl_impl.vidTex(2, @intCast(width), @intCast(height)),
+            .pbo_id = opengl_impl.pbo(2, len),
+            .angles = [_]f32{ 0.0, 0.0 },
+            .current = 0,
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        gl.DeleteTextures(2, self.tex_id[0..]);
+        gl.DeleteBuffers(2, self.pbo_id[0..]);
+    }
+
+    fn tex(self: @This()) c_uint {
+        return self.tex_id[self.current];
+    }
+
+    fn pbo(self: @This()) c_uint {
+        return self.pbo_id[self.current];
+    }
+
+    fn set_angle(self: *@This(), rad: f32) void {
+        self.angles[self.current] = rad;
+    }
+
+    fn angle(self: @This()) f32 {
+        return self.angles[self.current];
+    }
+
+    fn invert(self: @This()) Inverted {
+        return Inverted.from(self);
+    }
+
+    fn swap(self: *@This()) void {
+        self.current = self.current +% 1;
+    }
+};
 
 const Id = enum(usize) {
     texture = 0,
@@ -354,10 +415,10 @@ const Id = enum(usize) {
 
 fn render(
     frame: *const c.AVFrame,
+    stable_buffer: *StabilizedFrameBuffer,
     outer_blur: [2]Blur,
     inner_blur: [2]Blur,
     vao_id: *const [4]c_uint,
-    tex_id: *const [1]c_uint,
     prog_id: *const [5]c_uint,
     u_inv_scale: Mat2,
     u_aspect: Mat2,
@@ -370,14 +431,19 @@ fn render(
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
-    const rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+    // The angle we calculate here is the angle of the frame that's being sent to the GPU, thus it's the next frame's angle
+    const next_rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
+    stable_buffer.set_angle(next_rad);
+
+    const rad = stable_buffer.invert().angle();
+    const tex_id = stable_buffer.invert().tex();
 
     {
         blur(
             outer_blur,
             prog_id[@intFromEnum(Id.blur)],
             vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
-            tex_id[@intFromEnum(Id.texture)],
+            tex_id,
             frame.width >> 1,
             frame.height >> 1,
             8,
@@ -387,17 +453,14 @@ fn render(
             inner_blur,
             prog_id[@intFromEnum(Id.blur)],
             vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
-            tex_id[@intFromEnum(Id.texture)],
+            tex_id,
             frame.width,
             frame.height,
             4,
         );
 
         gl.UseProgram(prog_id[@intFromEnum(Id.background)]);
-        defer gl.UseProgram(0);
-
         gl.BindVertexArray(vao_id[@intFromEnum(Id.texture)]);
-        defer gl.BindVertexArray(0);
 
         gl.ActiveTexture(gl.TEXTURE0);
         gl.BindTexture(gl.TEXTURE_2D, outer_blur[0].tex); // guaranteed to be the last modified texture
@@ -421,10 +484,7 @@ fn render(
     {
         // Draw Transparent Puck
         gl.UseProgram(prog_id[@intFromEnum(Id.circle)]);
-        defer gl.UseProgram(0);
-
         gl.BindVertexArray(vao_id[@intFromEnum(Id.circle)]);
-        defer gl.BindVertexArray(0);
 
         gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.circle)], "u_scale"), u_scale.inner[0]);
         gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(circle_vertices_len));
@@ -446,7 +506,7 @@ fn render(
 
         gl.ActiveTexture(gl.TEXTURE0);
 
-        gl.BindTexture(gl.TEXTURE_2D, tex_id[@intFromEnum(Id.texture)]);
+        gl.BindTexture(gl.TEXTURE_2D, tex_id);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
@@ -732,6 +792,7 @@ const Blur = struct {
     }
 };
 
+// FIXME: this is the bottleneck of the main thread
 fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int, height: c_int, passes: u32) void {
     std.debug.assert(passes % 2 == 0);
 
@@ -851,29 +912,34 @@ const opengl_impl = struct {
         return [_]Blur{ .{ .fbo = fbo_ids[0], .tex = tex_ids[0] }, .{ .fbo = fbo_ids[1], .tex = tex_ids[1] } };
     }
 
-    fn vidTex(width: c_int, height: c_int) [1]c_uint {
-        var tex_id: [1]c_uint = undefined;
-        gl.GenTextures(1, tex_id[0..]);
+    fn vidTex(n: comptime_int, width: c_int, height: c_int) [n]c_uint {
+        var ids: [n]c_uint = undefined;
+        gl.GenTextures(n, ids[0..]);
 
-        gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
-        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+        for (ids) |tex_id| {
+            gl.BindTexture(gl.TEXTURE_2D, tex_id);
 
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-        gl.TexImage2D(
-            gl.TEXTURE_2D,
-            0,
-            gl.RGBA,
-            width,
-            height,
-            0,
-            gl.RGB,
-            gl.UNSIGNED_BYTE,
-            null,
-        );
+            gl.TexImage2D(
+                gl.TEXTURE_2D,
+                0,
+                gl.RGB,
+                width,
+                height,
+                0,
+                gl.RGB,
+                gl.UNSIGNED_BYTE,
+                null,
+            );
+        }
 
-        return tex_id;
+        gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        return ids;
     }
 
     fn program(comptime vert_path: []const u8, comptime frag_path: []const u8) !c_uint {
