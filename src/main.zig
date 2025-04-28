@@ -252,6 +252,7 @@ pub fn main() !void {
 
         if (queue.pop()) |frame| {
             defer queue.recycle(frame);
+            defer stable_buffer.swap();
 
             const threshold = 0.1;
 
@@ -264,13 +265,13 @@ pub fn main() !void {
             const frame_time = stable_buffer.invert().display_time();
             const diff = frame_time - audio_time;
 
-            if (diff < -threshold) {
-                // log.debug("frame skipped. v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
+            if (diff < -threshold and diff > -1.0) {
+                log.debug("skip: v: {d:.3}s a: {d:.3}s | \x1B[36m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
                 continue;
             }
 
             if (diff > threshold * 0.1) {
-                // log.debug("frame wait: v: {d:.3}s a: {d:.3}s | {d:.3}s", .{ pt_in_seconds, audio_time, diff });
+                log.debug("wait: v: {d:.3}s a: {d:.3}s | \x1B[31m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
 
                 const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s); // TODO: 1 second is way too long?
                 sleep(@intFromFloat(wait_ns));
@@ -333,8 +334,6 @@ pub fn main() !void {
                 circle_vertices.items.len,
                 ring_vertices.items.len,
             );
-
-            stable_buffer.swap();
         } else {
             // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
             continue;

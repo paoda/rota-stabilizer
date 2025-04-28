@@ -27,7 +27,7 @@ pub inline fn libavError(value: c_int) error{ffmpeg_error}!c_int {
 
     if (ret < 0) std.debug.panic("ffmpeg error handle failed: {}", .{value});
 
-    std.debug.print("{s}\n", .{std.mem.sliceTo(&buf, 0)});
+    std.debug.print("ffmpeg err: {s}\n", .{std.mem.sliceTo(&buf, 0)});
     return error.ffmpeg_error;
 }
 
