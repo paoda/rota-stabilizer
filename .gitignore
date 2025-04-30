@@ -10,3 +10,7 @@ zen_workaround.py
 **/*.mov
 **/*.png
 **/*.ppm
+
+# Editors
+.fleet/
+.vscode/
