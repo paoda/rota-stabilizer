@@ -345,7 +345,6 @@ const StabilizedFrameBuffer = struct {
     tex_id: [2]c_uint,
     pbo_id: [2]c_uint,
 
-    angles: [2]f32,
     display_times: [2]f64,
 
     current: u1,
@@ -358,7 +357,6 @@ const StabilizedFrameBuffer = struct {
                 .inner = .{
                     .tex_id = super.tex_id,
                     .pbo_id = super.pbo_id,
-                    .angles = super.angles,
                     .display_times = super.display_times,
                     .current = super.current +% 1,
                 },
@@ -367,10 +365,6 @@ const StabilizedFrameBuffer = struct {
 
         fn tex(self: @This()) c_uint {
             return self.inner.tex_id[self.inner.current];
-        }
-
-        fn angle(self: @This()) f32 {
-            return self.inner.angles[self.inner.current];
         }
 
         fn display_time(self: @This()) f64 {
@@ -384,7 +378,6 @@ const StabilizedFrameBuffer = struct {
         return .{
             .tex_id = opengl_impl.vidTex(2, @intCast(width), @intCast(height)),
             .pbo_id = opengl_impl.pbo(2, len),
-            .angles = .{ 0.0, 0.0 },
             .display_times = .{ 0.0, 0.0 },
             .current = 0,
         };
@@ -401,10 +394,6 @@ const StabilizedFrameBuffer = struct {
 
     fn pbo(self: @This()) c_uint {
         return self.pbo_id[self.current];
-    }
-
-    fn set_angle(self: *@This(), rad: f32) void {
-        self.angles[self.current] = rad;
     }
 
     fn set_display_time(self: *@This(), in_seconds: f64) void {
@@ -446,11 +435,6 @@ fn render(
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
-    // The angle we calculate here is the angle of the frame that's being sent to the GPU, thus it's the next frame's angle
-    const next_rad = -angle(frame, @intCast(frame.width), @intCast(frame.height)) * std.math.rad_per_deg;
-    stable_buffer.set_angle(next_rad);
-
-    const rad = stable_buffer.invert().angle();
     const tex_id = stable_buffer.invert().tex();
 
     {
@@ -483,12 +467,17 @@ fn render(
         gl.ActiveTexture(gl.TEXTURE1);
         gl.BindTexture(gl.TEXTURE_2D, inner_blur[0].tex); // guaranteed to be the last modified texture
 
-        const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
-        const u_transform = u_rotation.mul(u_inv_scale).mul(u_aspect);
+        gl.ActiveTexture(gl.TEXTURE2);
+        gl.BindTexture(gl.TEXTURE_2D, tex_id);
+
+        // const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+        const u_transform = u_inv_scale.mul(u_aspect);
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_outer"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_inner"), 1);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_screen"), 2);
+        gl.Uniform2i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_dimension"), frame.width, frame.height);
 
         gl.Uniform2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_viewport"), 1, &u_viewport.inner);
         gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_radius"), u_scale.inner[0] * puck_radius);
@@ -524,11 +513,12 @@ fn render(
         gl.BindTexture(gl.TEXTURE_2D, tex_id);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
-        const u_transform = u_rotation.mul(u_scale).mul(u_aspect);
+        // const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+        const u_transform = u_scale.mul(u_aspect);
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_screen"), 0);
+        gl.Uniform2i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_dimension"), frame.width, frame.height);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -748,52 +738,6 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
     }
 }
 
-fn angle(frame: *const c.AVFrame, width: usize, height: usize) f32 {
-    const ofs = 5;
-    const size = 3;
-
-    const btm_left = sample(size, frame, ofs, height - ofs);
-    const top_left = sample(size, frame, ofs, ofs);
-    const btm_right = sample(size, frame, width - ofs, height - ofs);
-    const top_right = sample(size, frame, width - ofs, ofs);
-
-    var out: u16 = 0;
-    out |= @as(u16, @intFromBool(top_left[0] >= 128)) << 11;
-    out |= @as(u16, @intFromBool(top_left[1] >= 128)) << 10;
-    out |= @as(u16, @intFromBool(top_left[2] >= 128)) << 9;
-    out |= @as(u16, @intFromBool(top_right[0] >= 128)) << 8;
-    out |= @as(u16, @intFromBool(top_right[1] >= 128)) << 7;
-    out |= @as(u16, @intFromBool(top_right[2] >= 128)) << 6;
-    out |= @as(u16, @intFromBool(btm_left[0] >= 128)) << 5;
-    out |= @as(u16, @intFromBool(btm_left[1] >= 128)) << 4;
-    out |= @as(u16, @intFromBool(btm_left[2] >= 128)) << 3;
-    out |= @as(u16, @intFromBool(btm_right[0] >= 128)) << 2;
-    out |= @as(u16, @intFromBool(btm_right[1] >= 128)) << 1;
-    out |= @as(u16, @intFromBool(btm_right[2] >= 128)) << 0;
-
-    return 360.0 * @as(f32, @floatFromInt(out)) / 4096.0;
-}
-
-fn sample(comptime size: usize, frame: *const c.AVFrame, x: usize, y: usize) [3]usize {
-    var sum = [_]usize{0} ** RGB24_BPP;
-
-    for (0..size) |dy| {
-        for (0..size) |dx| {
-            const _y = y + dy;
-            const _x = x + dx;
-
-            const row = _y * @as(usize, @intCast(frame.linesize[0]));
-            const px = frame.data[0][row + _x * RGB24_BPP ..][0..RGB24_BPP];
-
-            for (&sum, px) |*a, val| a.* += val;
-        }
-    }
-
-    for (&sum) |*val| val.* /= size * size; // average values
-
-    return sum;
-}
-
 const Blur = struct {
     fbo: c_uint,
     tex: c_uint,
@@ -934,8 +878,9 @@ const opengl_impl = struct {
         for (ids) |tex_id| {
             gl.BindTexture(gl.TEXTURE_2D, tex_id);
 
-            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            // FIXME: gl.LINEAR looks nicer but I think for the angle sampling we must do gl.NEAREST for correctness
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
             gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
             gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
@@ -1036,9 +981,9 @@ fn circle(allocator: std.mem.Allocator, radius: f32, len: usize) !std.ArrayList(
     try list.appendSlice(&.{ 0.0, 0.0 });
 
     for (0..len) |i| {
-        const _angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / _len;
-        const x = @cos(_angle);
-        const y = @sin(_angle);
+        const angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / _len;
+        const x = @cos(angle);
+        const y = @sin(angle);
 
         try list.append(x * radius);
         try list.append(y * radius);
@@ -1055,9 +1000,9 @@ fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len:
     const _len: f32 = @floatFromInt(len);
 
     for (0..len) |i| {
-        const _angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / _len;
-        const x = @cos(_angle);
-        const y = @sin(_angle);
+        const angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / _len;
+        const x = @cos(angle);
+        const y = @sin(angle);
 
         try list.append(x * outer_radius);
         try list.append(y * outer_radius);
