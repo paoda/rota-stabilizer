@@ -11,6 +11,7 @@ const FrameQueue = @import("librota").FrameQueue;
 var gl_procs: gl.ProcTable = undefined;
 
 const RGB24_BPP = 3;
+const muted_by_default = true;
 
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
@@ -243,6 +244,10 @@ pub fn main() !void {
                             @memcpy(buf.ptr[bottom_row..][0..stride], temp_row[0..stride]);
                         }
                         _ = c.stbi_write_png("out.png", w, h, RGB24_BPP, buf.ptr, w * RGB24_BPP);
+                    },
+                    c.SDL_SCANCODE_M => {
+                        audio_clock.is_muted = !audio_clock.is_muted;
+                        try errify(c.SDL_SetAudioStreamGain(audio_clock.stream.inner, if (audio_clock.is_muted) 0.0 else 1.0));
                     },
                     else => {},
                 },
@@ -1310,6 +1315,8 @@ const AudioClock = struct {
     channels: u8,
     bytes_per_sample: u32,
 
+    is_muted: bool,
+
     stream: SdlAudioStream,
 
     const log = std.log.scoped(.audio_clock);
@@ -1317,12 +1324,16 @@ const AudioClock = struct {
     pub fn init(stream: SdlAudioStream, sample_rate: u16, channels: u8, fmt: c.AVSampleFormat) @This() {
         defer _ = c.SDL_ResumeAudioStreamDevice(stream.inner);
 
+        const ret = c.SDL_SetAudioStreamGain(stream.inner, if (muted_by_default) 0.0 else 1.0);
+        if (!ret) log.err("failed to set audio gain on init", .{});
+
         return .{
             .start_time = c.SDL_GetPerformanceCounter(),
             .sample_rate = sample_rate,
             .channels = channels,
             .bytes_per_sample = @intCast(c.av_get_bytes_per_sample(fmt)),
 
+            .is_muted = muted_by_default,
             .stream = stream,
         };
     }
