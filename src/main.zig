@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gl = @import("gl");
+const zstbi = @import("zstbi");
 
 const c = @import("librota").c;
 
@@ -10,6 +11,7 @@ const FrameQueue = @import("librota").FrameQueue;
 
 var gl_procs: gl.ProcTable = undefined;
 
+/// bytes per pixel, i know sorry
 const RGB24_BPP = 3;
 const muted_by_default = true;
 
@@ -29,6 +31,10 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
+
+    // tmp: testing frame capture
+    zstbi.init(allocator);
+    defer zstbi.deinit();
 
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
@@ -223,27 +229,14 @@ pub fn main() !void {
                 c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
                     c.SDL_SCANCODE_P => {
                         log.debug("saving screenshot", .{});
-                        const buf = try allocator.alloc(u8, @intCast(w * h * RGB24_BPP));
-                        defer allocator.free(buf);
+                        var img: zstbi.Image = try .createEmpty(@intCast(w), @intCast(h), RGB24_BPP, .{});
+                        defer img.deinit();
 
                         gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
-                        gl.ReadPixels(0, 0, w, h, gl.RGB, gl.UNSIGNED_BYTE, buf.ptr);
+                        gl.ReadPixels(0, 0, w, h, gl.RGB, gl.UNSIGNED_BYTE, img.data.ptr);
 
-                        const stride: usize = @intCast(w * RGB24_BPP);
-                        const height: usize = @intCast(h);
-
-                        var temp_row = try allocator.alloc(u8, stride);
-                        defer allocator.free(temp_row);
-
-                        for (0..height / 2) |i| {
-                            const top_row = i * stride;
-                            const bottom_row = (height - i - 1) * stride;
-
-                            @memcpy(temp_row, buf.ptr[top_row..][0..stride]);
-                            @memcpy(buf.ptr[top_row..][0..stride], buf.ptr[bottom_row..][0..stride]);
-                            @memcpy(buf.ptr[bottom_row..][0..stride], temp_row[0..stride]);
-                        }
-                        _ = c.stbi_write_png("out.png", w, h, RGB24_BPP, buf.ptr, w * RGB24_BPP);
+                        zstbi.setFlipVerticallyOnWrite(true);
+                        try img.writeToFile("screenshot.png", .png);
                     },
                     c.SDL_SCANCODE_M => {
                         audio_clock.is_muted = !audio_clock.is_muted;

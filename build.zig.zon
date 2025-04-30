@@ -49,6 +49,10 @@
             .hash = "N-V-__8AAD_XPwuvbf8c117TB8ikaKnS8MpyEmyxvhv617i0",
             .lazy = true,
         },
+        .zstbi = .{
+            .url = "git+https://github.com/zig-gamedev/zstbi#094c4bba5cdbec167d3f6aaa98cccccd5c99145f",
+            .hash = "zstbi-0.11.0-dev-L0Ea_-eVBwCl8RYA98PhLDw3Fhw5k7FJOHSMDKWDOvqx",
+        },
     },
     .paths = .{
         "build.zig",
