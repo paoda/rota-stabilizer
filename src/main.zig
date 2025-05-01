@@ -1356,7 +1356,7 @@ const AngleCalc = struct {
     tex: [1]c_uint,
     prog: c_uint,
 
-    u_dimension: [2]c_int,
+    u_dimension: [2]f32,
 
     const log = std.log.scoped(.angle_calc);
 
@@ -1392,7 +1392,7 @@ const AngleCalc = struct {
             .fbo = fbo_id,
             .tex = tex_id,
             .prog = program,
-            .u_dimension = .{ tex_width, tex_height },
+            .u_dimension = .{ @floatFromInt(tex_width), @floatFromInt(tex_height) },
         };
     }
 
@@ -1415,7 +1415,7 @@ const AngleCalc = struct {
         defer gl.UseProgram(0);
 
         gl.Uniform1i(gl.GetUniformLocation(self.prog, "u_screen"), 0);
-        gl.Uniform2i(gl.GetUniformLocation(self.prog, "u_dimension"), self.u_dimension[0], self.u_dimension[1]);
+        gl.Uniform2f(gl.GetUniformLocation(self.prog, "u_dimension"), self.u_dimension[0], self.u_dimension[1]);
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
 

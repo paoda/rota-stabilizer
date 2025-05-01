@@ -4,15 +4,17 @@ layout(location = 0) out vec4 angle;
 in vec2 uv;
 
 uniform sampler2D u_screen;
-uniform ivec2 u_dimension;
+uniform vec2 u_dimension;
 
-vec3 sampleTexture(int size, ivec2 start_pos) {
+vec3 sampleTexture(int size, vec2 start_pos) {
     vec3 sum = vec3(0.0);
 
     for (int dy = 0; dy < size; dy++) {
         for (int dx = 0; dx < size; dx++) {
-            ivec2 tex_pos = start_pos + ivec2(dx, dy);
-            sum += texelFetch(u_screen, tex_pos, 0).rgb;
+            vec2 tex_pos = start_pos + vec2(dx, dy);
+            vec2 normalized = (tex_pos + 0.5) / u_dimension;
+
+            sum += texture(u_screen, normalized).rgb;
         }
     }
 
@@ -25,10 +27,10 @@ void main() {
     const float threshold = (255.0 / 2.0) / 255.0;
 
     // Sample regions at the same positions as the CPU code
-    vec3 btm_left = sampleTexture(size, ivec2(ofs, u_dimension.y - ofs - size));
-    vec3 top_left = sampleTexture(size, ivec2(ofs, ofs));
-    vec3 btm_right = sampleTexture(size, ivec2(u_dimension.x - ofs - size, u_dimension.y - ofs - size));
-    vec3 top_right = sampleTexture(size, ivec2(u_dimension.x - ofs - size, ofs));
+    vec3 btm_left = sampleTexture(size, vec2(ofs, u_dimension.y - ofs - size));
+    vec3 top_left = sampleTexture(size, vec2(ofs, ofs));
+    vec3 btm_right = sampleTexture(size, vec2(u_dimension.x - ofs - size, u_dimension.y - ofs - size));
+    vec3 top_right = sampleTexture(size, vec2(u_dimension.x - ofs - size, ofs));
 
     uint value = 0u;
     value |= uint(top_left.r >= threshold) << 11;
