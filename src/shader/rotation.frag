@@ -20,8 +20,6 @@ vec3 sampleTexture(int size, ivec2 start_pos) {
 }
 
 void main() {
-    // TODO: implement early return
-    
     const int ofs = 5;
     const int size = 3;
     const float threshold = (255.0 / 2.0) / 255.0;
