@@ -634,6 +634,7 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
     }
 }
 
+// FIXME: massive bottleneck
 fn convertFrame(bundle: AvBundle, src_frame: *c.AVFrame, sw_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
     @setRuntimeSafety(false);
 
@@ -1418,7 +1419,8 @@ const AngleCalc = struct {
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
 
-        var angle: f32 = undefined;
+        // FIXME: massive bottleneck
+        var angle: f32 = 0;
         gl.ReadPixels(0, 0, 1, 1, gl.RED, gl.FLOAT, &angle);
 
         return angle;
