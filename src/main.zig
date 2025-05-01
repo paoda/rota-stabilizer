@@ -154,6 +154,9 @@ pub fn main() !void {
 
     const prog_id: [5]c_uint = [_]c_uint{ tex_prog, ring_prog, circle_prog, bg_prog, blur_prog };
 
+    var angle_calc = try AngleCalc.init(vid_codec_ctx.width, vid_codec_ctx.height);
+    defer angle_calc.deinit();
+
     { // Setup for FFMPEG Texture
         gl.BindVertexArray(vao_id[@intFromEnum(Id.texture)]);
         defer gl.BindVertexArray(0);
@@ -218,7 +221,7 @@ pub fn main() !void {
     var w: c_int, var h: c_int = .{ undefined, undefined };
     try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
 
-    gl.Viewport(0, 0, w, h);
+    var view = Viewport.init(w, h);
 
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
@@ -319,7 +322,9 @@ pub fn main() !void {
 
             try render(
                 frame,
+                &view,
                 &stable_buffer,
+                angle_calc,
                 outer_blur,
                 inner_blur,
                 vao_id[0..],
@@ -419,7 +424,9 @@ const Id = enum(usize) {
 
 fn render(
     frame: *const c.AVFrame,
+    view: *Viewport,
     stable_buffer: *StabilizedFrameBuffer,
+    angle_calc: AngleCalc,
     outer_blur: [2]Blur,
     inner_blur: [2]Blur,
     vao_id: *const [4]c_uint,
@@ -437,9 +444,13 @@ fn render(
 
     const tex_id = stable_buffer.invert().tex();
 
+    const rad = angle_calc.execute(view, tex_id);
+    const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+
     {
         blur(
             outer_blur,
+            view,
             prog_id[@intFromEnum(Id.blur)],
             vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
             tex_id,
@@ -450,6 +461,7 @@ fn render(
 
         blur(
             inner_blur,
+            view,
             prog_id[@intFromEnum(Id.blur)],
             vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
             tex_id,
@@ -467,17 +479,11 @@ fn render(
         gl.ActiveTexture(gl.TEXTURE1);
         gl.BindTexture(gl.TEXTURE_2D, inner_blur[0].tex); // guaranteed to be the last modified texture
 
-        gl.ActiveTexture(gl.TEXTURE2);
-        gl.BindTexture(gl.TEXTURE_2D, tex_id);
-
-        // const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
-        const u_transform = u_inv_scale.mul(u_aspect);
+        const u_transform = u_rotation.mul(u_inv_scale.mul(u_aspect));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_outer"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_inner"), 1);
-        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_screen"), 2);
-        gl.Uniform2i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_dimension"), frame.width, frame.height);
 
         gl.Uniform2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_viewport"), 1, &u_viewport.inner);
         gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_radius"), u_scale.inner[0] * puck_radius);
@@ -513,12 +519,10 @@ fn render(
         gl.BindTexture(gl.TEXTURE_2D, tex_id);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        // const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
-        const u_transform = u_scale.mul(u_aspect);
+        const u_transform = u_rotation.mul(u_scale.mul(u_aspect));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_screen"), 0);
-        gl.Uniform2i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_dimension"), frame.width, frame.height);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -752,15 +756,8 @@ const Blur = struct {
 };
 
 // FIXME: this is the bottleneck of the main thread
-fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int, height: c_int, passes: u32) void {
+fn blur(b: [2]Blur, view: *Viewport, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int, height: c_int, passes: u32) void {
     std.debug.assert(passes % 2 == 0);
-
-    const view_cache: *[2]c_int = blk: {
-        var buf: [4]c_int = undefined;
-        gl.GetIntegerv(gl.VIEWPORT, &buf);
-
-        break :blk buf[2..4];
-    };
 
     const fbo_cache: c_uint = blk: {
         var buf: [1]c_int = undefined;
@@ -769,8 +766,10 @@ fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int
         break :blk @intCast(buf[0]);
     };
 
-    gl.Viewport(0, 0, width, height);
-    defer gl.Viewport(0, 0, view_cache[0], view_cache[1]);
+    view.set(width, height);
+    defer view.restore();
+
+    gl.BindVertexArray(src_vao);
 
     gl.UseProgram(prog);
     defer gl.UseProgram(0);
@@ -779,6 +778,7 @@ fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int
     gl.Uniform1i(gl.GetUniformLocation(prog, "u_screen"), 0);
 
     const horiz_loc = gl.GetUniformLocation(prog, "u_horizontal");
+
     for (0..passes) |i| {
         const current = b[i % 2];
         const other = b[1 - i % 2];
@@ -793,7 +793,6 @@ fn blur(b: [2]Blur, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int
             else => gl.BindTexture(gl.TEXTURE_2D, other.tex),
         }
 
-        gl.BindVertexArray(src_vao);
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
 
@@ -1315,5 +1314,120 @@ const AvFrame = struct {
 
     pub fn ptr(self: @This()) *c.AVFrame {
         return self.inner.?;
+    }
+};
+
+const Viewport = struct {
+    width: c_int,
+    height: c_int,
+
+    cached: ?[2]c_int = null,
+
+    fn init(width: c_int, height: c_int) Viewport {
+        gl.Viewport(0, 0, width, height);
+
+        return .{ .width = width, .height = height };
+    }
+
+    fn set(self: *@This(), width: c_int, height: c_int) void {
+        gl.Viewport(0, 0, width, height);
+        self.cached = .{ self.width, self.height };
+
+        self.width = width;
+        self.height = height;
+    }
+
+    fn restore(self: *@This()) void {
+        if (self.cached == null) @panic("viewport manager state corrupted");
+
+        const view = self.cached.?;
+        gl.Viewport(0, 0, view[0], view[1]);
+
+        self.width = view[0];
+        self.height = view[1];
+        self.cached = null;
+    }
+};
+
+const AngleCalc = struct {
+    vao: [1]c_uint,
+    fbo: [1]c_uint,
+    tex: [1]c_uint,
+    prog: c_uint,
+
+    u_dimension: [2]c_int,
+
+    const log = std.log.scoped(.angle_calc);
+
+    pub fn init(tex_width: c_int, tex_height: c_int) !AngleCalc {
+        var fbo_id: [1]c_uint = undefined;
+        gl.GenFramebuffers(1, fbo_id[0..]);
+
+        var vao_id: [1]c_uint = undefined;
+        gl.GenVertexArrays(1, vao_id[0..]);
+
+        var tex_id: [1]c_uint = undefined;
+        gl.GenTextures(1, tex_id[0..]);
+
+        gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_id[0]);
+        defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+
+        gl.BindTexture(gl.TEXTURE_2D, tex_id[0]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        const program = try opengl_impl.program("./shader/blur.vert", "./shader/rotation.frag");
+
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.R32F, 1, 1, 0, gl.RED, gl.FLOAT, null);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex_id[0], 0);
+
+        const ret = gl.CheckFramebufferStatus(gl.FRAMEBUFFER);
+        if (ret != gl.FRAMEBUFFER_COMPLETE) @panic("FIXME: Framebuffer incomplete");
+
+        return .{
+            .vao = vao_id,
+            .fbo = fbo_id,
+            .tex = tex_id,
+            .prog = program,
+            .u_dimension = .{ tex_width, tex_height },
+        };
+    }
+
+    pub fn execute(self: @This(), view: *Viewport, u_screen: c_uint) f32 {
+        view.set(1, 1);
+        defer view.restore();
+
+        gl.BindVertexArray(self.vao[0]);
+        defer gl.BindVertexArray(0);
+
+        gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo[0]);
+        defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+
+        gl.ActiveTexture(gl.TEXTURE0);
+
+        gl.BindTexture(gl.TEXTURE_2D, u_screen);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.UseProgram(self.prog);
+        defer gl.UseProgram(0);
+
+        gl.Uniform1i(gl.GetUniformLocation(self.prog, "u_screen"), 0);
+        gl.Uniform2i(gl.GetUniformLocation(self.prog, "u_dimension"), self.u_dimension[0], self.u_dimension[1]);
+
+        gl.DrawArrays(gl.TRIANGLES, 0, 3);
+
+        var angle: f32 = undefined;
+        gl.ReadPixels(0, 0, 1, 1, gl.RED, gl.FLOAT, &angle);
+
+        return angle;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        gl.DeleteFramebuffers(1, self.fbo[0..]);
+        gl.DeleteTextures(1, self.tex[0..]);
+        gl.DeleteVertexArrays(1, self.vao[0..]);
+        gl.DeleteProgram(self.prog);
     }
 };
