@@ -21,7 +21,7 @@ const muted_by_default = true;
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
     .linux => c.AV_HWDEVICE_TYPE_VAAPI,
-    // .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
+    .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
     // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?
 };
@@ -259,11 +259,13 @@ pub fn main() !void {
             defer queue.recycle(frame);
             defer stable_buffer.swap();
 
+            // FIXME: we currently assume colour space. We can't do that.
+
             // Determine Colorspace
-            log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
-            log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
-            log.debug("colour primaries: {s}", .{c.av_color_primaries_name(frame.color_primaries)});
-            log.debug("colour transfer: {s}", .{c.av_color_transfer_name(frame.color_trc)});
+            // log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
+            // log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
+            // log.debug("colour primaries: {s}", .{c.av_color_primaries_name(frame.color_primaries)});
+            // log.debug("colour transfer: {s}", .{c.av_color_transfer_name(frame.color_trc)});
 
             const threshold = 0.1;
 
@@ -1495,7 +1497,7 @@ const AngleCalc = struct {
 
         const program = try opengl_impl.program("./shader/blur.vert", "./shader/rotation.frag");
 
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGB32F, 1, 1, 0, gl.RGBA, gl.FLOAT, null);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.R32F, 1, 1, 0, gl.RED, gl.FLOAT, null);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
