@@ -11,6 +11,8 @@ zen_workaround.py
 **/*.png
 **/*.ppm
 
+**/*.patch
+
 # Editors
 .fleet/
 .vscode/
