@@ -11,13 +11,16 @@ const FrameQueue = @import("librota").FrameQueue;
 
 var gl_procs: gl.ProcTable = undefined;
 
-/// bytes per pixel, i know sorry
+// bytes per pixel, i know... sorry
 const RGB24_BPP = 3;
+const Y_BPP = 1;
+const UV_BPP = 2;
+
 const muted_by_default = true;
 
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
-    // .linux => c.AV_HWDEVICE_TYPE_VAAPI,
+    .linux => c.AV_HWDEVICE_TYPE_VAAPI,
     // .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
     // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?
@@ -95,6 +98,7 @@ pub fn main() !void {
 
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.Disable(gl.FRAMEBUFFER_SRGB);
 
     const aspect = @as(f32, @floatFromInt(vid_width)) / @as(f32, @floatFromInt(vid_height));
     const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
@@ -134,7 +138,7 @@ pub fn main() !void {
     var vbo_id = opengl_impl.vbo(3);
     defer gl.DeleteBuffers(3, vbo_id[0..]);
 
-    var stable_buffer = StabilizedFrameBuffer.init(vid_width, vid_height);
+    var stable_buffer = DoubleBuffer.init(vid_width, vid_height);
     defer stable_buffer.deinit();
 
     const tex_prog = try opengl_impl.program("shader/texture.vert", "shader/texture.frag");
@@ -255,6 +259,12 @@ pub fn main() !void {
             defer queue.recycle(frame);
             defer stable_buffer.swap();
 
+            // Determine Colorspace
+            log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
+            log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
+            log.debug("colour primaries: {s}", .{c.av_color_primaries_name(frame.color_primaries)});
+            log.debug("colour transfer: {s}", .{c.av_color_transfer_name(frame.color_trc)});
+
             const threshold = 0.1;
 
             const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
@@ -267,24 +277,22 @@ pub fn main() !void {
             const diff = frame_time - audio_time;
 
             if (diff < -threshold and diff > -1.0) {
-                log.debug("skip: v: {d:.3}s a: {d:.3}s | \x1B[36m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
+                // log.debug("skip: v: {d:.3}s a: {d:.3}s | \x1B[36m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
                 continue;
             }
 
             if (diff > threshold * 0.1) {
-                log.debug("wait: v: {d:.3}s a: {d:.3}s | \x1B[31m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
+                // log.debug("wait: v: {d:.3}s a: {d:.3}s | \x1B[31m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
 
                 const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s); // TODO: 1 second is way too long?
                 sleep(@intFromFloat(wait_ns));
             }
 
             {
-                gl.ActiveTexture(gl.TEXTURE0);
-
-                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo());
+                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
                 defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
 
-                gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex());
+                gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
                 defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
                 const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
@@ -295,7 +303,7 @@ pub fn main() !void {
                     const height: usize = @intCast(frame.height);
 
                     // Destination stride in the PBO may be different from the source
-                    const dst_stride = @as(usize, @intCast(frame.width * RGB24_BPP));
+                    const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
 
                     for (0..height) |y| {
                         const src_offset = y * bytes_per_line;
@@ -314,7 +322,47 @@ pub fn main() !void {
                     0,
                     frame.width,
                     frame.height,
-                    gl.RGB,
+                    gl.RED,
+                    gl.UNSIGNED_BYTE,
+                    null,
+                );
+            }
+
+            {
+                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
+                defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+                gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
+                defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+                const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+                if (pbo) |ptr| {
+                    // Copy line by line instead of a single large memcpy
+                    const bytes_per_line: usize = @intCast(frame.linesize[1]);
+                    const height: usize = @intCast(@divTrunc(frame.height, 2));
+
+                    // Destination stride in the PBO may be different from the source
+                    const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
+
+                    for (0..height) |y| {
+                        const src_offset = y * bytes_per_line;
+                        const dst_offset = y * dst_stride;
+
+                        @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
+                    }
+
+                    _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+                }
+
+                gl.TexSubImage2D(
+                    gl.TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    @divTrunc(frame.width, 2),
+                    @divTrunc(frame.height, 2),
+                    gl.RG,
                     gl.UNSIGNED_BYTE,
                     null,
                 );
@@ -346,30 +394,84 @@ pub fn main() !void {
     }
 }
 
-const StabilizedFrameBuffer = struct {
-    tex_id: [2]c_uint,
-    pbo_id: [2]c_uint,
+const DoubleBuffer = struct {
+    y: Setup,
+    uv: Setup,
 
     display_times: [2]f64,
 
     current: u1,
 
-    const Inverted = struct {
-        inner: StabilizedFrameBuffer,
+    const Setup = struct {
+        tex_id: [2]c_uint,
+        pbo_id: [2]c_uint,
 
-        fn from(super: StabilizedFrameBuffer) Inverted {
+        pub fn init(comptime ch: Channel, width: usize, height: usize) Setup {
+            const bytes_per_pixel = if (ch == .y) Y_BPP else UV_BPP;
+            const internal_format = if (ch == .y) gl.R8 else gl.RG8;
+            const format = if (ch == .y) gl.RED else gl.RG;
+            const len: c_int = @intCast(width * height * bytes_per_pixel);
+
+            var tex_id: [2]c_uint = undefined;
+            gl.GenTextures(2, tex_id[0..]);
+
+            for (tex_id) |id| {
+                gl.BindTexture(gl.TEXTURE_2D, id);
+
+                // TODO: confirm this should be bilinear
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+                gl.TexImage2D(
+                    gl.TEXTURE_2D,
+                    0,
+                    internal_format,
+                    @intCast(width),
+                    @intCast(height),
+                    0,
+                    format,
+                    gl.UNSIGNED_BYTE,
+                    null,
+                );
+            }
+
+            gl.BindTexture(gl.TEXTURE_2D, 0);
+
+            return .{
+                .tex_id = opengl_impl.vidTex(2, @intCast(width), @intCast(height)),
+                .pbo_id = opengl_impl.pbo(2, len),
+            };
+        }
+
+        fn deinit(self: *@This()) void {
+            gl.DeleteTextures(2, self.tex_id[0..]);
+            gl.DeleteBuffers(2, self.pbo_id[0..]);
+        }
+    };
+
+    const Channel = enum { y, uv };
+
+    const Inverted = struct {
+        inner: DoubleBuffer,
+
+        fn from(super: DoubleBuffer) Inverted {
             return .{
                 .inner = .{
-                    .tex_id = super.tex_id,
-                    .pbo_id = super.pbo_id,
+                    .y = super.y,
+                    .uv = super.uv,
                     .display_times = super.display_times,
                     .current = super.current +% 1,
                 },
             };
         }
 
-        fn tex(self: @This()) c_uint {
-            return self.inner.tex_id[self.inner.current];
+        fn tex(self: @This(), comptime ch: Channel) c_uint {
+            return switch (ch) {
+                .y => self.inner.y.tex_id[self.inner.current],
+                .uv => self.inner.uv.tex_id[self.inner.current],
+            };
         }
 
         fn display_time(self: @This()) f64 {
@@ -377,28 +479,32 @@ const StabilizedFrameBuffer = struct {
         }
     };
 
-    pub fn init(width: usize, height: usize) StabilizedFrameBuffer {
-        const len: c_int = @intCast(width * height * RGB24_BPP);
-
+    pub fn init(width: usize, height: usize) DoubleBuffer {
         return .{
-            .tex_id = opengl_impl.vidTex(2, @intCast(width), @intCast(height)),
-            .pbo_id = opengl_impl.pbo(2, len),
+            .y = Setup.init(.y, width, height),
+            .uv = Setup.init(.uv, width / 2, height / 2),
             .display_times = .{ 0.0, 0.0 },
             .current = 0,
         };
     }
 
     fn deinit(self: *@This()) void {
-        gl.DeleteTextures(2, self.tex_id[0..]);
-        gl.DeleteBuffers(2, self.pbo_id[0..]);
+        self.y.deinit();
+        self.uv.deinit();
     }
 
-    fn tex(self: @This()) c_uint {
-        return self.tex_id[self.current];
+    fn tex(self: @This(), comptime ch: Channel) c_uint {
+        return switch (ch) {
+            .y => self.y.tex_id[self.current],
+            .uv => self.uv.tex_id[self.current],
+        };
     }
 
-    fn pbo(self: @This()) c_uint {
-        return self.pbo_id[self.current];
+    fn pbo(self: @This(), comptime ch: Channel) c_uint {
+        return switch (ch) {
+            .y => self.y.pbo_id[self.current],
+            .uv => self.uv.pbo_id[self.current],
+        };
     }
 
     fn set_display_time(self: *@This(), in_seconds: f64) void {
@@ -425,7 +531,7 @@ const Id = enum(usize) {
 fn render(
     frame: *const c.AVFrame,
     view: *Viewport,
-    stable_buffer: *StabilizedFrameBuffer,
+    stable_buffer: *DoubleBuffer,
     angle_calc: AngleCalc,
     outer_blur: [2]Blur,
     inner_blur: [2]Blur,
@@ -442,9 +548,10 @@ fn render(
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
-    const tex_id = stable_buffer.invert().tex();
+    const y_tex = stable_buffer.invert().tex(.y);
+    const uv_tex = stable_buffer.invert().tex(.uv);
 
-    const rad = angle_calc.execute(view, tex_id);
+    const rad = angle_calc.execute(view, .{ y_tex, uv_tex });
     const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
 
     {
@@ -453,7 +560,7 @@ fn render(
             view,
             prog_id[@intFromEnum(Id.blur)],
             vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
-            tex_id,
+            .{ y_tex, uv_tex },
             frame.width >> 1,
             frame.height >> 1,
             8,
@@ -464,7 +571,7 @@ fn render(
             view,
             prog_id[@intFromEnum(Id.blur)],
             vao_id[@intFromEnum(Id.blur) - 1], // there is no Background VAO (it reuses the texture VAO) so Blur VAO is offset by one
-            tex_id,
+            .{ y_tex, uv_tex },
             frame.width,
             frame.height,
             4,
@@ -515,14 +622,17 @@ fn render(
         defer gl.BindVertexArray(0);
 
         gl.ActiveTexture(gl.TEXTURE0);
+        gl.BindTexture(gl.TEXTURE_2D, y_tex);
 
-        gl.BindTexture(gl.TEXTURE_2D, tex_id);
+        gl.ActiveTexture(gl.TEXTURE1);
+        gl.BindTexture(gl.TEXTURE_2D, uv_tex);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         const u_transform = u_rotation.mul(u_scale.mul(u_aspect));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
-        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_screen"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_y_tex"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_uv_tex"), 1);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -634,14 +744,12 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
     }
 }
 
-// FIXME: massive bottleneck
-fn convertFrame(bundle: AvBundle, src_frame: *c.AVFrame, sw_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
+fn convertFrame(bundle: AvBundle, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
     @setRuntimeSafety(false);
 
     if (bundle.hw) |hw| {
         std.debug.assert(src_frame.format == hw.pix_fmt);
-        _ = try libavError(c.av_hwframe_transfer_data(sw_frame, src_frame, 0));
-        _ = try libavError(c.sws_scale_frame(sws, dst_frame, sw_frame));
+        _ = try libavError(c.av_hwframe_transfer_data(dst_frame, src_frame, 0));
     } else {
         _ = try libavError(c.sws_scale_frame(sws, dst_frame, src_frame));
     }
@@ -650,6 +758,11 @@ fn convertFrame(bundle: AvBundle, src_frame: *c.AVFrame, sw_frame: *c.AVFrame, d
     dst_frame.pts = src_frame.pts;
     dst_frame.pkt_dts = src_frame.pkt_dts;
     dst_frame.best_effort_timestamp = src_frame.best_effort_timestamp;
+
+    dst_frame.colorspace = src_frame.colorspace;
+    dst_frame.color_range = src_frame.color_range;
+    dst_frame.color_primaries = src_frame.color_primaries;
+    dst_frame.color_trc = src_frame.color_trc;
 }
 
 fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
@@ -667,26 +780,18 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
     var dst_frame: AvFrame = try .init();
     defer dst_frame.deinit();
 
-    var sw_frame: AvFrame = try .init();
-    defer sw_frame.deinit();
-
     const pkt = maybe_pkt orelse return error.out_of_memory;
     const video_ctx = decode_ctx.bundle.codec_ctx.?;
 
-    const opengl_format = c.AV_PIX_FMT_RGB24;
-
-    try sw_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
-    try dst_frame.setup(video_ctx.width, video_ctx.height, opengl_format);
-
-    const src_format = if (decode_ctx.bundle.hw) |_| sw_frame.ptr().format else video_ctx.pix_fmt;
+    try dst_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
 
     const maybe_sws = c.sws_getContext(
         video_ctx.width,
         video_ctx.height,
-        src_format,
+        video_ctx.pix_fmt,
         video_ctx.width,
         video_ctx.height,
-        opengl_format,
+        c.AV_PIX_FMT_NV12,
         c.SWS_FAST_BILINEAR,
         null,
         null,
@@ -708,7 +813,7 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
                 0 => {
                     defer c.av_frame_unref(dst_frame.ptr());
 
-                    try convertFrame(decode_ctx.bundle, src_frame.ptr(), sw_frame.ptr(), dst_frame.ptr(), sws);
+                    try convertFrame(decode_ctx.bundle, src_frame.ptr(), dst_frame.ptr(), sws);
                     try frame_queue.push(dst_frame.ptr());
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
@@ -757,7 +862,7 @@ const Blur = struct {
 };
 
 // FIXME: this is the bottleneck of the main thread
-fn blur(b: [2]Blur, view: *Viewport, prog: c_uint, src_vao: c_uint, src_tex: c_uint, width: c_int, height: c_int, passes: u32) void {
+fn blur(b: [2]Blur, view: *Viewport, prog: c_uint, src_vao: c_uint, src_tex: [2]c_uint, width: c_int, height: c_int, passes: u32) void {
     std.debug.assert(passes % 2 == 0);
 
     const fbo_cache: c_uint = blk: {
@@ -775,10 +880,21 @@ fn blur(b: [2]Blur, view: *Viewport, prog: c_uint, src_vao: c_uint, src_tex: c_u
     gl.UseProgram(prog);
     defer gl.UseProgram(0);
 
+    const y_tex, const uv_tex = .{ src_tex[0], src_tex[1] };
+
+    gl.ActiveTexture(gl.TEXTURE1);
+    gl.BindTexture(gl.TEXTURE_2D, y_tex);
+
+    gl.ActiveTexture(gl.TEXTURE2);
+    gl.BindTexture(gl.TEXTURE_2D, uv_tex);
+
     gl.Uniform2f(gl.GetUniformLocation(prog, "u_resolution"), @floatFromInt(width), @floatFromInt(height));
     gl.Uniform1i(gl.GetUniformLocation(prog, "u_screen"), 0);
+    gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 1);
+    gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 2);
 
     const horiz_loc = gl.GetUniformLocation(prog, "u_horizontal");
+    const use_nv12_loc = gl.GetUniformLocation(prog, "u_use_nv12");
 
     for (0..passes) |i| {
         const current = b[i % 2];
@@ -790,9 +906,10 @@ fn blur(b: [2]Blur, view: *Viewport, prog: c_uint, src_vao: c_uint, src_tex: c_u
         gl.Uniform1i(horiz_loc, @intFromBool(i % 2 == 0));
 
         switch (i) {
-            0 => gl.BindTexture(gl.TEXTURE_2D, src_tex),
+            0 => gl.Uniform1i(use_nv12_loc, @intFromBool(true)),
             else => gl.BindTexture(gl.TEXTURE_2D, other.tex),
         }
+        defer if (i == 0) gl.Uniform1i(use_nv12_loc, @intFromBool(false));
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
@@ -1378,7 +1495,7 @@ const AngleCalc = struct {
 
         const program = try opengl_impl.program("./shader/blur.vert", "./shader/rotation.frag");
 
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.R32F, 1, 1, 0, gl.RED, gl.FLOAT, null);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGB32F, 1, 1, 0, gl.RGBA, gl.FLOAT, null);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
@@ -1396,7 +1513,7 @@ const AngleCalc = struct {
         };
     }
 
-    pub fn execute(self: @This(), view: *Viewport, u_screen: c_uint) f32 {
+    pub fn execute(self: @This(), view: *Viewport, tex_id: [2]c_uint) f32 {
         view.set(1, 1);
         defer view.restore();
 
@@ -1406,15 +1523,20 @@ const AngleCalc = struct {
         gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo[0]);
         defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
 
-        gl.ActiveTexture(gl.TEXTURE0);
+        const y_tex, const uv_tex = .{ tex_id[0], tex_id[1] };
 
-        gl.BindTexture(gl.TEXTURE_2D, u_screen);
+        gl.ActiveTexture(gl.TEXTURE0);
+        gl.BindTexture(gl.TEXTURE_2D, y_tex);
+
+        gl.ActiveTexture(gl.TEXTURE1);
+        gl.BindTexture(gl.TEXTURE_2D, uv_tex);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         gl.UseProgram(self.prog);
         defer gl.UseProgram(0);
 
-        gl.Uniform1i(gl.GetUniformLocation(self.prog, "u_screen"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(self.prog, "u_y_tex"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(self.prog, "u_uv_tex"), 1);
         gl.Uniform2f(gl.GetUniformLocation(self.prog, "u_dimension"), self.u_dimension[0], self.u_dimension[1]);
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
