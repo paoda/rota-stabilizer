@@ -45,28 +45,21 @@ pub fn main() !void {
     _ = args.skip(); // self
     const path = args.next() orelse return error.missing_file;
 
-    var vid_fmt_ctx = try createFormatContext(path);
+    // FIXME: only use one Format Context Packet Thread -> [Audio Decode Thread, Video Decode Thread]
+    var vid_fmt_ctx = try AvFormatContext.init(path);
     defer vid_fmt_ctx.deinit();
 
-    var aud_fmt_ctx = try createFormatContext(path);
+    var aud_fmt_ctx = try AvFormatContext.init(path);
     defer aud_fmt_ctx.deinit();
 
-    var vid_bundle = if (hw_device) |device| blk: {
-        var bundle = try createHwAccelCodecContext(.video, vid_fmt_ctx.ptr(), device);
-        bundle.hw.?.configure();
+    var video_ctx = try AvCodecContext.init(allocator, .video, vid_fmt_ctx, .{ .dev_type = hw_device });
+    defer video_ctx.deinit(allocator);
 
-        break :blk bundle;
-    } else try createCodecContext(.video, vid_fmt_ctx.ptr());
-    defer vid_bundle.deinit();
+    var audio_ctx = try AvCodecContext.init(allocator, .audio, aud_fmt_ctx, .{});
+    defer audio_ctx.deinit(allocator);
 
-    var aud_bundle = try createCodecContext(.audio, aud_fmt_ctx.ptr());
-    defer aud_bundle.deinit();
-
-    const vid_codec_ctx = vid_bundle.codec_ctx orelse return error.out_of_memory;
-    const aud_codec_ctx = aud_bundle.codec_ctx orelse return error.out_of_memory;
-
-    const vid_width: u32 = @intCast(vid_codec_ctx.width);
-    const vid_height: u32 = @intCast(vid_codec_ctx.height);
+    const vid_width: u32 = @intCast(video_ctx.inner.?.width);
+    const vid_height: u32 = @intCast(video_ctx.inner.?.height);
     const win_size = @max(vid_width, vid_height) / 2;
 
     const ui = try createSdlWindow(win_size, win_size);
@@ -77,15 +70,8 @@ pub fn main() !void {
 
     _ = c.SDL_GL_SetSwapInterval(0);
 
-    const sdl_stream = try createSdlAudioStream(aud_codec_ctx);
-    defer sdl_stream.deinit();
-
-    var audio_clock = AudioClock.init(
-        sdl_stream,
-        @intCast(aud_codec_ctx.sample_rate),
-        @intCast(aud_codec_ctx.ch_layout.nb_channels),
-        c.AV_SAMPLE_FMT_FLT,
-    );
+    var audio_clock = try AudioClock.init(audio_ctx);
+    defer audio_clock.deinit();
 
     // -- opengl --
 
@@ -161,7 +147,7 @@ pub fn main() !void {
 
     const prog_id: [5]c_uint = [_]c_uint{ tex_prog, ring_prog, circle_prog, bg_prog, blur_prog };
 
-    var angle_calc = try AngleCalc.init(vid_codec_ctx.width, vid_codec_ctx.height);
+    var angle_calc = try AngleCalc.init(vid_width, vid_height);
     defer angle_calc.deinit();
 
     { // Setup for FFMPEG Texture
@@ -204,10 +190,10 @@ pub fn main() !void {
         gl.EnableVertexAttribArray(0);
     }
 
-    const outer_blur = opengl_impl.setupBlur(vid_codec_ctx.width >> 1, vid_codec_ctx.height >> 1);
+    const outer_blur = opengl_impl.setupBlur(vid_width / 2, vid_height / 2);
     defer for (outer_blur) |b| b.deinit();
 
-    const inner_blur = opengl_impl.setupBlur(vid_codec_ctx.width, vid_codec_ctx.height);
+    const inner_blur = opengl_impl.setupBlur(vid_width, vid_height);
     defer for (inner_blur) |b| b.deinit();
 
     // -- opengl end --
@@ -216,13 +202,13 @@ pub fn main() !void {
 
     var should_quit: std.atomic.Value(bool) = .init(false);
 
-    const vid_decode: DecodeContext = .{ .bundle = vid_bundle, .fmt_ctx = vid_fmt_ctx.ptr(), .should_quit = &should_quit };
-    const aud_decode: DecodeContext = .{ .bundle = aud_bundle, .fmt_ctx = aud_fmt_ctx.ptr(), .should_quit = &should_quit };
+    const vid_decode: DecodeContext = .{ .codec_ctx = video_ctx, .fmt_ctx = vid_fmt_ctx, .should_quit = &should_quit };
+    const aud_decode: DecodeContext = .{ .codec_ctx = audio_ctx, .fmt_ctx = aud_fmt_ctx, .should_quit = &should_quit };
 
     const video_decode = try std.Thread.spawn(.{}, decodeVideo, .{ &queue, vid_decode });
     defer video_decode.join();
 
-    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ sdl_stream.inner, &audio_clock, aud_decode });
+    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ &audio_clock, aud_decode });
     defer audio_decode.join();
 
     var w: c_int, var h: c_int = .{ undefined, undefined };
@@ -250,7 +236,7 @@ pub fn main() !void {
                     },
                     c.SDL_SCANCODE_M => {
                         audio_clock.is_muted = !audio_clock.is_muted;
-                        try errify(c.SDL_SetAudioStreamGain(audio_clock.stream.inner, if (audio_clock.is_muted) 0.0 else 1.0));
+                        try errify(c.SDL_SetAudioStreamGain(audio_clock.stream, if (audio_clock.is_muted) 0.0 else 1.0));
                     },
                     else => {},
                 },
@@ -272,7 +258,7 @@ pub fn main() !void {
 
             const threshold = 0.1;
 
-            const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[vid_bundle.stream].*.time_base);
+            const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
             const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
             stable_buffer.set_display_time(pt_in_seconds); // This is the timestamp for the frame currently being sent to the GPU
 
@@ -423,7 +409,6 @@ const DoubleBuffer = struct {
             for (tex_id) |id| {
                 gl.BindTexture(gl.TEXTURE_2D, id);
 
-                // TODO: confirm this should be bilinear
                 gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
                 gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
                 gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -445,7 +430,7 @@ const DoubleBuffer = struct {
             gl.BindTexture(gl.TEXTURE_2D, 0);
 
             return .{
-                .tex_id = opengl_impl.vidTex(2, @intCast(width), @intCast(height)),
+                .tex_id = tex_id,
                 .pbo_id = opengl_impl.pbo(2, len),
             };
         }
@@ -644,25 +629,12 @@ fn render(
 }
 
 const DecodeContext = struct {
-    bundle: AvBundle,
-    fmt_ctx: *c.AVFormatContext,
-
+    codec_ctx: *AvCodecContext,
+    fmt_ctx: AvFormatContext,
     should_quit: *std.atomic.Value(bool),
 };
 
-const AvBundle = struct {
-    codec_ctx: ?*c.AVCodecContext,
-    stream: usize,
-
-    hw: ?HwBundle = null,
-
-    fn deinit(self: *@This()) void {
-        if (self.hw) |*hw| hw.deinit();
-        c.avcodec_free_context(&self.codec_ctx);
-    }
-};
-
-fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx: DecodeContext) !void {
+fn decodeAudio(clock: *AudioClock, decode_ctx: DecodeContext) !void {
     const log = std.log.scoped(.decode);
 
     log.info("audio decode thread start", .{});
@@ -681,7 +653,7 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
     const src_frame = maybe_src_frame orelse return error.out_of_memory;
     const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
 
-    const audio_ctx = decode_ctx.bundle.codec_ctx.?;
+    const audio_ctx = decode_ctx.codec_ctx.inner.?;
 
     _ = try libavError(c.av_channel_layout_copy(&dst_frame.ch_layout, &audio_ctx.ch_layout));
     dst_frame.sample_rate = audio_ctx.sample_rate;
@@ -706,7 +678,7 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
                     _ = try libavError(c.swr_convert_frame(swr, dst_frame, src_frame));
 
                     while (true) {
-                        const queued_len = c.SDL_GetAudioStreamQueued(sample_queue);
+                        const queued_len = c.SDL_GetAudioStreamQueued(clock.stream);
                         if (queued_len < max_len) break;
 
                         std.Thread.sleep(5 * std.time.ns_per_ms);
@@ -714,7 +686,7 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
 
                     const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
 
-                    _ = c.SDL_PutAudioStreamData(sample_queue, dst_frame.data[0], len);
+                    _ = c.SDL_PutAudioStreamData(clock.stream, dst_frame.data[0], len);
                     _ = clock.bytes_sent.fetchAdd(@intCast(len), .monotonic);
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
@@ -726,11 +698,11 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
         if (end_of_file) return; // can be set by code below
 
         // Read the next packet
-        switch (c.av_read_frame(decode_ctx.fmt_ctx, pkt)) {
+        switch (c.av_read_frame(decode_ctx.fmt_ctx.ptr(), pkt)) {
             0...std.math.maxInt(c_int) => {
                 defer c.av_packet_unref(pkt);
 
-                if (pkt.stream_index != decode_ctx.bundle.stream) continue;
+                if (pkt.stream_index != decode_ctx.codec_ctx.stream) continue;
 
                 const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
                 if (send_ret == c.AVERROR_EOF) return;
@@ -749,11 +721,11 @@ fn decodeAudio(sample_queue: *c.SDL_AudioStream, clock: *AudioClock, decode_ctx:
     }
 }
 
-fn convertFrame(bundle: AvBundle, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
+fn convertFrame(codec_ctx: *const AvCodecContext, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
     @setRuntimeSafety(false);
 
-    if (bundle.hw) |hw| {
-        std.debug.assert(src_frame.format == hw.pix_fmt);
+    if (codec_ctx.device) |dev| {
+        std.debug.assert(src_frame.format == dev.pix_fmt);
         _ = try libavError(c.av_hwframe_transfer_data(dst_frame, src_frame, 0));
     } else {
         _ = try libavError(c.sws_scale_frame(sws, dst_frame, src_frame));
@@ -786,7 +758,7 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
     defer dst_frame.deinit();
 
     const pkt = maybe_pkt orelse return error.out_of_memory;
-    const video_ctx = decode_ctx.bundle.codec_ctx.?;
+    const video_ctx = decode_ctx.codec_ctx.inner.?;
 
     try dst_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
 
@@ -818,7 +790,7 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
                 0 => {
                     defer c.av_frame_unref(dst_frame.ptr());
 
-                    try convertFrame(decode_ctx.bundle, src_frame.ptr(), dst_frame.ptr(), sws);
+                    try convertFrame(decode_ctx.codec_ctx, src_frame.ptr(), dst_frame.ptr(), sws);
                     try frame_queue.push(dst_frame.ptr());
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
@@ -830,11 +802,11 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
         if (end_of_file) return; // can be set by code below
 
         // Read the next packet
-        switch (c.av_read_frame(decode_ctx.fmt_ctx, pkt)) {
+        switch (c.av_read_frame(decode_ctx.fmt_ctx.ptr(), pkt)) {
             0...std.math.maxInt(c_int) => {
                 defer c.av_packet_unref(pkt);
 
-                if (pkt.stream_index != decode_ctx.bundle.stream) continue;
+                if (pkt.stream_index != decode_ctx.codec_ctx.stream) continue;
 
                 const send_ret = c.avcodec_send_packet(video_ctx, pkt);
                 if (send_ret == c.AVERROR_EOF) return;
@@ -953,7 +925,7 @@ const opengl_impl = struct {
         return ids;
     }
 
-    fn setupBlur(width: c_int, height: c_int) [2]Blur {
+    fn setupBlur(width: usize, height: usize) [2]Blur {
         var fbo_ids: [2]c_uint = undefined;
         gl.GenFramebuffers(2, &fbo_ids);
 
@@ -971,8 +943,8 @@ const opengl_impl = struct {
                 gl.TEXTURE_2D,
                 0,
                 gl.RGB,
-                width,
-                height,
+                @intCast(width),
+                @intCast(height),
                 0,
                 gl.RGB,
                 gl.UNSIGNED_BYTE,
@@ -991,37 +963,6 @@ const opengl_impl = struct {
         }
 
         return [_]Blur{ .{ .fbo = fbo_ids[0], .tex = tex_ids[0] }, .{ .fbo = fbo_ids[1], .tex = tex_ids[1] } };
-    }
-
-    fn vidTex(n: comptime_int, width: c_int, height: c_int) [n]c_uint {
-        var ids: [n]c_uint = undefined;
-        gl.GenTextures(n, ids[0..]);
-
-        for (ids) |tex_id| {
-            gl.BindTexture(gl.TEXTURE_2D, tex_id);
-
-            // FIXME: gl.LINEAR looks nicer but I think for the angle sampling we must do gl.NEAREST for correctness
-            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-            gl.TexImage2D(
-                gl.TEXTURE_2D,
-                0,
-                gl.RGB,
-                width,
-                height,
-                0,
-                gl.RGB,
-                gl.UNSIGNED_BYTE,
-                null,
-            );
-        }
-
-        gl.BindTexture(gl.TEXTURE_2D, 0);
-
-        return ids;
     }
 
     fn program(comptime vert_path: []const u8, comptime frag_path: []const u8) !c_uint {
@@ -1140,40 +1081,140 @@ fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len:
 
 const ContextKind = enum { video, audio };
 
-fn createCodecContext(comptime kind: ContextKind, fmt_ctx: *c.AVFormatContext) !AvBundle {
-    const av_type = switch (kind) {
-        .video => c.AVMEDIA_TYPE_VIDEO,
-        .audio => c.AVMEDIA_TYPE_AUDIO,
-    };
+const AvCodecContext = struct {
+    const Kind = enum { video, audio };
+    const Method = enum { software, hardware };
+    const Options = struct { dev_type: ?c.AVHWDeviceType = null };
 
-    var codec_ptr: ?*const c.AVCodec = null;
-    const stream = try libavError(c.av_find_best_stream(fmt_ctx, av_type, -1, -1, &codec_ptr, 0));
+    inner: ?*c.AVCodecContext,
+    stream: c_int,
 
-    var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
-    errdefer c.avcodec_free_context(&ctx_ptr);
+    device: ?Device = null,
 
-    _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.streams[@intCast(stream)].*.codecpar));
-    _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr, null));
+    const log = std.log.scoped(.codec_setup);
 
-    return .{ .codec_ctx = ctx_ptr, .stream = @intCast(stream) };
-}
+    //TODO: move Device to inside this struct
 
-const HwBundle = struct {
-    device_ctx: ?*c.AVBufferRef,
+    // TODO: default to software if hardware setup fails
+    fn init(allocator: std.mem.Allocator, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) !*AvCodecContext {
+        const self = try allocator.create(@This());
+
+        if (kind == .video) blk: {
+            const device_type = opt.dev_type orelse break :blk;
+
+            self.initHardware(fmt_ctx, device_type) catch |e| {
+                log.err("failed to set up hardware context: {}", .{e});
+                break :blk log.warn("defaulting to software", .{});
+            };
+
+            self.device.?.configure();
+            return self;
+        }
+
+        try self.initSoftware(kind, fmt_ctx);
+        return self;
+    }
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.device) |*dev| dev.deinit();
+        c.avcodec_free_context(&self.inner);
+
+        allocator.destroy(self);
+    }
+
+    fn initSoftware(self: *@This(), comptime kind: Kind, fmt_ctx: AvFormatContext) !void {
+        const media_type = switch (kind) {
+            .video => c.AVMEDIA_TYPE_VIDEO,
+            .audio => c.AVMEDIA_TYPE_AUDIO,
+        };
+
+        var codec_ptr: ?*const c.AVCodec = null;
+        const stream = try libavError(c.av_find_best_stream(fmt_ctx.ptr(), media_type, -1, -1, &codec_ptr, 0));
+
+        var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
+        errdefer c.avcodec_free_context(&ctx_ptr);
+
+        _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
+        _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr, null));
+
+        self.* = .{ .inner = ctx_ptr, .stream = stream };
+    }
+
+    fn initHardware(self: *@This(), fmt_ctx: AvFormatContext, device_type: c.AVHWDeviceType) !void {
+        var codec_ptr: ?*const c.AVCodec = null;
+        const stream = try libavError(c.av_find_best_stream(fmt_ctx.ptr(), c.AVMEDIA_TYPE_VIDEO, -1, -1, &codec_ptr, 0));
+
+        var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
+        errdefer c.avcodec_free_context(&ctx_ptr);
+
+        _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
+
+        var hw_device_ctx: ?*c.AVBufferRef = null;
+        var hw_pix_fmt: c.AVPixelFormat = undefined;
+
+        {
+            var i: c_int = 0;
+            while (true) {
+                defer i += 1;
+
+                const config: ?*const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec_ptr.?, i);
+                if (config == null) {
+                    log.err("no hardware {s} decoder found in {s} device", .{ codec_ptr.?.name, c.av_hwdevice_get_type_name(device_type) });
+                    return error.unsupported_codec;
+                }
+
+                if (config.?.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;
+                if (config.?.device_type != device_type) continue;
+
+                hw_pix_fmt = config.?.pix_fmt;
+                log.info("found {s} hwdevice for {s} decoder", .{ c.av_hwdevice_get_type_name(device_type), codec_ptr.?.name });
+
+                // FIXME: does this need to be deallocated????
+                _ = try libavError(c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0));
+                ctx_ptr.?.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
+
+                {
+                    var constraints: ?*c.AVHWFramesConstraints = c.av_hwdevice_get_hwframe_constraints(hw_device_ctx, null);
+                    defer c.av_hwframe_constraints_free(&constraints);
+
+                    log.debug("valid sw formats:", .{});
+                    const valid_sw = std.mem.sliceTo(constraints.?.valid_sw_formats, c.AV_SAMPLE_FMT_NONE);
+                    for (valid_sw) |fmt| log.debug("\t{s}", .{c.av_get_pix_fmt_name(fmt)});
+                }
+
+                break;
+            }
+        }
+
+        _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr, null));
+
+        self.* = .{
+            .inner = ctx_ptr,
+            .stream = stream,
+            .device = .{
+                .pix_fmt = hw_pix_fmt,
+                .ctx = hw_device_ctx,
+            },
+        };
+    }
+};
+
+const Device = struct {
+    ctx: ?*c.AVBufferRef,
     pix_fmt: c.AVPixelFormat,
 
     /// Must be called immediately after creation, sets a self-referential ptr in self.codec_ctx.@"opaque"
     ///
     /// Also sets the get_format fn pointer in AVCodecContext
     fn configure(self: *@This()) void {
-        const super: *AvBundle = @fieldParentPtr("hw", @as(*?HwBundle, @ptrCast(self)));
+        const super: *AvCodecContext = @fieldParentPtr("device", @as(*?Device, @ptrCast(self)));
 
-        super.codec_ctx.?.@"opaque" = @ptrCast(self);
-        super.codec_ctx.?.get_format = @This().getFormat;
+        super.inner.?.@"opaque" = @ptrCast(self);
+        super.inner.?.get_format = @This().getFormat;
     }
 
     fn deinit(self: *@This()) void {
-        c.av_buffer_unref(&self.device_ctx);
+        c.av_buffer_unref(&self.ctx);
     }
 
     fn getFormat(ctx: ?*c.AVCodecContext, formats: [*c]const c.AVPixelFormat) callconv(.c) c.AVPixelFormat {
@@ -1189,68 +1230,20 @@ const HwBundle = struct {
     }
 };
 
-fn createHwAccelCodecContext(comptime kind: ContextKind, fmt_ctx: *c.AVFormatContext, device_type: c.AVHWDeviceType) !AvBundle {
-    comptime std.debug.assert(kind == .video);
-    const log = std.log.scoped(.hwdevice);
-
-    var codec_ptr: ?*const c.AVCodec = null;
-    const stream = try libavError(c.av_find_best_stream(fmt_ctx, c.AVMEDIA_TYPE_VIDEO, -1, -1, &codec_ptr, 0));
-
-    var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
-    errdefer c.avcodec_free_context(&ctx_ptr);
-
-    _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.streams[@intCast(stream)].*.codecpar));
-
-    var hw_device_ctx: ?*c.AVBufferRef = null;
-    var hw_pix_fmt: c.AVPixelFormat = undefined;
-
-    {
-        var i: c_int = 0;
-        while (true) {
-            defer i += 1;
-
-            const config: ?*const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec_ptr.?, i);
-            if (config == null) std.debug.panic("decoder {s} does not support {s}", .{ codec_ptr.?.name, c.av_hwdevice_get_type_name(device_type) });
-
-            if (config.?.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;
-            if (config.?.device_type != device_type) continue;
-
-            hw_pix_fmt = config.?.pix_fmt;
-            log.info("found {s} hwdevice for {s} decoder", .{ c.av_hwdevice_get_type_name(device_type), codec_ptr.?.name });
-
-            // FIXME: does this need to be deallocated????
-            _ = try libavError(c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0));
-            ctx_ptr.?.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
-
-            {
-                var constraints: ?*c.AVHWFramesConstraints = c.av_hwdevice_get_hwframe_constraints(hw_device_ctx, null);
-                defer c.av_hwframe_constraints_free(&constraints);
-
-                log.debug("valid sw formats:", .{});
-                const valid_sw = std.mem.sliceTo(constraints.?.valid_sw_formats, c.AV_SAMPLE_FMT_NONE);
-                for (valid_sw) |fmt| log.debug("\t{s}", .{c.av_get_pix_fmt_name(fmt)});
-            }
-
-            break;
-        }
-    }
-
-    _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr, null));
-
-    return .{
-        .codec_ctx = ctx_ptr,
-        .stream = @intCast(stream),
-        .hw = .{
-            .pix_fmt = hw_pix_fmt,
-            .device_ctx = hw_device_ctx,
-        },
-    };
-}
-
 const AvFormatContext = struct {
     inner: ?*c.AVFormatContext,
 
-    fn ptr(self: @This()) *c.AVFormatContext {
+    fn init(path: []const u8) !AvFormatContext {
+        var p: ?*c.AVFormatContext = c.avformat_alloc_context();
+        errdefer c.avformat_close_input(&p);
+
+        _ = try libavError(c.avformat_open_input(&p, path.ptr, null, null));
+        _ = try libavError(c.avformat_find_stream_info(p, null));
+
+        return .{ .inner = p };
+    }
+
+    inline fn ptr(self: @This()) *c.AVFormatContext {
         return self.inner.?;
     }
 
@@ -1258,18 +1251,6 @@ const AvFormatContext = struct {
         c.avformat_close_input(&self.inner);
     }
 };
-
-fn createFormatContext(path: []const u8) !AvFormatContext {
-    var ptr: ?*c.AVFormatContext = c.avformat_alloc_context();
-    errdefer c.avformat_close_input(&ptr);
-
-    _ = try libavError(c.avformat_open_input(&ptr, path.ptr, null, null));
-    const fmt_ctx = ptr orelse return error.out_of_memory;
-
-    _ = try libavError(c.avformat_find_stream_info(fmt_ctx, null));
-
-    return .{ .inner = ptr };
-}
 
 const Ui = struct {
     window: *c.SDL_Window,
@@ -1313,26 +1294,6 @@ fn createSdlWindow(width: u32, height: u32) !Ui {
     return .{ .window = window, .gl_ctx = gl_ctx };
 }
 
-const SdlAudioStream = struct {
-    inner: *c.SDL_AudioStream,
-
-    fn deinit(self: @This()) void {
-        c.SDL_DestroyAudioStream(self.inner);
-    }
-};
-
-fn createSdlAudioStream(ctx: *const c.AVCodecContext) !SdlAudioStream {
-    var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
-    desired.freq = ctx.sample_rate;
-    desired.format = c.SDL_AUDIO_F32;
-    desired.channels = ctx.ch_layout.nb_channels;
-
-    const stream = try errify(c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired, null, null));
-    errdefer c.SDL_DestroyAudioStream(stream);
-
-    return .{ .inner = stream };
-}
-
 const Vec2 = struct { inner: [2]f32 };
 
 const Mat2 = struct {
@@ -1373,31 +1334,41 @@ const AudioClock = struct {
 
     is_muted: bool,
 
-    stream: SdlAudioStream,
+    stream: *c.SDL_AudioStream,
 
-    const log = std.log.scoped(.audio_clock);
+    const log = std.log.scoped(.audio);
 
-    pub fn init(stream: SdlAudioStream, sample_rate: u16, channels: u8, fmt: c.AVSampleFormat) @This() {
-        defer _ = c.SDL_ResumeAudioStreamDevice(stream.inner);
+    pub fn init(ctx: *const AvCodecContext) !@This() {
+        var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
+        desired.freq = ctx.inner.?.sample_rate;
+        desired.format = c.SDL_AUDIO_F32;
+        desired.channels = ctx.inner.?.ch_layout.nb_channels;
 
-        const ret = c.SDL_SetAudioStreamGain(stream.inner, if (muted_by_default) 0.0 else 1.0);
-        if (!ret) log.err("failed to set audio gain on init", .{});
+        const stream = try errify(c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired, null, null));
+        errdefer c.SDL_DestroyAudioStream(stream);
+
+        try errify(c.SDL_SetAudioStreamGain(stream, if (muted_by_default) 0.0 else 1.0));
+        try errify(c.SDL_ResumeAudioStreamDevice(stream));
 
         return .{
             .start_time = c.SDL_GetPerformanceCounter(),
-            .sample_rate = sample_rate,
-            .channels = channels,
-            .bytes_per_sample = @intCast(c.av_get_bytes_per_sample(fmt)),
+            .sample_rate = @intCast(desired.freq),
+            .channels = @intCast(desired.channels),
+            .bytes_per_sample = @intCast(c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT)),
 
             .is_muted = muted_by_default,
             .stream = stream,
         };
     }
 
+    fn deinit(self: @This()) void {
+        c.SDL_DestroyAudioStream(self.stream);
+    }
+
     fn seconds_passed(self: @This()) f64 {
         const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
 
-        const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream.inner));
+        const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream));
         const bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
 
         const pos = bytes_sent - queued;
@@ -1478,7 +1449,7 @@ const AngleCalc = struct {
 
     const log = std.log.scoped(.angle_calc);
 
-    pub fn init(tex_width: c_int, tex_height: c_int) !AngleCalc {
+    pub fn init(tex_width: usize, tex_height: usize) !AngleCalc {
         var fbo_id: [1]c_uint = undefined;
         gl.GenFramebuffers(1, fbo_id[0..]);
 
