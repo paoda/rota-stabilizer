@@ -72,6 +72,9 @@ pub fn main() !void {
     const ui = try createSdlWindow(win_size, win_size);
     defer ui.deinit();
 
+    log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
+    log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
+
     _ = c.SDL_GL_SetSwapInterval(0);
 
     const sdl_stream = try createSdlAudioStream(aud_codec_ctx);
@@ -1226,10 +1229,6 @@ fn createHwAccelCodecContext(comptime kind: ContextKind, fmt_ctx: *c.AVFormatCon
                 log.debug("valid sw formats:", .{});
                 const valid_sw = std.mem.sliceTo(constraints.?.valid_sw_formats, c.AV_SAMPLE_FMT_NONE);
                 for (valid_sw) |fmt| log.debug("\t{s}", .{c.av_get_pix_fmt_name(fmt)});
-
-                log.debug("valid hw formats:", .{});
-                const valid_hw = std.mem.sliceTo(constraints.?.valid_hw_formats, c.AV_SAMPLE_FMT_NONE);
-                for (valid_hw) |fmt| log.debug("\t{s}", .{c.av_get_pix_fmt_name(fmt)});
             }
 
             break;
