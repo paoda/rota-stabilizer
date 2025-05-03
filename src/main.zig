@@ -541,8 +541,7 @@ fn render(
     const y_tex = stable_buffer.invert().tex(.y);
     const uv_tex = stable_buffer.invert().tex(.uv);
 
-    const rad = angle_calc.execute(view, .{ y_tex, uv_tex });
-    const u_rotation = mat2(@cos(rad), -@sin(rad), @sin(rad), @cos(rad));
+    angle_calc.execute(view, .{ y_tex, uv_tex });
 
     {
         blur(
@@ -576,11 +575,15 @@ fn render(
         gl.ActiveTexture(gl.TEXTURE1);
         gl.BindTexture(gl.TEXTURE_2D, inner_blur[0].tex); // guaranteed to be the last modified texture
 
-        const u_transform = u_rotation.mul(u_inv_scale.mul(u_aspect));
+        gl.ActiveTexture(gl.TEXTURE2);
+        gl.BindTexture(gl.TEXTURE_2D, angle_calc.tex[0]);
+
+        const u_transform = u_inv_scale.mul(u_aspect);
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_outer"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_inner"), 1);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_angle"), 2);
 
         gl.Uniform2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_viewport"), 1, &u_viewport.inner);
         gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_radius"), u_scale.inner[0] * puck_radius);
@@ -616,13 +619,17 @@ fn render(
 
         gl.ActiveTexture(gl.TEXTURE1);
         gl.BindTexture(gl.TEXTURE_2D, uv_tex);
+
+        gl.ActiveTexture(gl.TEXTURE2);
+        gl.BindTexture(gl.TEXTURE_2D, angle_calc.tex[0]);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        const u_transform = u_rotation.mul(u_scale.mul(u_aspect));
+        const u_transform = u_scale.mul(u_aspect);
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_transform"), 1, gl.FALSE, &u_transform.inner);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_uv_tex"), 1);
+        gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_angle"), 2);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -1467,7 +1474,7 @@ const AngleCalc = struct {
 
         const program = try opengl_impl.program("./shader/blur.vert", "./shader/rotation.frag");
 
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.R32F, 1, 1, 0, gl.RED, gl.FLOAT, null);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, null);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
@@ -1485,7 +1492,7 @@ const AngleCalc = struct {
         };
     }
 
-    pub fn execute(self: @This(), view: *Viewport, tex_id: [2]c_uint) f32 {
+    pub fn execute(self: @This(), view: *Viewport, tex_id: [2]c_uint) void {
         view.set(1, 1);
         defer view.restore();
 
@@ -1512,12 +1519,6 @@ const AngleCalc = struct {
         gl.Uniform2f(gl.GetUniformLocation(self.prog, "u_dimension"), self.u_dimension[0], self.u_dimension[1]);
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
-
-        // FIXME: massive bottleneck
-        var angle: f32 = 0;
-        gl.ReadPixels(0, 0, 1, 1, gl.RED, gl.FLOAT, &angle);
-
-        return angle;
     }
 
     pub fn deinit(self: *@This()) void {
