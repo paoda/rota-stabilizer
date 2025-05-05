@@ -8,6 +8,7 @@ const c = @import("librota").c;
 const sleep = @import("librota").sleep;
 const libavError = @import("librota").libavError;
 const FrameQueue = @import("librota").FrameQueue;
+const PacketQueue = @import("librota").PacketQueue;
 
 var gl_procs: gl.ProcTable = undefined;
 
@@ -25,6 +26,66 @@ const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
     // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?
 };
+
+const ReadPacketOptions = struct {
+    video_stream: c_int,
+    audio_stream: c_int,
+    should_quit: *std.atomic.Value(bool),
+};
+
+const AvPacket = struct {
+    inner: ?*c.AVPacket,
+
+    pub fn init() AvPacket {
+        const p: ?*c.AVPacket = c.av_packet_alloc();
+        errdefer c.av_packet_free(p);
+
+        return .{ .inner = p };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        c.av_packet_free(&self.inner);
+    }
+
+    pub inline fn ptr(self: @This()) *c.AVPacket {
+        return self.inner.?;
+    }
+};
+
+fn readPackets(
+    video_queue: *PacketQueue,
+    audio_queue: *PacketQueue,
+    fmt_ctx: AvFormatContext,
+    opt: ReadPacketOptions,
+) !void {
+    const log = std.log.scoped(.packet_read);
+
+    log.info("packet read thread start", .{});
+    defer log.info("packet read thread end", .{});
+
+    var pkt = AvPacket.init();
+    defer pkt.deinit();
+
+    while (!opt.should_quit.load(.monotonic)) {
+        switch (c.av_read_frame(fmt_ctx.ptr(), pkt.ptr())) {
+            0...std.math.maxInt(c_int) => {
+                defer c.av_packet_unref(pkt.ptr());
+
+                if (pkt.ptr().stream_index == opt.video_stream) {
+                    try video_queue.push(pkt.ptr());
+                } else if (pkt.ptr().stream_index == opt.audio_stream) {
+                    try audio_queue.push(pkt.ptr());
+                }
+            },
+            c.AVERROR_EOF => {
+                audio_queue.end_of_stream.store(true, .monotonic);
+                video_queue.end_of_stream.store(true, .monotonic);
+                return;
+            },
+            else => |e| _ = try libavError(e),
+        }
+    }
+}
 
 pub fn main() !void {
     const log = std.log.scoped(.ui);
@@ -45,17 +106,13 @@ pub fn main() !void {
     _ = args.skip(); // self
     const path = args.next() orelse return error.missing_file;
 
-    // FIXME: only use one Format Context Packet Thread -> [Audio Decode Thread, Video Decode Thread]
-    var vid_fmt_ctx = try AvFormatContext.init(path);
-    defer vid_fmt_ctx.deinit();
+    var fmt_ctx = try AvFormatContext.init(path);
+    defer fmt_ctx.deinit();
 
-    var aud_fmt_ctx = try AvFormatContext.init(path);
-    defer aud_fmt_ctx.deinit();
-
-    var video_ctx = try AvCodecContext.init(allocator, .video, vid_fmt_ctx, .{ .dev_type = hw_device });
+    var video_ctx = try AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
     defer video_ctx.deinit(allocator);
 
-    var audio_ctx = try AvCodecContext.init(allocator, .audio, aud_fmt_ctx, .{});
+    var audio_ctx = try AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
     defer audio_ctx.deinit(allocator);
 
     const vid_width: u32 = @intCast(video_ctx.inner.?.width);
@@ -202,13 +259,24 @@ pub fn main() !void {
 
     var should_quit: std.atomic.Value(bool) = .init(false);
 
-    const vid_decode: DecodeContext = .{ .codec_ctx = video_ctx, .fmt_ctx = vid_fmt_ctx, .should_quit = &should_quit };
-    const aud_decode: DecodeContext = .{ .codec_ctx = audio_ctx, .fmt_ctx = aud_fmt_ctx, .should_quit = &should_quit };
+    var video_pkt_queue = PacketQueue.init(allocator);
+    defer video_pkt_queue.deinit(allocator);
 
-    const video_decode = try std.Thread.spawn(.{}, decodeVideo, .{ &queue, vid_decode });
+    var audio_pkt_queue = PacketQueue.init(allocator);
+    defer audio_pkt_queue.deinit(allocator);
+
+    const read_opts: ReadPacketOptions = .{ .video_stream = video_ctx.stream, .audio_stream = audio_ctx.stream, .should_quit = &should_quit };
+
+    const vid_decode: DecodeContext = .{ .codec_ctx = video_ctx, .fmt_ctx = fmt_ctx, .should_quit = &should_quit };
+    const aud_decode: DecodeContext = .{ .codec_ctx = audio_ctx, .fmt_ctx = fmt_ctx, .should_quit = &should_quit };
+
+    const pkt_handle = try std.Thread.spawn(.{}, readPackets, .{ &video_pkt_queue, &audio_pkt_queue, fmt_ctx, read_opts });
+    defer pkt_handle.join();
+
+    const video_decode = try std.Thread.spawn(.{}, decodeVideo, .{ &queue, &video_pkt_queue, vid_decode });
     defer video_decode.join();
 
-    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ &audio_clock, aud_decode });
+    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ &audio_clock, &audio_pkt_queue, aud_decode });
     defer audio_decode.join();
 
     var w: c_int, var h: c_int = .{ undefined, undefined };
@@ -258,7 +326,7 @@ pub fn main() !void {
 
             const threshold = 0.1;
 
-            const time_base: f64 = c.av_q2d(vid_fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
+            const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
             const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
             stable_buffer.set_display_time(pt_in_seconds); // This is the timestamp for the frame currently being sent to the GPU
 
@@ -641,14 +709,11 @@ const DecodeContext = struct {
     should_quit: *std.atomic.Value(bool),
 };
 
-fn decodeAudio(clock: *AudioClock, decode_ctx: DecodeContext) !void {
-    const log = std.log.scoped(.decode);
+fn decodeAudio(clock: *AudioClock, pkt_queue: *PacketQueue, decode_ctx: DecodeContext) !void {
+    const log = std.log.scoped(.audio_decode);
 
     log.info("audio decode thread start", .{});
     defer log.info("audio decode thread end", .{});
-
-    var maybe_pkt: ?*c.AVPacket = c.av_packet_alloc();
-    defer c.av_packet_free(&maybe_pkt);
 
     var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
     defer c.av_frame_free(&maybe_src_frame);
@@ -656,7 +721,6 @@ fn decodeAudio(clock: *AudioClock, decode_ctx: DecodeContext) !void {
     var maybe_dst_frame: ?*c.AVFrame = c.av_frame_alloc();
     defer c.av_frame_free(&maybe_dst_frame);
 
-    const pkt = maybe_pkt orelse return error.out_of_memory;
     const src_frame = maybe_src_frame orelse return error.out_of_memory;
     const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
 
@@ -698,33 +762,22 @@ fn decodeAudio(clock: *AudioClock, decode_ctx: DecodeContext) !void {
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
                 c.AVERROR_EOF => return,
-                else => return error.ffmpeg_error,
+                else => |e| _ = try libavError(e),
             }
         }
 
-        if (end_of_file) return; // can be set by code below
+        var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
+            const flush_ret = c.avcodec_send_packet(audio_ctx, null);
+            if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libavError(flush_ret);
+            end_of_file = true;
+            continue;
+        };
+        defer c.av_packet_free(&pkt);
 
-        // Read the next packet
-        switch (c.av_read_frame(decode_ctx.fmt_ctx.ptr(), pkt)) {
-            0...std.math.maxInt(c_int) => {
-                defer c.av_packet_unref(pkt);
-
-                if (pkt.stream_index != decode_ctx.codec_ctx.stream) continue;
-
-                const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
-                if (send_ret == c.AVERROR_EOF) return;
-                if (send_ret == c.AVERROR(c.EAGAIN)) continue;
-                if (send_ret < 0) return error.ffmpeg_error;
-            },
-            c.AVERROR_EOF => {
-                defer end_of_file = true;
-
-                // TODO: make this work with libavError
-                const flush_ret = c.avcodec_send_packet(audio_ctx, null);
-                if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) return error.ffmpeg_error;
-            },
-            else => return error.ffmpeg_error,
-        }
+        const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
+        if (send_ret == c.AVERROR_EOF) return;
+        if (send_ret == c.AVERROR(c.EAGAIN)) continue;
+        if (send_ret < 0) _ = try libavError(send_ret);
     }
 }
 
@@ -749,14 +802,11 @@ fn convertFrame(codec_ctx: *const AvCodecContext, src_frame: *c.AVFrame, dst_fra
     dst_frame.color_trc = src_frame.color_trc;
 }
 
-fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
+fn decodeVideo(frame_queue: *FrameQueue, pkt_queue: *PacketQueue, decode_ctx: DecodeContext) !void {
     const log = std.log.scoped(.video_decode);
 
     log.info("video decode thread start", .{});
     defer log.info("video decode thread end", .{});
-
-    var maybe_pkt: ?*c.AVPacket = c.av_packet_alloc();
-    defer c.av_packet_free(&maybe_pkt);
 
     var src_frame: AvFrame = try .init();
     defer src_frame.deinit();
@@ -764,7 +814,6 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
     var dst_frame: AvFrame = try .init();
     defer dst_frame.deinit();
 
-    const pkt = maybe_pkt orelse return error.out_of_memory;
     const video_ctx = decode_ctx.codec_ctx.inner.?;
 
     try dst_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
@@ -785,11 +834,8 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
 
     const sws = maybe_sws orelse return error.out_of_memory;
 
-    // _ = try libavError(c.av_opt_set_int(sws, "threads", @intCast(try std.Thread.getCpuCount()), 0));
-
-    var end_of_file = false;
-
     // TODO: using a fn ptr I think we can deduplicate this massive loop
+    var end_of_file = false;
     while (!decode_ctx.should_quit.load(.monotonic)) {
         // Try to receive a frame first if we have packets already in the decoder
         recv_loop: while (true) {
@@ -802,33 +848,22 @@ fn decodeVideo(frame_queue: *FrameQueue, decode_ctx: DecodeContext) !void {
                 },
                 c.AVERROR(c.EAGAIN) => break :recv_loop,
                 c.AVERROR_EOF => return,
-                else => return error.ffmpeg_error,
+                else => |e| _ = try libavError(e),
             }
         }
 
-        if (end_of_file) return; // can be set by code below
+        var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
+            const flush_ret = c.avcodec_send_packet(video_ctx, null);
+            if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libavError(flush_ret);
+            end_of_file = true;
+            continue;
+        };
+        defer c.av_packet_free(&pkt);
 
-        // Read the next packet
-        switch (c.av_read_frame(decode_ctx.fmt_ctx.ptr(), pkt)) {
-            0...std.math.maxInt(c_int) => {
-                defer c.av_packet_unref(pkt);
-
-                if (pkt.stream_index != decode_ctx.codec_ctx.stream) continue;
-
-                const send_ret = c.avcodec_send_packet(video_ctx, pkt);
-                if (send_ret == c.AVERROR_EOF) return;
-                if (send_ret == c.AVERROR(c.EAGAIN)) continue;
-                if (send_ret < 0) return error.ffmpeg_error;
-            },
-            c.AVERROR_EOF => {
-                defer end_of_file = true;
-
-                // TODO: make this work with libavError
-                const flush_ret = c.avcodec_send_packet(video_ctx, null);
-                if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) return error.ffmpeg_error;
-            },
-            else => return error.ffmpeg_error,
-        }
+        const send_ret = c.avcodec_send_packet(video_ctx, pkt);
+        if (send_ret == c.AVERROR_EOF) return;
+        if (send_ret == c.AVERROR(c.EAGAIN)) continue;
+        if (send_ret < 0) _ = try libavError(send_ret);
     }
 }
 

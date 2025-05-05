@@ -23,11 +23,61 @@ pub inline fn libavError(value: c_int) error{ffmpeg_error}!c_int {
     var buf: [0x100]u8 = undefined;
     const ret = c.av_strerror(value, &buf, buf.len);
 
-    if (ret < 0) std.debug.panic("ffmpeg error handle failed: {}", .{value});
+    if (ret < 0) std.debug.panic("paniced in ffmpeg error handler: {}", .{value});
 
     std.debug.print("ffmpeg err: {s}\n", .{std.mem.sliceTo(&buf, 0)});
     return error.ffmpeg_error;
 }
+
+// FIXME: is there any point to rolling my own?
+pub const PacketQueue = struct {
+    list: std.fifo.LinearFifo(*c.AVPacket, .Dynamic),
+
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
+
+    end_of_stream: std.atomic.Value(bool) = .init(false),
+
+    const log = std.log.scoped(.packet_queue);
+
+    pub fn init(allocator: std.mem.Allocator) PacketQueue {
+        return .{
+            .list = std.fifo.LinearFifo(*c.AVPacket, .Dynamic).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: @This(), _: std.mem.Allocator) void {
+        for (self.list.writableSlice(0)) |pkt| {
+            var p: ?*c.AVPacket = pkt;
+            c.av_packet_free(&p);
+        }
+
+        self.list.deinit();
+    }
+
+    pub fn push(self: *@This(), pkt: *c.AVPacket) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const copy: ?*c.AVPacket = c.av_packet_alloc();
+        _ = try libavError(c.av_packet_ref(copy, pkt));
+
+        try self.list.writeItem(copy.?);
+        self.cond.signal();
+    }
+
+    pub fn pop(self: *@This()) ?*c.AVPacket {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        while (self.list.readableLength() == 0) {
+            if (self.end_of_stream.load(.monotonic)) return null;
+            self.cond.wait(&self.mutex);
+        }
+
+        return self.list.readItem();
+    }
+};
 
 pub const FrameQueue = struct {
     slot: Slot,
