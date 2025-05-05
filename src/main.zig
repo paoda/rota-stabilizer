@@ -3,21 +3,34 @@ const builtin = @import("builtin");
 const gl = @import("gl");
 const zstbi = @import("zstbi");
 
-const c = @import("librota").c;
+const c = @import("lib.zig").c;
+const video = @import("lib/codec.zig").video;
+const audio = @import("lib/codec.zig").audio;
+const packet = @import("lib/codec.zig").packet;
+const platform = @import("lib/platform.zig");
 
-const sleep = @import("librota").sleep;
-const libavError = @import("librota").libavError;
-const FrameQueue = @import("librota").FrameQueue;
-const PacketQueue = @import("librota").PacketQueue;
+const Ui = @import("lib/platform.zig").Ui;
 
-var gl_procs: gl.ProcTable = undefined;
+const PacketQueue = @import("lib/codec.zig").packet.Queue;
+const AudioClock = @import("lib/codec.zig").audio.Clock;
+const FrameQueue = @import("lib/codec.zig").FrameQueue;
+const DecodeContext = @import("lib/codec.zig").DecodeContext;
+
+const AvFormatContext = @import("lib/libav.zig").AvFormatContext;
+const AvCodecContext = @import("lib/libav.zig").AvCodecContext;
+const AvFrame = @import("lib/libav.zig").AvFrame;
+const AvPacket = @import("lib/libav.zig").AvPacket;
+
+const Mat2 = @import("lib/math.zig").Mat2;
+const Vec2 = @import("lib/math.zig").Vec2;
+const mat2 = @import("lib/math.zig").mat2;
+
+const sleep = @import("lib.zig").sleep;
 
 // bytes per pixel, i know... sorry
 const RGB24_BPP = 3;
 const Y_BPP = 1;
 const UV_BPP = 2;
-
-const muted_by_default = true;
 
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
@@ -26,66 +39,6 @@ const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
     // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?
 };
-
-const ReadPacketOptions = struct {
-    video_stream: c_int,
-    audio_stream: c_int,
-    should_quit: *std.atomic.Value(bool),
-};
-
-const AvPacket = struct {
-    inner: ?*c.AVPacket,
-
-    pub fn init() AvPacket {
-        const p: ?*c.AVPacket = c.av_packet_alloc();
-        errdefer c.av_packet_free(p);
-
-        return .{ .inner = p };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        c.av_packet_free(&self.inner);
-    }
-
-    pub inline fn ptr(self: @This()) *c.AVPacket {
-        return self.inner.?;
-    }
-};
-
-fn readPackets(
-    video_queue: *PacketQueue,
-    audio_queue: *PacketQueue,
-    fmt_ctx: AvFormatContext,
-    opt: ReadPacketOptions,
-) !void {
-    const log = std.log.scoped(.packet_read);
-
-    log.info("packet read thread start", .{});
-    defer log.info("packet read thread end", .{});
-
-    var pkt = AvPacket.init();
-    defer pkt.deinit();
-
-    while (!opt.should_quit.load(.monotonic)) {
-        switch (c.av_read_frame(fmt_ctx.ptr(), pkt.ptr())) {
-            0...std.math.maxInt(c_int) => {
-                defer c.av_packet_unref(pkt.ptr());
-
-                if (pkt.ptr().stream_index == opt.video_stream) {
-                    try video_queue.push(pkt.ptr());
-                } else if (pkt.ptr().stream_index == opt.audio_stream) {
-                    try audio_queue.push(pkt.ptr());
-                }
-            },
-            c.AVERROR_EOF => {
-                audio_queue.end_of_stream.store(true, .monotonic);
-                video_queue.end_of_stream.store(true, .monotonic);
-                return;
-            },
-            else => |e| _ = try libavError(e),
-        }
-    }
-}
 
 pub fn main() !void {
     const log = std.log.scoped(.ui);
@@ -119,7 +72,7 @@ pub fn main() !void {
     const vid_height: u32 = @intCast(video_ctx.inner.?.height);
     const win_size = @max(vid_width, vid_height) / 2;
 
-    const ui = try createSdlWindow(win_size, win_size);
+    const ui = try platform.createWindow(win_size, win_size);
     defer ui.deinit();
 
     log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
@@ -265,22 +218,21 @@ pub fn main() !void {
     var audio_pkt_queue = PacketQueue.init(allocator);
     defer audio_pkt_queue.deinit(allocator);
 
-    const read_opts: ReadPacketOptions = .{ .video_stream = video_ctx.stream, .audio_stream = audio_ctx.stream, .should_quit = &should_quit };
+    const read_opts: packet.ReadOptions = .{ .video_stream = video_ctx.stream, .audio_stream = audio_ctx.stream, .should_quit = &should_quit };
 
     const vid_decode: DecodeContext = .{ .codec_ctx = video_ctx, .fmt_ctx = fmt_ctx, .should_quit = &should_quit };
     const aud_decode: DecodeContext = .{ .codec_ctx = audio_ctx, .fmt_ctx = fmt_ctx, .should_quit = &should_quit };
 
-    const pkt_handle = try std.Thread.spawn(.{}, readPackets, .{ &video_pkt_queue, &audio_pkt_queue, fmt_ctx, read_opts });
+    const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{ &video_pkt_queue, &audio_pkt_queue, fmt_ctx, read_opts });
     defer pkt_handle.join();
 
-    const video_decode = try std.Thread.spawn(.{}, decodeVideo, .{ &queue, &video_pkt_queue, vid_decode });
+    const video_decode = try std.Thread.spawn(.{}, video.decode, .{ &queue, &video_pkt_queue, vid_decode });
     defer video_decode.join();
 
-    const audio_decode = try std.Thread.spawn(.{}, decodeAudio, .{ &audio_clock, &audio_pkt_queue, aud_decode });
+    const audio_decode = try std.Thread.spawn(.{}, audio.decode, .{ &audio_clock, &audio_pkt_queue, aud_decode });
     defer audio_decode.join();
 
-    var w: c_int, var h: c_int = .{ undefined, undefined };
-    try errify(c.SDL_GetWindowSizeInPixels(ui.window, &w, &h));
+    const w, const h = try ui.windowSize();
 
     var view = Viewport.init(w, h);
 
@@ -303,8 +255,7 @@ pub fn main() !void {
                         try img.writeToFile("screenshot.png", .png);
                     },
                     c.SDL_SCANCODE_M => {
-                        audio_clock.is_muted = !audio_clock.is_muted;
-                        try errify(c.SDL_SetAudioStreamGain(audio_clock.stream, if (audio_clock.is_muted) 0.0 else 1.0));
+                        try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
                     },
                     else => {},
                 },
@@ -449,7 +400,7 @@ pub fn main() !void {
             continue;
         }
 
-        try errify(c.SDL_GL_SwapWindow(ui.window));
+        try ui.swap();
     }
 }
 
@@ -703,170 +654,6 @@ fn render(
     }
 }
 
-const DecodeContext = struct {
-    codec_ctx: *AvCodecContext,
-    fmt_ctx: AvFormatContext,
-    should_quit: *std.atomic.Value(bool),
-};
-
-fn decodeAudio(clock: *AudioClock, pkt_queue: *PacketQueue, decode_ctx: DecodeContext) !void {
-    const log = std.log.scoped(.audio_decode);
-
-    log.info("audio decode thread start", .{});
-    defer log.info("audio decode thread end", .{});
-
-    var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
-    defer c.av_frame_free(&maybe_src_frame);
-
-    var maybe_dst_frame: ?*c.AVFrame = c.av_frame_alloc();
-    defer c.av_frame_free(&maybe_dst_frame);
-
-    const src_frame = maybe_src_frame orelse return error.out_of_memory;
-    const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
-
-    const audio_ctx = decode_ctx.codec_ctx.inner.?;
-
-    _ = try libavError(c.av_channel_layout_copy(&dst_frame.ch_layout, &audio_ctx.ch_layout));
-    dst_frame.sample_rate = audio_ctx.sample_rate;
-    dst_frame.format = c.AV_SAMPLE_FMT_FLT;
-
-    var maybe_swr = c.swr_alloc();
-    defer c.swr_free(&maybe_swr);
-
-    const swr = maybe_swr orelse return error.out_of_memory;
-
-    var end_of_file = false;
-    while (!decode_ctx.should_quit.load(.monotonic)) {
-        // Try to receive a frame first if we have packets already in the decoder
-        recv_loop: while (true) {
-            switch (c.avcodec_receive_frame(audio_ctx, src_frame)) {
-                0 => { // got a frame
-                    defer c.av_frame_unref(src_frame);
-
-                    const bytes_per_sec = clock.sample_rate * clock.bytes_per_sample * clock.channels;
-                    const max_len = 1 * bytes_per_sec;
-
-                    _ = try libavError(c.swr_convert_frame(swr, dst_frame, src_frame));
-
-                    while (true) {
-                        const queued_len = c.SDL_GetAudioStreamQueued(clock.stream);
-                        if (queued_len < max_len) break;
-
-                        std.Thread.sleep(5 * std.time.ns_per_ms);
-                    }
-
-                    const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
-
-                    _ = c.SDL_PutAudioStreamData(clock.stream, dst_frame.data[0], len);
-                    _ = clock.bytes_sent.fetchAdd(@intCast(len), .monotonic);
-                },
-                c.AVERROR(c.EAGAIN) => break :recv_loop,
-                c.AVERROR_EOF => return,
-                else => |e| _ = try libavError(e),
-            }
-        }
-
-        var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
-            const flush_ret = c.avcodec_send_packet(audio_ctx, null);
-            if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libavError(flush_ret);
-            end_of_file = true;
-            continue;
-        };
-        defer c.av_packet_free(&pkt);
-
-        const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
-        if (send_ret == c.AVERROR_EOF) return;
-        if (send_ret == c.AVERROR(c.EAGAIN)) continue;
-        if (send_ret < 0) _ = try libavError(send_ret);
-    }
-}
-
-fn convertFrame(codec_ctx: *const AvCodecContext, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
-    @setRuntimeSafety(false);
-
-    if (codec_ctx.device) |dev| {
-        std.debug.assert(src_frame.format == dev.pix_fmt);
-        _ = try libavError(c.av_hwframe_transfer_data(dst_frame, src_frame, 0));
-    } else {
-        _ = try libavError(c.sws_scale_frame(sws, dst_frame, src_frame));
-    }
-
-    // timing
-    dst_frame.pts = src_frame.pts;
-    dst_frame.pkt_dts = src_frame.pkt_dts;
-    dst_frame.best_effort_timestamp = src_frame.best_effort_timestamp;
-
-    dst_frame.colorspace = src_frame.colorspace;
-    dst_frame.color_range = src_frame.color_range;
-    dst_frame.color_primaries = src_frame.color_primaries;
-    dst_frame.color_trc = src_frame.color_trc;
-}
-
-fn decodeVideo(frame_queue: *FrameQueue, pkt_queue: *PacketQueue, decode_ctx: DecodeContext) !void {
-    const log = std.log.scoped(.video_decode);
-
-    log.info("video decode thread start", .{});
-    defer log.info("video decode thread end", .{});
-
-    var src_frame: AvFrame = try .init();
-    defer src_frame.deinit();
-
-    var dst_frame: AvFrame = try .init();
-    defer dst_frame.deinit();
-
-    const video_ctx = decode_ctx.codec_ctx.inner.?;
-
-    try dst_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
-
-    const maybe_sws = c.sws_getContext(
-        video_ctx.width,
-        video_ctx.height,
-        video_ctx.pix_fmt,
-        video_ctx.width,
-        video_ctx.height,
-        c.AV_PIX_FMT_NV12,
-        c.SWS_FAST_BILINEAR,
-        null,
-        null,
-        null,
-    );
-    defer c.sws_freeContext(maybe_sws);
-
-    const sws = maybe_sws orelse return error.out_of_memory;
-
-    // TODO: using a fn ptr I think we can deduplicate this massive loop
-    var end_of_file = false;
-    while (!decode_ctx.should_quit.load(.monotonic)) {
-        // Try to receive a frame first if we have packets already in the decoder
-        recv_loop: while (true) {
-            switch (c.avcodec_receive_frame(video_ctx, src_frame.ptr())) {
-                0 => {
-                    defer c.av_frame_unref(dst_frame.ptr());
-
-                    try convertFrame(decode_ctx.codec_ctx, src_frame.ptr(), dst_frame.ptr(), sws);
-                    try frame_queue.push(dst_frame.ptr());
-                },
-                c.AVERROR(c.EAGAIN) => break :recv_loop,
-                c.AVERROR_EOF => return,
-                else => |e| _ = try libavError(e),
-            }
-        }
-
-        var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
-            const flush_ret = c.avcodec_send_packet(video_ctx, null);
-            if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libavError(flush_ret);
-            end_of_file = true;
-            continue;
-        };
-        defer c.av_packet_free(&pkt);
-
-        const send_ret = c.avcodec_send_packet(video_ctx, pkt);
-        if (send_ret == c.AVERROR_EOF) return;
-        if (send_ret == c.AVERROR(c.EAGAIN)) continue;
-        if (send_ret < 0) _ = try libavError(send_ret);
-    }
-}
-
 const Blur = struct {
     fbo: c_uint,
     tex: c_uint,
@@ -1056,27 +843,6 @@ const opengl_impl = struct {
     };
 };
 
-// https://github.com/castholm/zig-examples/blob/77a829c85b5ddbad673026d504626015db4093ac/opengl-sdl/main.zig#L200-L219
-inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(value))) {
-    .bool => void,
-    .pointer, .optional => @TypeOf(value.?),
-    .int => |info| switch (info.signedness) {
-        .signed => @TypeOf(@max(0, value)),
-        .unsigned => @TypeOf(value),
-    },
-    else => @compileError("unerrifiable type: " ++ @typeName(@TypeOf(value))),
-} {
-    return switch (@typeInfo(@TypeOf(value))) {
-        .bool => if (!value) error.sdl_error,
-        .pointer, .optional => value orelse error.sdl_error,
-        .int => |info| switch (info.signedness) {
-            .signed => if (value >= 0) @max(0, value) else error.sdl_error,
-            .unsigned => if (value != 0) value else error.sdl_error,
-        },
-        else => comptime unreachable,
-    };
-}
-
 fn circle(allocator: std.mem.Allocator, radius: f32, len: usize) !std.ArrayList(f32) {
     var list: std.ArrayList(f32) = .init(allocator);
     errdefer list.deinit();
@@ -1120,334 +886,6 @@ fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len:
 
     return list;
 }
-
-const ContextKind = enum { video, audio };
-
-const AvCodecContext = struct {
-    const Kind = enum { video, audio };
-    const Method = enum { software, hardware };
-    const Options = struct { dev_type: ?c.AVHWDeviceType = null };
-
-    inner: ?*c.AVCodecContext,
-    stream: c_int,
-
-    device: ?Device = null,
-
-    const log = std.log.scoped(.codec_setup);
-
-    //TODO: move Device to inside this struct
-
-    // TODO: default to software if hardware setup fails
-    fn init(allocator: std.mem.Allocator, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) !*AvCodecContext {
-        const self = try allocator.create(@This());
-
-        if (kind == .video) blk: {
-            const device_type = opt.dev_type orelse break :blk;
-
-            self.initHardware(fmt_ctx, device_type) catch |e| {
-                log.err("failed to set up hardware context: {}", .{e});
-                break :blk log.warn("defaulting to software", .{});
-            };
-
-            self.device.?.configure();
-            return self;
-        }
-
-        try self.initSoftware(kind, fmt_ctx);
-        return self;
-    }
-
-    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-        if (self.device) |*dev| dev.deinit();
-        c.avcodec_free_context(&self.inner);
-
-        allocator.destroy(self);
-    }
-
-    fn initSoftware(self: *@This(), comptime kind: Kind, fmt_ctx: AvFormatContext) !void {
-        const media_type = switch (kind) {
-            .video => c.AVMEDIA_TYPE_VIDEO,
-            .audio => c.AVMEDIA_TYPE_AUDIO,
-        };
-
-        var codec_ptr: ?*const c.AVCodec = null;
-        const stream = try libavError(c.av_find_best_stream(fmt_ctx.ptr(), media_type, -1, -1, &codec_ptr, 0));
-
-        var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
-        errdefer c.avcodec_free_context(&ctx_ptr);
-
-        _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
-        _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr, null));
-
-        self.* = .{ .inner = ctx_ptr, .stream = stream };
-    }
-
-    fn initHardware(self: *@This(), fmt_ctx: AvFormatContext, device_type: c.AVHWDeviceType) !void {
-        var codec_ptr: ?*const c.AVCodec = null;
-        const stream = try libavError(c.av_find_best_stream(fmt_ctx.ptr(), c.AVMEDIA_TYPE_VIDEO, -1, -1, &codec_ptr, 0));
-
-        var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
-        errdefer c.avcodec_free_context(&ctx_ptr);
-
-        _ = try libavError(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
-
-        var hw_device_ctx: ?*c.AVBufferRef = null;
-        var hw_pix_fmt: c.AVPixelFormat = undefined;
-
-        {
-            var i: c_int = 0;
-            while (true) {
-                defer i += 1;
-
-                const config: ?*const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec_ptr.?, i);
-                if (config == null) {
-                    log.err("no hardware {s} decoder found in {s} device", .{ codec_ptr.?.name, c.av_hwdevice_get_type_name(device_type) });
-                    return error.unsupported_codec;
-                }
-
-                if (config.?.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;
-                if (config.?.device_type != device_type) continue;
-
-                hw_pix_fmt = config.?.pix_fmt;
-                log.info("found {s} hwdevice for {s} decoder", .{ c.av_hwdevice_get_type_name(device_type), codec_ptr.?.name });
-
-                // FIXME: does this need to be deallocated????
-                _ = try libavError(c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0));
-                ctx_ptr.?.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
-
-                {
-                    var constraints: ?*c.AVHWFramesConstraints = c.av_hwdevice_get_hwframe_constraints(hw_device_ctx, null);
-                    defer c.av_hwframe_constraints_free(&constraints);
-
-                    log.debug("valid sw formats:", .{});
-                    const valid_sw = std.mem.sliceTo(constraints.?.valid_sw_formats, c.AV_SAMPLE_FMT_NONE);
-                    for (valid_sw) |fmt| log.debug("\t{s}", .{c.av_get_pix_fmt_name(fmt)});
-                }
-
-                break;
-            }
-        }
-
-        _ = try libavError(c.avcodec_open2(ctx_ptr, codec_ptr, null));
-
-        self.* = .{
-            .inner = ctx_ptr,
-            .stream = stream,
-            .device = .{
-                .pix_fmt = hw_pix_fmt,
-                .ctx = hw_device_ctx,
-            },
-        };
-    }
-};
-
-const Device = struct {
-    ctx: ?*c.AVBufferRef,
-    pix_fmt: c.AVPixelFormat,
-
-    /// Must be called immediately after creation, sets a self-referential ptr in self.codec_ctx.@"opaque"
-    ///
-    /// Also sets the get_format fn pointer in AVCodecContext
-    fn configure(self: *@This()) void {
-        const super: *AvCodecContext = @fieldParentPtr("device", @as(*?Device, @ptrCast(self)));
-
-        super.inner.?.@"opaque" = @ptrCast(self);
-        super.inner.?.get_format = @This().getFormat;
-    }
-
-    fn deinit(self: *@This()) void {
-        c.av_buffer_unref(&self.ctx);
-    }
-
-    fn getFormat(ctx: ?*c.AVCodecContext, formats: [*c]const c.AVPixelFormat) callconv(.c) c.AVPixelFormat {
-        const self: *const @This() = @alignCast(@ptrCast(ctx.?.@"opaque"));
-
-        const fmts = std.mem.sliceTo(formats, c.AV_PIX_FMT_NONE);
-        for (fmts) |fmt| {
-            // if (hw_pix_fmt == null) break; TODO: maybe i still need this?
-            if (fmt == self.pix_fmt) return self.pix_fmt;
-        }
-
-        return c.AV_PIX_FMT_NONE;
-    }
-};
-
-const AvFormatContext = struct {
-    inner: ?*c.AVFormatContext,
-
-    fn init(path: []const u8) !AvFormatContext {
-        var p: ?*c.AVFormatContext = c.avformat_alloc_context();
-        errdefer c.avformat_close_input(&p);
-
-        _ = try libavError(c.avformat_open_input(&p, path.ptr, null, null));
-        _ = try libavError(c.avformat_find_stream_info(p, null));
-
-        return .{ .inner = p };
-    }
-
-    inline fn ptr(self: @This()) *c.AVFormatContext {
-        return self.inner.?;
-    }
-
-    fn deinit(self: *@This()) void {
-        c.avformat_close_input(&self.inner);
-    }
-};
-
-const Ui = struct {
-    window: *c.SDL_Window,
-    gl_ctx: c.SDL_GLContext,
-
-    fn deinit(self: @This()) void {
-        gl.makeProcTableCurrent(null);
-        _ = c.SDL_GL_MakeCurrent(self.window, null);
-        _ = c.SDL_GL_DestroyContext(self.gl_ctx);
-        c.SDL_DestroyWindow(self.window);
-    }
-};
-
-fn createSdlWindow(width: u32, height: u32) !Ui {
-    c.SDL_SetMainReady();
-    try errify(c.SDL_Init(c.SDL_INIT_AUDIO | c.SDL_INIT_VIDEO));
-
-    try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", "0.1.0", "moe.paoda.rota-stabilizer"));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, gl.info.version_minor));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_FLAGS, c.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLEBUFFERS, 1));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLESAMPLES, 4));
-    try errify(c.SDL_GL_SetAttribute(c.SDL_GL_ALPHA_SIZE, 8));
-
-    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", @intCast(width), @intCast(height), c.SDL_WINDOW_OPENGL));
-    errdefer c.SDL_DestroyWindow(window);
-
-    const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
-    errdefer errify(c.SDL_GL_DestroyContext(gl_ctx)) catch {};
-
-    try errify(c.SDL_GL_MakeCurrent(window, gl_ctx));
-    errdefer errify(c.SDL_GL_MakeCurrent(window, null)) catch {};
-
-    if (!gl_procs.init(c.SDL_GL_GetProcAddress)) return error.gl_init_failed;
-
-    gl.makeProcTableCurrent(&gl_procs);
-    errdefer gl.makeProcTableCurrent(null);
-
-    return .{ .window = window, .gl_ctx = gl_ctx };
-}
-
-const Vec2 = struct { inner: [2]f32 };
-
-const Mat2 = struct {
-    inner: [4]f32,
-
-    const identity: @This() = .{ .inner = .{ 1, 0, 0, 1 } };
-
-    fn scale(s: f32) @This() {
-        return .{ .inner = .{ s, 0, 0, s } };
-    }
-
-    fn scaleXy(sx: f32, sy: f32) @This() {
-        return .{ .inner = .{ sx, 0, 0, sy } };
-    }
-
-    fn mul(left: @This(), right: @This()) @This() {
-        const l = left.inner;
-        const r = right.inner;
-
-        return .{
-            .inner = .{
-                l[0] * r[0] + l[2] * r[1],
-                l[1] * r[0] + l[3] * r[1],
-                l[0] * r[2] + l[2] * r[3],
-                l[1] * r[2] + l[3] * r[3],
-            },
-        };
-    }
-};
-
-const AudioClock = struct {
-    bytes_sent: std.atomic.Value(u64) = .init(0),
-    start_time: u64,
-
-    sample_rate: u16,
-    channels: u8,
-    bytes_per_sample: u32,
-
-    is_muted: bool,
-
-    stream: *c.SDL_AudioStream,
-
-    const log = std.log.scoped(.audio);
-
-    pub fn init(ctx: *const AvCodecContext) !@This() {
-        var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
-        desired.freq = ctx.inner.?.sample_rate;
-        desired.format = c.SDL_AUDIO_F32;
-        desired.channels = ctx.inner.?.ch_layout.nb_channels;
-
-        const stream = try errify(c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired, null, null));
-        errdefer c.SDL_DestroyAudioStream(stream);
-
-        try errify(c.SDL_SetAudioStreamGain(stream, if (muted_by_default) 0.0 else 1.0));
-        try errify(c.SDL_ResumeAudioStreamDevice(stream));
-
-        return .{
-            .start_time = c.SDL_GetPerformanceCounter(),
-            .sample_rate = @intCast(desired.freq),
-            .channels = @intCast(desired.channels),
-            .bytes_per_sample = @intCast(c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT)),
-
-            .is_muted = muted_by_default,
-            .stream = stream,
-        };
-    }
-
-    fn deinit(self: @This()) void {
-        c.SDL_DestroyAudioStream(self.stream);
-    }
-
-    fn seconds_passed(self: @This()) f64 {
-        const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
-
-        const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream));
-        const bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
-
-        const pos = bytes_sent - queued;
-        return pos / bytes_per_sec;
-    }
-};
-
-fn mat2(m00: f32, m01: f32, m10: f32, m11: f32) Mat2 {
-    return .{ .inner = .{ m00, m01, m10, m11 } };
-}
-
-const AvFrame = struct {
-    inner: ?*c.AVFrame,
-
-    pub fn init() !AvFrame {
-        const p: ?*c.AVFrame = c.av_frame_alloc();
-        if (p == null) return error.out_of_memory;
-
-        return .{ .inner = p };
-    }
-
-    pub fn setup(self: *@This(), width: c_int, height: c_int, fmt: c.AVPixelFormat) !void {
-        self.inner.?.width = width;
-        self.inner.?.height = height;
-        self.inner.?.format = fmt;
-
-        _ = try libavError(c.av_frame_get_buffer(self.inner, 32));
-    }
-
-    pub fn deinit(self: *@This()) void {
-        c.av_frame_free(&self.inner);
-    }
-
-    pub fn ptr(self: @This()) *c.AVFrame {
-        return self.inner.?;
-    }
-};
 
 const Viewport = struct {
     width: c_int,

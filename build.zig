@@ -15,19 +15,6 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // This creates a "module", which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Every executable or library we compile will be based on one or more modules.
-    const lib_mod = b.createModule(.{
-        // `root_source_file` is the Zig "entry point" of the module. If a module
-        // only contains e.g. external object files, you can make this `null`.
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // We will also create a module for our other entry point, 'main.zig'.
     const exe_mod = b.createModule(.{
         // `root_source_file` is the Zig "entry point" of the module. If a module
@@ -41,17 +28,17 @@ pub fn build(b: *std.Build) !void {
     });
 
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize, .preferred_link_mode = .static });
-    lib_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+    exe_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
     switch (target.result.os.tag) {
         .windows => {
             const ffmpeg = b.lazyDependency("ffmpeg", .{}) orelse return error.ffmpeg_missing;
-            lib_mod.addIncludePath(ffmpeg.path("include/"));
-            lib_mod.addLibraryPath(ffmpeg.path("lib/"));
+            exe_mod.addIncludePath(ffmpeg.path("include/"));
+            exe_mod.addLibraryPath(ffmpeg.path("lib/"));
 
             const ffmpeg_libs = [_][]const u8{ "avcodec", "avformat", "swscale", "avutil", "swresample" };
 
-            const base_path = ffmpeg.path("bin\\");
+            const base_path = ffmpeg.path("bin" ++ std.fs.path.sep_str);
             const dir = try base_path.getPath3(b, null).openDir(".", .{ .iterate = true });
 
             var walk = try dir.walk(b.allocator);
@@ -63,25 +50,20 @@ pub fn build(b: *std.Build) !void {
 
                 // b.installBinFile doesn't support LazyPath for some reason :\
                 b.getInstallStep().dependOn(&b.addInstallFileWithDir(src_path, .bin, entry.basename).step);
-                lib_mod.linkSystemLibrary(lib, .{});
+                exe_mod.linkSystemLibrary(lib, .{});
             }
         },
         else => {
-            lib_mod.linkSystemLibrary("libavcodec", .{});
-            lib_mod.linkSystemLibrary("libavformat", .{});
-            lib_mod.linkSystemLibrary("libswscale", .{});
-            lib_mod.linkSystemLibrary("libswresample", .{});
-            lib_mod.linkSystemLibrary("libavutil", .{});
+            exe_mod.linkSystemLibrary("libavcodec", .{});
+            exe_mod.linkSystemLibrary("libavformat", .{});
+            exe_mod.linkSystemLibrary("libswscale", .{});
+            exe_mod.linkSystemLibrary("libswresample", .{});
+            exe_mod.linkSystemLibrary("libavutil", .{});
         },
     }
 
     const gl_mod = @import("zigglgen").generateBindingsModule(b, .{ .api = .gl, .version = .@"3.3", .profile = .core });
     exe_mod.addImport("gl", gl_mod);
-
-    // Modules can depend on one another using the `std.Build.Module.addImport` function.
-    // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
-    // file path. In this case, we set up `exe_mod` to import `lib_mod`.
-    exe_mod.addImport("librota", lib_mod);
 
     const zstbi = b.dependency("zstbi", .{});
     exe_mod.addImport("zstbi", zstbi.module("root"));
@@ -121,14 +103,6 @@ pub fn build(b: *std.Build) !void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    const lib_unit_tests = b.addTest(.{
-        .root_module = lib_mod,
-    });
-
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
     const exe_unit_tests = b.addTest(.{
         .root_module = exe_mod,
     });
@@ -139,7 +113,6 @@ pub fn build(b: *std.Build) !void {
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
 }
 
