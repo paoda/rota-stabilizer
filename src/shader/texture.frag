@@ -35,16 +35,11 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
 }
 
 void main() {
-    if (
-        uv.x < (1 - border) &&
-        uv.x > border &&
-        uv.y < (1 - border * 2) &&
-        uv.y > border * 2
-    ) {
-        vec3 rgb = nv12ToRgb(texture(u_y_tex, uv).r, texture(u_uv_tex, uv).rg);
-        frag_color = vec4(rgb, 1.0);
+    if (uv.x >= (1.0 - border) || uv.x <= border || uv.y >= (1.0 - border * 2.0) || uv.y <= border * 2.0) {
+        frag_color = vec4(vec3(1.0), 0.4); // TODO: make alpha channel runtime available?
         return;
     }
 
-    frag_color = vec4(vec3(1.0), 0.4); // TODO: make alpha channel runtime available?
+    vec3 rgb = nv12ToRgb(texture(u_y_tex, uv).r, texture(u_uv_tex, uv).rg);
+    frag_color = vec4(rgb, 1.0);
 }
