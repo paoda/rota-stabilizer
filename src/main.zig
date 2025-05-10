@@ -608,7 +608,7 @@ fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_inner"), 1);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_angle"), 2);
 
-        gl.Uniform2fv(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_viewport"), 1, &u_viewport.inner);
+        gl.Uniform2f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_viewport"), u_viewport.inner[0], u_viewport.inner[1]);
         gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.background)], "u_radius"), u_scale.inner[0] * puck_radius);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -653,6 +653,10 @@ fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_uv_tex"), 1);
         gl.Uniform1i(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_angle"), 2);
+
+        const magic_aspect_ratio = 1.7763157895;
+        gl.Uniform2f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_resolution"), angle_calc.u_dimension[0], angle_calc.u_dimension[1]);
+        gl.Uniform1f(gl.GetUniformLocation(prog_id[@intFromEnum(Id.texture)], "u_ratio"), magic_aspect_ratio);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
