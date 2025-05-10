@@ -325,6 +325,8 @@ pub fn main() !void {
                     _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
                 }
 
+                gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
                 gl.TexSubImage2D(
                     gl.TEXTURE_2D,
                     0,
@@ -364,6 +366,8 @@ pub fn main() !void {
 
                     _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
                 }
+
+                gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
 
                 gl.TexSubImage2D(
                     gl.TEXTURE_2D,
