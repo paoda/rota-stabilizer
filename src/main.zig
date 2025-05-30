@@ -235,7 +235,7 @@ pub fn main() !void {
     const w, const h = try ui.windowSize();
 
     var view = Viewport.init(w, h);
-    // const frame_duration = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate);
+    const frame_period = 1.0 / c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate);
 
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
@@ -276,9 +276,9 @@ pub fn main() !void {
             // log.debug("colour primaries: {s}", .{c.av_color_primaries_name(frame.color_primaries)});
             // log.debug("colour transfer: {s}", .{c.av_color_transfer_name(frame.color_trc)});
 
-            const drop_behind = 0.02;
-            const delay_ahead = 0.008;
-            const max_delay = 0.016; // FIXME: is this chill on Windows?
+            const drop_behind = 0.020;
+            const delay_ahead = @max(0.008, frame_period * 0.4);
+            const max_delay = @max(0.016, frame_period * 1); // FIXME: is this chill on Windows?
             const desync_reset = 2.0;
 
             const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
