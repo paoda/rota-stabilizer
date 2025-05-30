@@ -30,7 +30,7 @@ pub fn sleep(ns: u64) void {
     const duration: u64 = @intCast(@divTrunc(@as(i128, ns) * freq, std.time.ns_per_s));
     const target_counter: u64 = start_counter + duration;
 
-    const threshold_ns = 15 * std.time.ns_per_ms; // Example threshold for coarse sleep
+    const threshold_ns = 2 * std.time.ns_per_ms; // Example threshold for coarse sleep
 
     // Perform coarse sleep if the total duration is significantly larger than the threshold
     if (ns > threshold_ns) {

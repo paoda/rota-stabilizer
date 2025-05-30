@@ -34,7 +34,7 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
     float u = uv.r - 0.5;
     float v = uv.g - 0.5;
 
-    return clamp(bt601 * vec3(y, u, v), 0.0, 1.0);
+    return clamp(bt709 * vec3(y, u, v), 0.0, 1.0);
 }
 
 void main() {

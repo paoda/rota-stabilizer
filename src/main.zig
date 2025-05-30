@@ -235,6 +235,7 @@ pub fn main() !void {
     const w, const h = try ui.windowSize();
 
     var view = Viewport.init(w, h);
+    // const frame_duration = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate);
 
     while (!should_quit.load(.monotonic)) {
         var event: c.SDL_Event = undefined;
@@ -275,7 +276,10 @@ pub fn main() !void {
             // log.debug("colour primaries: {s}", .{c.av_color_primaries_name(frame.color_primaries)});
             // log.debug("colour transfer: {s}", .{c.av_color_transfer_name(frame.color_trc)});
 
-            const threshold = 0.1;
+            const drop_behind = 0.02;
+            const delay_ahead = 0.008;
+            const max_delay = 0.016; // FIXME: is this chill on Windows?
+            const desync_reset = 2.0;
 
             const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
             const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
@@ -286,16 +290,16 @@ pub fn main() !void {
             const frame_time = stable_buffer.invert().display_time();
             const diff = frame_time - audio_time;
 
-            if (diff < -threshold and diff > -1.0) {
-                // log.debug("skip: v: {d:.3}s a: {d:.3}s | \x1B[36m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
+            if (@abs(diff) > desync_reset) {
+                log.err("\x1B[31mmajor a/v desync: {d:.3}s\x1B[39m. TODO: reset sync", .{diff});
                 continue;
-            }
-
-            if (diff > threshold * 0.1) {
-                // log.debug("wait: v: {d:.3}s a: {d:.3}s | \x1B[31m{d:.3}s\x1B[39m", .{ pt_in_seconds, audio_time, diff });
-
-                const wait_ns = @min(diff * std.time.ns_per_s, 1 * std.time.ns_per_s); // TODO: 1 second is way too long?
-                sleep(@intFromFloat(wait_ns));
+            } else if (diff < -drop_behind) {
+                log.debug("drop frame | v={d:.3}s a={d:.3}s diff=\x1B[36m{d:.3}ms\x1B[39m", .{ pt_in_seconds, audio_time, diff * std.time.ms_per_s });
+                continue;
+            } else if (diff > delay_ahead) {
+                log.debug("delay frame | v={d:.3}s a={d:.3}s diff=\x1B[31m{d:.3}ms\x1B[39m", .{ pt_in_seconds, audio_time, diff * std.time.ms_per_s });
+                const delay_ns = @min(diff * std.time.ns_per_s, max_delay * std.time.ns_per_s);
+                sleep(@intFromFloat(delay_ns));
             }
 
             {
