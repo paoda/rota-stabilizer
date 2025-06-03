@@ -28,8 +28,8 @@ pub const packet = struct {
             };
         }
 
-        pub fn deinit(self: @This(), _: std.mem.Allocator) void {
-            for (self.list.writableSlice(0)) |pkt| {
+        pub fn deinit(self: *@This(), _: std.mem.Allocator) void {
+            while (self.list.readItem()) |pkt| {
                 var p: ?*c.AVPacket = pkt;
                 c.av_packet_free(&p);
             }
