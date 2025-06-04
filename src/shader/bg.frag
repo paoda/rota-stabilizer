@@ -6,7 +6,7 @@ out vec4 frag_colour;
 uniform sampler2D u_outer; 
 uniform sampler2D u_inner; 
 
-uniform vec2 u_viewport; 
+uniform vec2 u_bounds; 
 uniform float u_radius;
 uniform float u_darkness = 0.0;
 
@@ -14,7 +14,7 @@ uniform float u_darkness = 0.0;
 
 vec2 center = vec2(0.5, 0.5);
 void main() {
-    vec2 normalized = gl_FragCoord.xy / u_viewport;
+    vec2 normalized = gl_FragCoord.xy / u_bounds;
     float dist = distance(normalized, center) * 2;
     
     vec3 tinted;

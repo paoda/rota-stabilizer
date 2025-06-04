@@ -27,6 +27,7 @@ const AvPacket = @import("lib/libav.zig").AvPacket;
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
 const mat2 = @import("lib/math.zig").mat2;
+const vec2 = @import("lib/math.zig").vec2;
 
 const sleep = @import("lib.zig").sleep;
 
@@ -72,9 +73,8 @@ pub fn main() !void {
 
     const vid_width: u32 = @intCast(video_ctx.inner.?.width);
     const vid_height: u32 = @intCast(video_ctx.inner.?.height);
-    const win_size = @max(vid_width, vid_height) / 2;
 
-    const ui = try platform.createWindow(win_size, win_size);
+    const ui = try platform.createWindow(800, 800);
     defer ui.deinit();
 
     var audio_clock = try AudioClock.init(audio_ctx);
@@ -93,18 +93,12 @@ pub fn main() !void {
     defer res.deinit();
 
     const aspect = @as(f32, @floatFromInt(vid_width)) / @as(f32, @floatFromInt(vid_height));
-    const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
-    const scale = 1.0 / std.math.sqrt(ratio[0] * ratio[0] + ratio[1] * ratio[1]); // factor allows for ration w/out clipping
 
     {
         const gcd = std.math.gcd(vid_width, vid_height);
         log.debug("Resolution: {}x{}", .{ vid_width, vid_height });
         log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ vid_width / gcd, vid_height / gcd, aspect });
     }
-
-    const u_scale = Mat2.scale(scale);
-    const u_aspect = Mat2.scaleXy(ratio[0], ratio[1]);
-    const u_inv_scale = Mat2.scale((1.0 / @min(ratio[0], ratio[1])) * std.math.sqrt2); // |cos(π/4)| + |sin(π/4)| == sqrt(2)
 
     var stable_buffer = DoubleBuffer.init(res);
     const angle_calc = try AngleCalc.init(res, vid_width, vid_height);
@@ -136,6 +130,7 @@ pub fn main() !void {
     defer audio_decode.join();
 
     const w, const h = try ui.windowSize();
+    var camera = Camera.init(vid_width, vid_height, w, h);
 
     var view = Viewport.init(w, h);
     const frame_period = 1.0 / c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate);
@@ -146,6 +141,11 @@ pub fn main() !void {
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
                 c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
+                c.SDL_EVENT_MOUSE_WHEEL => {
+                    const wheel_delta = event.wheel.y * 0.1;
+                    camera.adjustZoom(wheel_delta);
+                    log.debug("Zoom: {d:.2}x", .{camera.zoom});
+                },
                 c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
                     c.SDL_SCANCODE_P => {
                         log.debug("saving screenshot", .{});
@@ -160,6 +160,11 @@ pub fn main() !void {
                     },
                     c.SDL_SCANCODE_M => {
                         try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
+                    },
+                    c.SDL_SCANCODE_L => {
+                        // Debug: print world vs window viewport info
+                        const world_bounds = camera.world_bounds;
+                        log.debug("World bounds: {d:.1}x{d:.1}, Window: {}x{}", .{ world_bounds.x(), world_bounds.y(), camera.window_size[0], camera.window_size[1] });
                     },
                     else => {},
                 },
@@ -197,10 +202,10 @@ pub fn main() !void {
                 log.err("\x1B[31mmajor a/v desync: {d:.3}s\x1B[39m. TODO: reset sync", .{diff});
                 continue;
             } else if (diff < -drop_behind) {
-                log.debug("drop frame | v={d:.3}s a={d:.3}s diff=\x1B[36m{d:.3}ms\x1B[39m", .{ pt_in_seconds, audio_time, diff * std.time.ms_per_s });
+                // log.debug("drop frame | v={d:.3}s a={d:.3}s diff=\x1B[36m{d:.3}ms\x1B[39m", .{ pt_in_seconds, audio_time, diff * std.time.ms_per_s });
                 continue;
             } else if (diff > delay_ahead) {
-                log.debug("delay frame | v={d:.3}s a={d:.3}s diff=\x1B[31m{d:.3}ms\x1B[39m", .{ pt_in_seconds, audio_time, diff * std.time.ms_per_s });
+                // log.debug("delay frame | v={d:.3}s a={d:.3}s diff=\x1B[31m{d:.3}ms\x1B[39m", .{ pt_in_seconds, audio_time, diff * std.time.ms_per_s });
                 const delay_ns = @min(diff * std.time.ns_per_s, max_delay * std.time.ns_per_s);
                 sleep(@intFromFloat(delay_ns));
             }
@@ -294,10 +299,7 @@ pub fn main() !void {
                 &stable_buffer,
                 angle_calc,
                 res,
-                u_inv_scale,
-                u_aspect,
-                u_scale,
-                .{ .inner = .{ @floatFromInt(w), @floatFromInt(h) } },
+                camera,
             );
         } else {
             // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
@@ -389,10 +391,7 @@ fn render(
     stable_buffer: *DoubleBuffer,
     angle_calc: AngleCalc,
     res: *const GpuResourceManager,
-    u_inv_scale: Mat2,
-    u_aspect: Mat2,
-    u_scale: Mat2,
-    u_viewport: Vec2,
+    camera: Camera,
 ) !void {
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
@@ -420,15 +419,21 @@ fn render(
         gl.ActiveTexture(gl.TEXTURE2);
         gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
 
-        const u_transform = u_inv_scale.mul(u_aspect);
+        const u_world_transform = camera.getBackgroundWorldTransform();
+        const u_view_transform = camera.getWorldViewTransform();
+        const u_clip_transform = camera.getViewClipTransform();
+        const world_bounds = camera.world_bounds;
 
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_outer"), 0);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_inner"), 1);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
+
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
 
-        gl.Uniform2f(gl.GetUniformLocation(prog, "u_viewport"), u_viewport.inner[0], u_viewport.inner[1]);
-        gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), u_scale.inner[0] * res.meta.circle_radius);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_outer"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_inner"), 1);
+        gl.Uniform2f(gl.GetUniformLocation(prog, "u_bounds"), world_bounds.x(), world_bounds.y());
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), res.meta.circle_radius * camera.scale);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -437,18 +442,26 @@ fn render(
         const circle_prog = res.prog.get(.circle);
         const ring_prog = res.prog.get(.ring);
 
+        const u_world_transform = camera.getUiWorldTransform();
+        const u_view_transform = camera.getWorldViewTransform();
+        const u_clip_transform = camera.getViewClipTransform();
+
         // Draw Transparent Puck
         gl.UseProgram(circle_prog);
         gl.BindVertexArray(res.vao.get(.circle));
 
-        gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_scale"), u_scale.inner[0]);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
         gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(res.meta.circle_len));
 
         // Draw Ring (matches ring in gameplay)
         gl.UseProgram(ring_prog);
         gl.BindVertexArray(res.vao.get(.ring));
 
-        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_scale"), u_scale.inner[0]);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(res.meta.ring_len));
     }
 
@@ -471,14 +484,19 @@ fn render(
         gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        const u_transform = u_scale.mul(u_aspect);
-
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_transform"), 1, gl.FALSE, &u_transform.inner);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
+        const u_world_transform = camera.getVideoWorldTransform();
+        const u_view_transform = camera.getWorldViewTransform();
+        const u_clip_transform = camera.getViewClipTransform();
 
         const magic_aspect_ratio = 1.7763157895;
+
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
+
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
         gl.Uniform2f(gl.GetUniformLocation(prog, "u_resolution"), angle_calc.u_dimension[0], angle_calc.u_dimension[1]);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
 
@@ -622,5 +640,93 @@ const AngleCalc = struct {
         gl.Uniform2f(gl.GetUniformLocation(program, "u_dimension"), self.u_dimension[0], self.u_dimension[1]);
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
+    }
+};
+
+const Camera = struct {
+    view_to_clip: Mat2,
+
+    world_bounds: Vec2,
+    window_size: [2]c_int,
+    video_aspect: f32,
+
+    scale: f32,
+    inv_scale: f32,
+
+    zoom: f32 = 1.0,
+
+    pub fn init(video_width: u32, video_height: u32, window_width: c_int, window_height: c_int) Camera {
+        const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
+        const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
+
+        const world_bounds = vec2(1.0, 1.0);
+        const viewport_bounds = if (window_aspect > 1.0) vec2(window_aspect, 1.0) else vec2(1.0, 1.0 / window_aspect);
+        const video_bounds = if (video_aspect > 1.0) vec2(1.0, 1.0 / video_aspect) else vec2(video_aspect, 1.0);
+
+        const world_aspect = world_bounds.x() / world_bounds.y();
+        const view_to_clip = calculateAspectCorrection(world_aspect, window_aspect);
+
+        const scale = 1.0 / std.math.sqrt(video_bounds.x() * video_bounds.x() + video_bounds.y() * video_bounds.y());
+
+        const viewport_diagonal = std.math.sqrt(viewport_bounds.x() * viewport_bounds.x() + viewport_bounds.y() * viewport_bounds.y());
+        const inv_scale = viewport_diagonal / @min(video_bounds.x(), video_bounds.y());
+
+        return .{
+            .view_to_clip = view_to_clip,
+            .world_bounds = world_bounds,
+            .window_size = .{ window_width, window_height },
+            .video_aspect = video_aspect,
+
+            .scale = scale,
+            .inv_scale = inv_scale,
+        };
+    }
+
+    fn calculateAspectCorrection(world_aspect: f32, window_aspect: f32) Mat2 {
+        if (window_aspect > world_aspect) {
+            // Window wider than world - letterbox horizontally
+            return Mat2.scaleXy(world_aspect / window_aspect, 1.0);
+        } else {
+            // Window taller than world - letterbox vertically
+            return Mat2.scaleXy(1.0, window_aspect / world_aspect);
+        }
+    }
+
+    pub fn getUiWorldTransform(self: @This()) Mat2 {
+        return Mat2.scale(self.scale);
+    }
+
+    pub fn getVideoWorldTransform(self: @This()) Mat2 {
+        const wide_scale = Mat2.scaleXy(1.0, 1.0 / self.video_aspect);
+        const tall_scale = Mat2.scaleXy(self.video_aspect, 1.0);
+        const aspect_transform = if (self.video_aspect > 1.0) wide_scale else tall_scale;
+
+        const scale_transform = Mat2.scale(self.scale);
+        return aspect_transform.mul(scale_transform);
+    }
+
+    pub fn getBackgroundWorldTransform(self: @This()) Mat2 {
+        const wide_scale = Mat2.scaleXy(1.0, 1.0 / self.video_aspect);
+        const tall_scale = Mat2.scaleXy(self.video_aspect, 1.0);
+        const aspect_transform = if (self.video_aspect > 1.0) wide_scale else tall_scale;
+
+        const scale_transform = Mat2.scale(self.inv_scale);
+        return aspect_transform.mul(scale_transform);
+    }
+
+    pub fn getWorldViewTransform(self: @This()) Mat2 {
+        return Mat2.scale(self.zoom);
+    }
+
+    pub fn getViewClipTransform(self: @This()) Mat2 {
+        return self.view_to_clip;
+    }
+
+    pub fn adjustZoom(self: *@This(), delta: f32) void {
+        self.setZoom(self.zoom + delta);
+    }
+
+    fn setZoom(self: *@This(), new_zoom: f32) void {
+        self.zoom = @max(0.1, @min(10.0, new_zoom));
     }
 };
