@@ -241,8 +241,8 @@ pub const GpuResourceManager = struct {
         try manager.setupVertexArrays(allocator, width, height);
         try manager.setupAngleCalc();
 
-        manager.setupBlur(.strong, width, height);
-        manager.setupBlur(.weak, width / 2, height / 2);
+        manager.setupBlur(.strong, width / 8, height / 8);
+        manager.setupBlur(.weak, width / 8, height / 8);
 
         manager.setupVideoTextures(width, height);
         return manager;
@@ -364,12 +364,12 @@ pub const GpuResourceManager = struct {
             gl.TexImage2D(
                 gl.TEXTURE_2D,
                 0,
-                gl.RGB,
+                gl.RGB16F,
                 @intCast(width),
                 @intCast(height),
                 0,
                 gl.RGB,
-                gl.UNSIGNED_BYTE,
+                gl.HALF_FLOAT,
                 null,
             );
 
