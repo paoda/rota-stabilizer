@@ -60,7 +60,7 @@ void main() {
     }
 
     if (content_uv.x >= (1.0 - border) || content_uv.x <= border || content_uv.y >= (1.0 - border * 2.0) || content_uv.y <= border * 2.0) {
-        frag_color = vec4(vec3(1.0), 0.4); // TODO: make alpha channel runtime available?
+        frag_color = vec4(vec3(1.0), 0.7); // TODO: make alpha channel runtime available?
         return;
     }
 
