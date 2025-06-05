@@ -146,6 +146,12 @@ pub fn main() !void {
                     camera.adjustZoom(wheel_delta);
                     log.debug("Zoom: {d:.2}x", .{camera.zoom});
                 },
+                c.SDL_EVENT_WINDOW_RESIZED => {
+                    view = Viewport.init(event.window.data1, event.window.data2);
+                    camera.updateWindow(view.width, view.height);
+
+                    log.debug("Window resized to {}x{}", .{ view.width, view.height });
+                },
                 c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
                     c.SDL_SCANCODE_P => {
                         log.debug("saving screenshot", .{});
@@ -682,6 +688,21 @@ const Camera = struct {
         };
     }
 
+    pub fn updateWindow(self: *@This(), width: c_int, height: c_int) void {
+        self.window_size = .{ width, height };
+
+        const window_aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+        const world_aspect = self.world_bounds.x() / self.world_bounds.y();
+
+        self.view_to_clip = calculateAspectCorrection(world_aspect, window_aspect);
+
+        const viewport_bounds = if (window_aspect > 1.0) vec2(window_aspect, 1.0) else vec2(1.0, 1.0 / window_aspect);
+        const video_bounds = if (self.video_aspect > 1.0) vec2(1.0, 1.0 / self.video_aspect) else vec2(self.video_aspect, 1.0);
+
+        const viewport_diagonal = std.math.sqrt(viewport_bounds.x() * viewport_bounds.x() + viewport_bounds.y() * viewport_bounds.y());
+        self.inv_scale = viewport_diagonal / @min(video_bounds.x(), video_bounds.y());
+    }
+
     fn calculateAspectCorrection(world_aspect: f32, window_aspect: f32) Mat2 {
         if (window_aspect > world_aspect) {
             // Window wider than world - letterbox horizontally
@@ -727,6 +748,6 @@ const Camera = struct {
     }
 
     fn setZoom(self: *@This(), new_zoom: f32) void {
-        self.zoom = @max(0.1, @min(10.0, new_zoom));
+        self.zoom = @max(1.0, @min(10.0, new_zoom));
     }
 };
