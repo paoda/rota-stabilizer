@@ -9,8 +9,6 @@ uniform sampler2D u_uv_tex;
 uniform vec2 u_resolution;
 uniform float u_ratio;
 
-float border = 0.0075;
-
 vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
     const mat3 bt601 = mat3(
             1.0, 1.0, 1.0,
@@ -37,6 +35,17 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
     return clamp(bt709 * vec3(y, u, v), 0.0, 1.0);
 }
 
+const float border_radius = 20.0;
+
+// https://gamedev.stackexchange.com/questions/205467/add-a-rounded-border-to-a-texture-with-a-fragment-shader
+float calcDistance(vec2 uv) {
+    vec2 positionInQuadrant = abs(uv * 2.0 - 1.0);
+    vec2 extend = vec2(u_resolution) / 2.0;
+    vec2 coords = positionInQuadrant * (extend + border_radius);
+    vec2 delta = max(coords - extend, 0.);
+    return length(delta);
+}
+
 void main() {
     float gameplay_height = u_resolution.x / u_ratio;
     float height_diff = u_resolution.y - gameplay_height;
@@ -59,8 +68,11 @@ void main() {
         }
     }
 
-    if (content_uv.x >= (1.0 - border) || content_uv.x <= border || content_uv.y >= (1.0 - border * 2.0) || content_uv.y <= border * 2.0) {
-        frag_color = vec4(vec3(1.0), 0.7); // TODO: make alpha channel runtime available?
+
+    float dist = calcDistance(content_uv);
+    if (dist > border_radius) discard; 
+    if (dist > 0.0) {
+        frag_color = vec4(vec3(1.0), 0.7);
         return;
     }
 
