@@ -35,7 +35,8 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
     return clamp(bt709 * vec3(y, u, v), 0.0, 1.0);
 }
 
-const float border_radius = 20.0;
+const float border_radius = 20;
+const float border = 0.0075;
 
 // https://gamedev.stackexchange.com/questions/205467/add-a-rounded-border-to-a-texture-with-a-fragment-shader
 float calcDistance(vec2 uv) {
@@ -68,11 +69,11 @@ void main() {
         }
     }
 
-
     float dist = calcDistance(content_uv);
     if (dist > border_radius) discard; 
-    if (dist > 0.0) {
-        frag_color = vec4(vec3(1.0), 0.7);
+
+    if (content_uv.x >= (1.0 - border) || content_uv.x <= border || content_uv.y >= (1.0 - border * 2.0) || content_uv.y <= border * 2.0) {
+        frag_color = vec4(vec3(1.0), 0.7); // TODO: make alpha channel runtime available?
         return;
     }
 
