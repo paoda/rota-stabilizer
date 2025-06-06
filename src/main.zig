@@ -337,11 +337,11 @@ const DoubleBuffer = struct {
             };
         }
 
-        fn tex(self: @This(), comptime ch: Channel) c_uint {
-            return switch (ch) {
-                .y => self.inner.res.tex.get(if (self.inner.current == 0) .y_front else .y_back),
-                .uv => self.inner.res.tex.get(if (self.inner.current == 0) .uv_front else .uv_back),
-            };
+        fn tex(self: @This()) Nv12Tex {
+            const y = self.inner.res.tex.get(if (self.inner.current == 0) .y_front else .y_back);
+            const uv = self.inner.res.tex.get(if (self.inner.current == 0) .uv_front else .uv_back);
+
+            return .{ .y = y, .uv = uv };
         }
 
         fn display_time(self: @This()) f64 {
@@ -402,13 +402,12 @@ fn render(
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
-    const y_tex = stable_buffer.invert().tex(.y);
-    const uv_tex = stable_buffer.invert().tex(.uv);
+    const tex = stable_buffer.invert().tex();
 
-    angle_calc.execute(view, .{ y_tex, uv_tex });
+    angle_calc.execute(view, tex);
 
     {
-        blur(res.blur(), res, view, .{ y_tex, uv_tex }, 8);
+        blur(res.blur(), res, view, tex, 8);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
@@ -471,10 +470,10 @@ fn render(
         defer gl.BindVertexArray(0);
 
         gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, y_tex);
+        gl.BindTexture(gl.TEXTURE_2D, tex.y);
 
         gl.ActiveTexture(gl.TEXTURE1);
-        gl.BindTexture(gl.TEXTURE_2D, uv_tex);
+        gl.BindTexture(gl.TEXTURE_2D, tex.uv);
 
         gl.ActiveTexture(gl.TEXTURE2);
         gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
@@ -501,7 +500,7 @@ fn render(
 }
 
 // FIXME: this is the bottleneck of the main thread
-fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: [2]c_uint, passes: u32) void {
+fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, passes: u32) void {
     std.debug.assert(passes % 2 == 0);
 
     const width: c_int = @intCast(b.resolution.width);
@@ -523,13 +522,11 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
     gl.UseProgram(program);
     defer gl.UseProgram(0);
 
-    const y_tex, const uv_tex = .{ src_tex[0], src_tex[1] };
-
     gl.ActiveTexture(gl.TEXTURE1);
-    gl.BindTexture(gl.TEXTURE_2D, y_tex);
+    gl.BindTexture(gl.TEXTURE_2D, src_tex.y);
 
     gl.ActiveTexture(gl.TEXTURE2);
-    gl.BindTexture(gl.TEXTURE_2D, uv_tex);
+    gl.BindTexture(gl.TEXTURE_2D, src_tex.uv);
 
     gl.Uniform2f(gl.GetUniformLocation(program, "u_resolution"), @floatFromInt(width), @floatFromInt(height));
     gl.Uniform1i(gl.GetUniformLocation(program, "u_screen"), 0);
@@ -557,9 +554,9 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
 
-    defer gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_cache);
-    defer gl.BindTexture(gl.TEXTURE_2D, 0);
-    defer gl.BindVertexArray(0);
+    gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_cache);
+    gl.BindTexture(gl.TEXTURE_2D, 0);
+    gl.BindVertexArray(0);
 }
 
 const Viewport = struct {
@@ -594,6 +591,8 @@ const Viewport = struct {
     }
 };
 
+const Nv12Tex = struct { y: c_uint, uv: c_uint };
+
 const AngleCalc = struct {
     res: *const GpuResourceManager,
     u_resolution: Vec2,
@@ -607,9 +606,8 @@ const AngleCalc = struct {
         };
     }
 
-    pub fn execute(self: @This(), view: *Viewport, tex_id: [2]c_uint) void {
+    pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
         const program = self.res.prog.get(.angle);
-        const y_tex, const uv_tex = .{ tex_id[0], tex_id[1] };
 
         view.set(1, 1);
         defer view.restore();
@@ -621,10 +619,10 @@ const AngleCalc = struct {
         defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
 
         gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, y_tex);
+        gl.BindTexture(gl.TEXTURE_2D, tex.y);
 
         gl.ActiveTexture(gl.TEXTURE1);
-        gl.BindTexture(gl.TEXTURE_2D, uv_tex);
+        gl.BindTexture(gl.TEXTURE_2D, tex.uv);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         gl.UseProgram(program);
