@@ -4,7 +4,7 @@ layout(location = 0) out vec4 angle;
 
 uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
-uniform vec2 u_dimension;
+uniform vec2 u_resolution;
 
 // TODO: select colorspace based on AVFrame
 vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
@@ -39,7 +39,7 @@ vec3 sampleTexture(int size, vec2 start_pos) {
     for (int dy = 0; dy < size; dy++) {
         for (int dx = 0; dx < size; dx++) {
             vec2 tex_pos = start_pos + vec2(dx, dy);
-            vec2 normalized = (tex_pos + 0.5) / u_dimension;
+            vec2 normalized = (tex_pos + 0.5) / u_resolution;
 
             float y = texture(u_y_tex, normalized).r;
             vec2 uv = texture(u_uv_tex, normalized).rg;
@@ -56,10 +56,10 @@ void main() {
     const float threshold = 0.5;
 
     // Sample regions at the same positions as the CPU code
-    vec3 btm_left = sampleTexture(size, vec2(ofs, u_dimension.y - ofs - size));
+    vec3 btm_left = sampleTexture(size, vec2(ofs, u_resolution.y - ofs - size));
     vec3 top_left = sampleTexture(size, vec2(ofs, ofs));
-    vec3 btm_right = sampleTexture(size, vec2(u_dimension.x - ofs - size, u_dimension.y - ofs - size));
-    vec3 top_right = sampleTexture(size, vec2(u_dimension.x - ofs - size, ofs));
+    vec3 btm_right = sampleTexture(size, vec2(u_resolution.x - ofs - size, u_resolution.y - ofs - size));
+    vec3 top_right = sampleTexture(size, vec2(u_resolution.x - ofs - size, ofs));
 
     uint value = 0u;
     value |= uint(top_left.r >= threshold) << 11;

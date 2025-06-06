@@ -493,7 +493,7 @@ fn render(
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
-        gl.Uniform2f(gl.GetUniformLocation(prog, "u_resolution"), angle_calc.u_dimension[0], angle_calc.u_dimension[1]);
+        gl.Uniform2fv(gl.GetUniformLocation(prog, "u_resolution"), 1, &angle_calc.u_resolution.v);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -596,15 +596,14 @@ const Viewport = struct {
 
 const AngleCalc = struct {
     res: *const GpuResourceManager,
-
-    u_dimension: [2]f32,
+    u_resolution: Vec2,
 
     const log = std.log.scoped(.angle_calc);
 
     pub fn init(res: *const GpuResourceManager, tex_width: usize, tex_height: usize) !AngleCalc {
         return .{
             .res = res,
-            .u_dimension = .{ @floatFromInt(tex_width), @floatFromInt(tex_height) },
+            .u_resolution = vec2(@floatFromInt(tex_width), @floatFromInt(tex_height)),
         };
     }
 
@@ -633,7 +632,7 @@ const AngleCalc = struct {
 
         gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(program, "u_uv_tex"), 1);
-        gl.Uniform2f(gl.GetUniformLocation(program, "u_dimension"), self.u_dimension[0], self.u_dimension[1]);
+        gl.Uniform2fv(gl.GetUniformLocation(program, "u_resolution"), 1, &self.u_resolution.v);
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
