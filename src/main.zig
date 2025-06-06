@@ -408,38 +408,28 @@ fn render(
     angle_calc.execute(view, .{ y_tex, uv_tex });
 
     {
-        blur(res.blur(.strong), res, view, .{ y_tex, uv_tex }, 8);
-        blur(res.blur(.weak), res, view, .{ y_tex, uv_tex }, 4);
-
+        blur(res.blur(), res, view, .{ y_tex, uv_tex }, 8);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
         gl.BindVertexArray(res.vao.get(.tex));
 
         gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, res.blur(.strong).front.tex); // guaranteed to be the last modified texture
+        gl.BindTexture(gl.TEXTURE_2D, res.blur().front.tex); // guaranteed to be the last modified texture
 
         gl.ActiveTexture(gl.TEXTURE1);
-        gl.BindTexture(gl.TEXTURE_2D, res.blur(.weak).front.tex); // guaranteed to be the last modified texture
-
-        gl.ActiveTexture(gl.TEXTURE2);
         gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
 
         const u_world_transform = camera.getBackgroundWorldTransform();
         const u_view_transform = camera.getWorldViewTransform();
         const u_clip_transform = camera.getViewClipTransform();
-        const world_bounds = camera.world_bounds;
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
 
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
-
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_outer"), 0);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_inner"), 1);
-        gl.Uniform2f(gl.GetUniformLocation(prog, "u_bounds"), world_bounds.x(), world_bounds.y());
-        gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), res.meta.circle_radius * camera.scale);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }

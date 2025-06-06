@@ -3,31 +3,16 @@
 in vec2 uv;
 out vec4 frag_colour;
 
-uniform sampler2D u_outer; 
-uniform sampler2D u_inner; 
+uniform sampler2D u_blur; 
 
-uniform vec2 u_bounds; 
-uniform float u_radius;
 uniform float u_darkness = 0.0;
+// uniform vec3 u_tint = vec3(1, 1, 1);
 
-// uniform vec3 u_tint = vec3(0, 1, 0.980);
-
-vec2 center = vec2(0.5, 0.5);
-void main() {
-    vec2 normalized = gl_FragCoord.xy / u_bounds;
-    float dist = distance(normalized, center) * 2;
-    
-    vec3 tinted;
-    if (dist < u_radius) {
-        tinted = mix(texture(u_inner, uv).rgb, vec3(0), u_darkness);
-    } else {
-        tinted = mix(texture(u_outer, uv).rgb, vec3(0), u_darkness);
-        // vec3 tmp = mix(texture(u_blurred, uv).rgb, vec3(0), u_darkness);
+void main() {    
+    vec3 tinted = mix(texture(u_blur, uv).rgb, vec3(0), u_darkness);
         
-        // float luminance = dot(tmp.rgb, vec3(0.299, 0.587, 0.114));
-        // tinted = luminance * u_tint.rgb;
-    }
+    // float luminance = dot(tinted.rgb, vec3(0.2126, 0.7152, 0.0722)); // ITU BT.709
+    // tinted = luminance * u_tint.rgb;
 
-    frag_colour = vec4(tinted, 1);
-    
+    frag_colour = vec4(tinted, 1);    
 }

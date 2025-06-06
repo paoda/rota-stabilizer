@@ -57,11 +57,9 @@ pub const GpuResourceManager = struct {
     const Metadata = struct {
         circle_len: usize,
         circle_radius: f32,
-
         ring_len: usize,
 
-        strong_blur_res: Resolution,
-        weak_blur_res: Resolution,
+        blur_res: Resolution,
     };
 
     const VertexArrayPool = struct {
@@ -109,15 +107,7 @@ pub const GpuResourceManager = struct {
     };
 
     const FramebufferPool = struct {
-        const Index = enum(usize) {
-            angle,
-
-            blur0_front,
-            blur0_back,
-
-            blur1_front,
-            blur1_back,
-        };
+        const Index = enum(usize) { angle, blur_front, blur_back };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -167,12 +157,8 @@ pub const GpuResourceManager = struct {
             y_back,
             uv_front,
             uv_back,
-
-            blur0_front,
-            blur0_back,
-
-            blur1_front,
-            blur1_back,
+            blur_front,
+            blur_back,
         };
         const len = @typeInfo(Index).@"enum".fields.len;
 
@@ -241,8 +227,7 @@ pub const GpuResourceManager = struct {
         try manager.setupVertexArrays(allocator, width, height);
         try manager.setupAngleCalc();
 
-        manager.setupBlur(.strong, width / 8, height / 8);
-        manager.setupBlur(.weak, width / 8, height / 8);
+        manager.setupBlur(width / 8, height / 8);
 
         manager.setupVideoTextures(width, height);
         return manager;
@@ -258,20 +243,16 @@ pub const GpuResourceManager = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn blur(self: GpuResourceManager, comptime kind: BlurKind) BlurManager {
-        const tex_front = if (kind == .strong) self.tex.get(.blur0_front) else self.tex.get(.blur1_front);
-        const tex_back = if (kind == .strong) self.tex.get(.blur0_back) else self.tex.get(.blur1_back);
-        const fbo_front = if (kind == .strong) self.fbo.get(.blur0_front) else self.fbo.get(.blur1_front);
-        const fbo_back = if (kind == .strong) self.fbo.get(.blur0_back) else self.fbo.get(.blur1_back);
+    pub fn blur(self: GpuResourceManager) BlurManager {
+        const tex_front = self.tex.get(.blur_front);
+        const tex_back = self.tex.get(.blur_back);
+        const fbo_front = self.fbo.get(.blur_front);
+        const fbo_back = self.fbo.get(.blur_back);
 
         return .{
             .front = .{ .fbo = fbo_front, .tex = tex_front },
             .back = .{ .fbo = fbo_back, .tex = tex_back },
-
-            .resolution = switch (kind) {
-                .strong => self.meta.strong_blur_res,
-                .weak => self.meta.weak_blur_res,
-            },
+            .resolution = self.meta.blur_res,
         };
     }
 
@@ -342,12 +323,11 @@ pub const GpuResourceManager = struct {
         gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
     }
 
-    const BlurKind = enum { strong, weak };
-    pub fn setupBlur(self: *GpuResourceManager, comptime kind: BlurKind, width: u32, height: u32) void {
-        const tex_front = if (kind == .strong) self.tex.get(.blur0_front) else self.tex.get(.blur1_front);
-        const tex_back = if (kind == .strong) self.tex.get(.blur0_back) else self.tex.get(.blur1_back);
-        const fbo_front = if (kind == .strong) self.fbo.get(.blur0_front) else self.fbo.get(.blur1_front);
-        const fbo_back = if (kind == .strong) self.fbo.get(.blur0_back) else self.fbo.get(.blur1_back);
+    pub fn setupBlur(self: *GpuResourceManager, width: u32, height: u32) void {
+        const tex_front = self.tex.get(.blur_front);
+        const tex_back = self.tex.get(.blur_back);
+        const fbo_front = self.fbo.get(.blur_front);
+        const fbo_back = self.fbo.get(.blur_back);
 
         const layers: [2]BlurManager.Layer = .{
             .{ .fbo = fbo_front, .tex = tex_front },
@@ -384,10 +364,7 @@ pub const GpuResourceManager = struct {
             if (ret != gl.FRAMEBUFFER_COMPLETE) @panic("FIXME: Framebuffer incomplete");
         }
 
-        switch (kind) {
-            .strong => self.meta.strong_blur_res = .{ .width = width, .height = height },
-            .weak => self.meta.weak_blur_res = .{ .width = width, .height = height },
-        }
+        self.meta.blur_res = .{ .width = width, .height = height };
     }
 
     pub fn setupVertexArrays(self: *GpuResourceManager, allocator: std.mem.Allocator, width: u32, height: u32) !void {
