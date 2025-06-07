@@ -21,6 +21,14 @@ pub const Ui = struct {
         return .{ w, h };
     }
 
+    pub fn toggleFullscreen(self: @This()) !void {
+        if (c.SDL_GetWindowFlags(self.window) & c.SDL_WINDOW_FULLSCREEN != 0) {
+            try errify(c.SDL_SetWindowFullscreen(self.window, false));
+        } else {
+            try errify(c.SDL_SetWindowFullscreen(self.window, true));
+        }
+    }
+
     pub fn swap(self: @This()) !void {
         try errify(c.SDL_GL_SwapWindow(self.window));
     }

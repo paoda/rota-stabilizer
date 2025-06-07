@@ -172,6 +172,7 @@ pub fn main() !void {
                         const world_bounds = camera.world_bounds;
                         log.debug("World bounds: {d:.1}x{d:.1}, Window: {}x{}", .{ world_bounds.x(), world_bounds.y(), camera.window_size[0], camera.window_size[1] });
                     },
+                    c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
                     else => {},
                 },
                 else => {},
