@@ -508,7 +508,6 @@ fn render(
     }
 }
 
-// FIXME: this is the bottleneck of the main thread
 fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, passes: u32) void {
     std.debug.assert(passes % 2 == 0);
 
