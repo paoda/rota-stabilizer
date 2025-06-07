@@ -182,6 +182,15 @@ pub fn main() !void {
             defer queue.recycle(frame);
             defer stable_buffer.swap();
 
+            if (frame.format != c.AV_PIX_FMT_NV12) {
+                @branchHint(.cold);
+
+                const expected = c.av_get_pix_fmt_name(c.AV_PIX_FMT_NV12);
+                const actual = c.av_get_pix_fmt_name(frame.format);
+                log.err("unsupported pixel format: expected {s} got {s}", .{ expected, actual });
+                return error.ffmpeg_error;
+            }
+
             // FIXME: we currently assume colour space. We can't do that.
 
             // Determine Colorspace
