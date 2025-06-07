@@ -416,7 +416,7 @@ fn render(
     angle_calc.execute(view, tex);
 
     {
-        blur(res.blur(), res, view, tex, 8);
+        blur(res.blur(), res, view, tex, 4);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
@@ -429,7 +429,7 @@ fn render(
         gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
 
         const u_world_transform = camera.getBackgroundWorldTransform();
-        const u_view_transform = camera.getWorldViewTransform();
+        const u_view_transform = Mat2.identity; // don't zoom in on background
         const u_clip_transform = camera.getViewClipTransform();
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
@@ -508,24 +508,28 @@ fn render(
     }
 }
 
-fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, passes: u32) void {
-    std.debug.assert(passes % 2 == 0);
+fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, comptime passes: u32) void {
+    if (passes == 0) return;
+
+    std.debug.assert(passes & 1 == 0);
 
     const width: c_int = @intCast(b.resolution.width);
     const height: c_int = @intCast(b.resolution.height);
     const program = res.prog.get(.blur);
 
-    const fbo_cache: c_uint = blk: {
+    const cache: c_uint = blk: {
         var buf: [1]c_int = undefined;
         gl.GetIntegerv(gl.FRAMEBUFFER_BINDING, &buf);
 
         break :blk @intCast(buf[0]);
     };
+    defer gl.BindFramebuffer(gl.FRAMEBUFFER, cache);
 
     view.set(width, height);
     defer view.restore();
 
     gl.BindVertexArray(res.vao.get(.blur));
+    defer gl.BindVertexArray(0);
 
     gl.UseProgram(program);
     defer gl.UseProgram(0);
@@ -544,27 +548,20 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
     const horiz_loc = gl.GetUniformLocation(program, "u_horizontal");
     const use_nv12_loc = gl.GetUniformLocation(program, "u_use_nv12");
 
+    gl.ActiveTexture(gl.TEXTURE0);
+
     for (0..passes) |i| {
         const current = b.current(i);
         const other = b.previous(i);
 
         gl.BindFramebuffer(gl.FRAMEBUFFER, current.fbo);
-        gl.ActiveTexture(gl.TEXTURE0);
+        gl.BindTexture(gl.TEXTURE_2D, other.tex);
 
         gl.Uniform1i(horiz_loc, @intFromBool(i % 2 == 0));
-
-        switch (i) {
-            0 => gl.Uniform1i(use_nv12_loc, @intFromBool(true)),
-            else => gl.BindTexture(gl.TEXTURE_2D, other.tex),
-        }
-        defer if (i == 0) gl.Uniform1i(use_nv12_loc, @intFromBool(false));
+        gl.Uniform1i(use_nv12_loc, @intFromBool(i == 0));
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
-
-    gl.BindFramebuffer(gl.FRAMEBUFFER, fbo_cache);
-    gl.BindTexture(gl.TEXTURE_2D, 0);
-    gl.BindVertexArray(0);
 }
 
 const Viewport = struct {

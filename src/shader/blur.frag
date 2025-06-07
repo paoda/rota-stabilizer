@@ -3,11 +3,13 @@
 out vec4 frag_colour;
 in vec2 uv;
 
-uniform float weight[15] = float[](
-        0.031225, 0.033324, 0.035206, 0.036826, 0.038138,
-        0.039104, 0.039695, 0.039894, 0.039695,
-        0.039104, 0.038138, 0.036826, 0.035206, 0.033324, 0.031225
-    );
+const float weight[5] = float[](
+    0.2041636887,
+    0.1801738229,
+    0.1238315368,
+    0.0662822453,
+    0.0276305506
+);
 
 uniform vec2 u_resolution;
 uniform bool u_horizontal;
@@ -61,12 +63,12 @@ void main() {
     vec3 result = getTexture(uv) * weight[0];
 
     if (u_horizontal) { // Horizontal pass - sample along X-axis
-        for (int i = 1; i < 15; ++i) {
+        for (int i = 1; i < 5; ++i) {
             result += getTexture(uv + vec2(tex_offset.x * i, 0.0)) * weight[i];
             result += getTexture(uv - vec2(tex_offset.x * i, 0.0)) * weight[i];
         }
     } else { // Vertical pass - sample along Y-axis
-        for (int i = 1; i < 15; ++i) {
+        for (int i = 1; i < 5; ++i) {
             result += getTexture(uv + vec2(0.0, tex_offset.y * i)) * weight[i];
             result += getTexture(uv - vec2(0.0, tex_offset.y * i)) * weight[i];
         }
