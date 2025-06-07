@@ -155,11 +155,11 @@ pub fn main() !void {
                 c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
                     c.SDL_SCANCODE_P => {
                         log.debug("saving screenshot", .{});
-                        var img: zstbi.Image = try .createEmpty(@intCast(w), @intCast(h), RGB24_BPP, .{});
+                        var img: zstbi.Image = try .createEmpty(@intCast(view.width), @intCast(view.height), RGB24_BPP, .{});
                         defer img.deinit();
 
                         gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
-                        gl.ReadPixels(0, 0, w, h, gl.RGB, gl.UNSIGNED_BYTE, img.data.ptr);
+                        gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, img.data.ptr);
 
                         zstbi.setFlipVerticallyOnWrite(true);
                         try img.writeToFile("screenshot.png", .png);
