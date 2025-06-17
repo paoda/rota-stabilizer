@@ -113,6 +113,8 @@ pub const audio = struct {
         channels: u8,
         bytes_per_sample: u32,
 
+        hw_latency_secs: f64,
+
         is_muted: bool = true,
 
         stream: *c.SDL_AudioStream,
@@ -131,10 +133,20 @@ pub const audio = struct {
             try errify(c.SDL_SetAudioStreamGain(stream, 0));
             try errify(c.SDL_ResumeAudioStreamDevice(stream));
 
+            var actual: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
+            var sample_frames: c_int = undefined;
+
+            try errify(c.SDL_GetAudioDeviceFormat(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &actual, &sample_frames));
+            const offset = @as(f64, @floatFromInt(sample_frames)) / @as(f64, @floatFromInt(actual.freq));
+            // const offset = 1999 / std.time.ms_per_s;
+
+            log.debug("{d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
+
             return .{
                 .start_time = c.SDL_GetPerformanceCounter(),
                 .sample_rate = @intCast(desired.freq),
                 .channels = @intCast(desired.channels),
+                .hw_latency_secs = offset,
                 .bytes_per_sample = @intCast(c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT)),
                 .stream = stream,
             };
@@ -159,8 +171,9 @@ pub const audio = struct {
 
             const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream));
             const bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
+            const hw_latency_bytes = self.hw_latency_secs * bytes_per_sec;
 
-            const pos = bytes_sent - queued;
+            const pos = bytes_sent - queued - hw_latency_bytes;
             return pos / bytes_per_sec;
         }
     };
