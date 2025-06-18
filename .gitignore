@@ -1,7 +1,6 @@
 zig-out/
 .zig-cache/
 
-
 # rr debugger
 zen_workaround.py
 
@@ -11,6 +10,8 @@ zen_workaround.py
 **/*.png
 **/*.ppm
 **/*.csv
+**/*.mkv
+**/*.webm
 
 **/*.patch
 
