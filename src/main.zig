@@ -433,9 +433,9 @@ fn render(
         const u_view_transform = Mat2.identity; // don't zoom in on background
         const u_clip_transform = camera.getViewClipTransform();
 
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
@@ -455,18 +455,18 @@ fn render(
         gl.UseProgram(circle_prog);
         gl.BindVertexArray(res.vao.get(.circle));
 
-        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
         gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(res.meta.circle_len));
 
         // Draw Ring (matches ring in gameplay)
         gl.UseProgram(ring_prog);
         gl.BindVertexArray(res.vao.get(.ring));
 
-        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(res.meta.ring_len));
     }
 
@@ -495,14 +495,14 @@ fn render(
 
         const magic_aspect_ratio = 1.7763157895;
 
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &u_world_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &u_view_transform.m);
-        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &u_clip_transform.m);
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
+        gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
-        gl.Uniform2fv(gl.GetUniformLocation(prog, "u_resolution"), 1, &angle_calc.u_resolution.v);
+        gl.Uniform2fv(gl.GetUniformLocation(prog, "u_resolution"), 1, &.{angle_calc.u_resolution.v});
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -636,7 +636,7 @@ const AngleCalc = struct {
 
         gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(program, "u_uv_tex"), 1);
-        gl.Uniform2fv(gl.GetUniformLocation(program, "u_resolution"), 1, &self.u_resolution.v);
+        gl.Uniform2fv(gl.GetUniformLocation(program, "u_resolution"), 1, &.{self.u_resolution.v});
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }

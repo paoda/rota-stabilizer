@@ -392,13 +392,13 @@ pub const GpuResourceManager = struct {
         const radius_thickness = rota_height * magic_thickness;
         const inner_radius = @max(radius - radius_thickness, 0.0);
 
-        const ring_verts = try ring(allocator, inner_radius, radius, 0x80);
-        defer ring_verts.deinit();
+        var ring_verts = try ring(allocator, inner_radius, radius, 0x80);
+        defer ring_verts.deinit(allocator);
 
         // TODO: by messing with stride I think there's a way to combine the two ArrayLists
         // TODO: make the radius of the puck a runtime thing (scaling matrix + uniform)
-        const circle_verts = try circle(allocator, circle_radius, 0x80);
-        defer circle_verts.deinit();
+        var circle_verts = try circle(allocator, circle_radius, 0x80);
+        defer circle_verts.deinit(allocator);
 
         { // Setup for FFMPEG Texture
             gl.BindVertexArray(self.vao.get(.tex));
@@ -506,7 +506,7 @@ const opengl_impl = struct {
 
         fn didCompile(id: c_uint) bool {
             var success: c_int = undefined;
-            gl.GetShaderiv(id, gl.COMPILE_STATUS, &success);
+            gl.GetShaderiv(id, gl.COMPILE_STATUS, @ptrCast(&success));
 
             if (success == 0) err(id);
 
@@ -523,29 +523,29 @@ const opengl_impl = struct {
 };
 
 fn circle(allocator: std.mem.Allocator, radius: f32, len: usize) !std.ArrayList(f32) {
-    var list: std.ArrayList(f32) = .init(allocator);
-    errdefer list.deinit();
+    var list: std.ArrayList(f32) = .empty;
+    errdefer list.deinit(allocator);
 
     const _len: f32 = @floatFromInt(len);
 
-    try list.appendSlice(&.{ 0.0, 0.0 });
+    try list.appendSlice(allocator, &.{ 0.0, 0.0 });
 
     for (0..len) |i| {
         const angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / _len;
         const x = @cos(angle);
         const y = @sin(angle);
 
-        try list.append(x * radius);
-        try list.append(y * radius);
+        try list.append(allocator, x * radius);
+        try list.append(allocator, y * radius);
     }
 
-    try list.appendSlice(list.items[2..][0..2]); // complete the loop
+    try list.appendSlice(allocator, list.items[2..][0..2]); // complete the loop
     return list;
 }
 
 fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len: usize) !std.ArrayList(f32) {
-    var list = std.ArrayList(f32).init(allocator);
-    errdefer list.deinit();
+    var list: std.ArrayList(f32) = .empty;
+    errdefer list.deinit(allocator);
 
     const _len: f32 = @floatFromInt(len);
 
@@ -554,14 +554,14 @@ fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len:
         const x = @cos(angle);
         const y = @sin(angle);
 
-        try list.append(x * outer_radius);
-        try list.append(y * outer_radius);
+        try list.append(allocator, x * outer_radius);
+        try list.append(allocator, y * outer_radius);
 
-        try list.append(x * inner_radius);
-        try list.append(y * inner_radius);
+        try list.append(allocator, x * inner_radius);
+        try list.append(allocator, y * inner_radius);
     }
 
-    try list.appendSlice(list.items[0..4]); // complete the loop
+    try list.appendSlice(allocator, list.items[0..4]); // complete the loop
 
     return list;
 }

@@ -4,6 +4,7 @@ const libav = @import("libav.zig");
 
 const errify = @import("platform.zig").errify;
 
+const LinearFifo = @import("fifo.zig").LinearFifo(*c.AVPacket, .dynamic);
 const AvFormatContext = @import("libav.zig").AvFormatContext;
 const AvCodecContext = @import("libav.zig").AvCodecContext;
 
@@ -13,7 +14,7 @@ pub const packet = struct {
     const AvPacket = libav.AvPacket;
 
     pub const Queue = struct { // FIXME: is there any point to rolling my own?
-        list: std.fifo.LinearFifo(*c.AVPacket, .Dynamic),
+        list: LinearFifo,
 
         mutex: std.Thread.Mutex = .{},
         cond: std.Thread.Condition = .{},
@@ -24,7 +25,7 @@ pub const packet = struct {
 
         pub fn init(allocator: std.mem.Allocator) Queue {
             return .{
-                .list = std.fifo.LinearFifo(*c.AVPacket, .Dynamic).init(allocator),
+                .list = LinearFifo.init(allocator),
             };
         }
 
