@@ -62,20 +62,12 @@ void main() {
     vec3 btm_right = sampleTexture(size, vec2(u_resolution.x - ofs - size, u_resolution.y - ofs - size));
     vec3 top_right = sampleTexture(size, vec2(u_resolution.x - ofs - size, ofs));
 
-    uint value = 0u;
-    value |= uint(top_left.r >= threshold) << 11;
-    value |= uint(top_left.g >= threshold) << 10;
-    value |= uint(top_left.b >= threshold) << 9;
-    value |= uint(top_right.r >= threshold) << 8;
-    value |= uint(top_right.g >= threshold) << 7;
-    value |= uint(top_right.b >= threshold) << 6;
-    value |= uint(btm_left.r >= threshold) << 5;
-    value |= uint(btm_left.g >= threshold) << 4;
-    value |= uint(btm_left.b >= threshold) << 3;
-    value |= uint(btm_right.r >= threshold) << 2;
-    value |= uint(btm_right.g >= threshold) << 1;
-    value |= uint(btm_right.b >= threshold) << 0;
+    float value = 0.0;
+    value += dot(step(threshold, top_left), vec3(2048.0, 1024.0, 512.0));
+    value += dot(step(threshold, top_right), vec3(256.0, 128.0, 64.0));
+    value += dot(step(threshold, btm_left), vec3(32.0, 16.0, 8.0));
+    value += dot(step(threshold, btm_right), vec3(4.0, 2.0, 1.0));
 
-    float deg = (360.0 * float(value) / 4096.0);
+    float deg = (360.0 * value / 4096.0);
     angle = vec4(radians(-deg), 0.0, 0.0, 1.0);
 }
