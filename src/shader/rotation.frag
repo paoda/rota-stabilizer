@@ -7,7 +7,7 @@ uniform sampler2D u_uv_tex;
 uniform vec2 u_resolution;
 
 // TODO: select colorspace based on AVFrame
-vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
+vec3 nv12ToRgb(float y_norm, vec2 uv_norm) {
     const mat3 bt601 = mat3(
             1.0, 1.0, 1.0,
             0.0, -0.39465, 2.03211,
@@ -21,8 +21,8 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
         );
 
     const float offset = 16.0 / 255.0;
-    float y = (normalized_y - offset) * (255.0 / (235.0 - 16.0));
-    vec2 uv = (normalized_uv - offset) * (255.0 / (240.0 - 16.0));
+    float y = (y_norm - offset) * (255.0 / (235.0 - 16.0));
+    vec2 uv = (uv_norm - offset) * (255.0 / (240.0 - 16.0));
 
     y = clamp(y, 0.0, 1.0);
     uv = clamp(uv, 0.0, 1.0);
@@ -34,20 +34,21 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
 }
 
 vec3 sampleTexture(int size, vec2 start_pos) {
-    vec3 sum = vec3(0.0);
+    float y_sum = 0.0;
+    vec2 uv_sum = vec2(0.0);
 
     for (int dy = 0; dy < size; dy++) {
         for (int dx = 0; dx < size; dx++) {
             vec2 tex_pos = start_pos + vec2(dx, dy);
-            vec2 normalized = (tex_pos + 0.5) / u_resolution;
+            vec2 pos_norm = (tex_pos + 0.5) / u_resolution;
 
-            float y = texture(u_y_tex, normalized).r;
-            vec2 uv = texture(u_uv_tex, normalized).rg;
-            sum += nv12ToRgb(y, uv);
+            y_sum += texture(u_y_tex, pos_norm).r;
+            uv_sum += texture(u_uv_tex, pos_norm).rg;
         }
     }
 
-    return sum / float(size * size);
+    float count = float(size * size);
+    return nv12ToRgb(y_sum / count, uv_sum / count);
 }
 
 void main() {
