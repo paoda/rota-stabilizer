@@ -4,33 +4,35 @@ layout(location = 0) out vec4 angle;
 
 uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
-uniform vec2 u_resolution;
+// uniform vec2 u_resolution;
 
-// TODO: select colorspace based on AVFrame
+const mat3 bt601 = mat3(
+        1.0, 1.0, 1.0,
+        0.0, -0.39465, 2.03211,
+        1.13983, -0.58060, 0.0
+    );
+
+const mat3 bt709 = mat3(
+        1.0, 1.0, 1.0,
+        0.0, -0.1873, 1.8556,
+        1.5748, -0.4681, 0.0
+    );
+
+const float Y_OFFSET = 16.0 / 255.0 ;
+const float Y_SCALE = 255.0 / ( 235.0 - 16.0 ) ;
+const float UV_SCALE = 255.0 / ( 240.0 - 16.0 ) ;
+
 vec3 nv12ToRgb(float y_norm, vec2 uv_norm) {
-    const mat3 bt601 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.39465, 2.03211,
-            1.13983, -0.58060, 0.0
-        );
-
-    const mat3 bt709 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.1873, 1.8556,
-            1.5748, -0.4681, 0.0
-        );
-
-    const float offset = 16.0 / 255.0;
-    float y = (y_norm - offset) * (255.0 / (235.0 - 16.0));
-    vec2 uv = (uv_norm - offset) * (255.0 / (240.0 - 16.0));
+    float y = (y_norm - Y_OFFSET) * Y_SCALE;
+    vec2 uv = (uv_norm - Y_OFFSET) * UV_SCALE;
 
     y = clamp(y, 0.0, 1.0);
     uv = clamp(uv, 0.0, 1.0);
 
-    float u = uv.r - 0.5;
-    float v = uv.g - 0.5;
+    vec3 yuv = vec3(y, uv.r - 0.5, uv.g - 0.5);
 
-    return clamp(bt601 * vec3(y, u, v), 0.0, 1.0);
+    // TODO: select colorspace based on AVFrame
+    return clamp(bt601 * yuv, 0.0, 1.0);
 }
 
 vec3 sampleTexture(int size, ivec2 start_pos) {
