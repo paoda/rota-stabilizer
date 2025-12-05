@@ -33,17 +33,17 @@ vec3 nv12ToRgb(float y_norm, vec2 uv_norm) {
     return clamp(bt601 * vec3(y, u, v), 0.0, 1.0);
 }
 
-vec3 sampleTexture(int size, vec2 start_pos) {
+vec3 sampleTexture(int size, ivec2 start_pos) {
     float y_sum = 0.0;
     vec2 uv_sum = vec2(0.0);
 
     for (int dy = 0; dy < size; dy++) {
         for (int dx = 0; dx < size; dx++) {
-            vec2 tex_pos = start_pos + vec2(dx, dy);
-            vec2 pos_norm = (tex_pos + 0.5) / u_resolution;
+            ivec2 tex_pos = start_pos + ivec2(dx, dy);
+            // NB: y and uv buffer are not the same size per the image format
 
-            y_sum += texture(u_y_tex, pos_norm).r;
-            uv_sum += texture(u_uv_tex, pos_norm).rg;
+            y_sum += texelFetch(u_y_tex, tex_pos, 0).r;
+            uv_sum += texelFetch(u_uv_tex, tex_pos / 2, 0).rg;
         }
     }
 
@@ -52,15 +52,18 @@ vec3 sampleTexture(int size, vec2 start_pos) {
 }
 
 void main() {
-    const int ofs = 5;
-    const int size = 3;
+    const int ofs = 1;
+    const int box = 3;
     const float threshold = 0.5;
 
-    // Sample regions at the same positions as the CPU code
-    vec3 btm_left = sampleTexture(size, vec2(ofs, u_resolution.y - ofs - size));
-    vec3 top_left = sampleTexture(size, vec2(ofs, ofs));
-    vec3 btm_right = sampleTexture(size, vec2(u_resolution.x - ofs - size, u_resolution.y - ofs - size));
-    vec3 top_right = sampleTexture(size, vec2(u_resolution.x - ofs - size, ofs));
+    ivec2 resolution = textureSize(u_y_tex, 0);
+    int W = resolution.x;
+    int H = resolution.y;
+
+    vec3 btm_left = sampleTexture(box, ivec2(ofs, H - ofs - box));
+    vec3 top_left = sampleTexture(box, ivec2(ofs, ofs));
+    vec3 btm_right = sampleTexture(box, ivec2(W - ofs - box, H - ofs - box));
+    vec3 top_right = sampleTexture(box, ivec2(W - ofs - box, ofs));
 
     float value = 0.0;
     value += dot(step(threshold, top_left), vec3(2048.0, 1024.0, 512.0));
