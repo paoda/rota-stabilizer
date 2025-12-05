@@ -6,52 +6,58 @@ in vec2 uv;
 uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
 
-uniform vec2 u_resolution;
 uniform float u_ratio;
-
-vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
-    const mat3 bt601 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.39465, 2.03211,
-            1.13983, -0.58060, 0.0
-        );
-
-    const mat3 bt709 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.1873, 1.8556,
-            1.5748, -0.4681, 0.0
-        );
-
-    const float offset = 16.0 / 255.0;
-    float y = (normalized_y - offset) * (255.0 / (235.0 - 16.0));
-    vec2 uv = (normalized_uv - offset) * (255.0 / (240.0 - 16.0));
-
-    y = clamp(y, 0.0, 1.0);
-    uv = clamp(uv, 0.0, 1.0);
-
-    float u = uv.r - 0.5;
-    float v = uv.g - 0.5;
-
-    return clamp(bt709 * vec3(y, u, v), 0.0, 1.0);
-}
 
 const float border_radius = 20;
 const float border = 0.0075;
 
+const mat3 bt601 = mat3(
+        1.0, 1.0, 1.0,
+        0.0, -0.39465, 2.03211,
+        1.13983, -0.58060, 0.0
+    );
+
+const mat3 bt709 = mat3(
+        1.0, 1.0, 1.0,
+        0.0, -0.1873, 1.8556,
+        1.5748, -0.4681, 0.0
+    );
+
+const float Y_OFFSET = 16.0 / 255.0;
+const float Y_SCALE = 255.0 / (235.0 - 16.0);
+const float UV_SCALE = 255.0 / (240.0 - 16.0);
+
+vec3 nv12ToRgb(float y_norm, vec2 uv_norm) {
+    float y = (y_norm - Y_OFFSET) * Y_SCALE;
+    vec2 uv = (uv_norm - Y_OFFSET) * UV_SCALE;
+
+    y = clamp(y, 0.0, 1.0);
+    uv = clamp(uv, 0.0, 1.0);
+
+    vec3 yuv = vec3(y, uv.r - 0.5, uv.g - 0.5);
+
+    // TODO: select colorspace based on AVFrame
+    return clamp(bt601 * yuv, 0.0, 1.0);
+}
+
 // https://gamedev.stackexchange.com/questions/205467/add-a-rounded-border-to-a-texture-with-a-fragment-shader
-float calcDistance(vec2 uv) {
+float calcDistance(ivec2 resolution, vec2 uv) {
     vec2 positionInQuadrant = abs(uv * 2.0 - 1.0);
-    vec2 extend = vec2(u_resolution) / 2.0;
+    vec2 extend = vec2(resolution) / 2.0;
     vec2 coords = positionInQuadrant * (extend + border_radius);
     vec2 delta = max(coords - extend, 0.);
     return length(delta);
 }
 
 void main() {
-    float gameplay_height = u_resolution.x / u_ratio;
-    float height_diff = u_resolution.y - gameplay_height;
-    float threshold = (height_diff / 2) / u_resolution.y;
-    float unit = 1.0 / u_resolution.y;
+    ivec2 resolution = textureSize(u_y_tex, 0);
+    float W = float(resolution.x);
+    float H = float(resolution.y);
+
+    float gameplay_height = W / u_ratio;
+    float height_diff = H - gameplay_height;
+    float threshold = (height_diff / 2) / H;
+    float unit = 1.0 / H;
 
     if (uv.y < threshold || uv.y > (1 - threshold)) {
         discard;
@@ -60,7 +66,7 @@ void main() {
     vec2 content_uv = uv; // content uv
 
     if (height_diff > 0.0) {
-        float gameplay_height_normalized = gameplay_height / u_resolution.y;
+        float gameplay_height_normalized = gameplay_height / H;
 
         if (gameplay_height_normalized > unit) { // If there is at least 1 line of pixels
             content_uv.y = (uv.y - threshold) / gameplay_height_normalized;
@@ -69,8 +75,8 @@ void main() {
         }
     }
 
-    float dist = calcDistance(content_uv);
-    if (dist > border_radius) discard; 
+    float dist = calcDistance(resolution, content_uv);
+    if (dist > border_radius) discard;
 
     if (content_uv.x >= (1.0 - border) || content_uv.x <= border || content_uv.y >= (1.0 - border * 2.0) || content_uv.y <= border * 2.0) {
         frag_color = vec4(vec3(1.0), 0.7); // TODO: make alpha channel runtime available?

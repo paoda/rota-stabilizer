@@ -101,7 +101,7 @@ pub fn main() !void {
     }
 
     var stable_buffer = DoubleBuffer.init(res);
-    const angle_calc = try AngleCalc.init(res, vid_width, vid_height);
+    const angle_calc = try AngleCalc.init(res);
 
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x80); // 1s at 120fps?
@@ -502,7 +502,6 @@ fn render(
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
-        gl.Uniform2fv(gl.GetUniformLocation(prog, "u_resolution"), 1, &.{angle_calc.u_resolution.v});
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -601,15 +600,11 @@ const Nv12Tex = struct { y: c_uint, uv: c_uint };
 
 const AngleCalc = struct {
     res: *const GpuResourceManager,
-    u_resolution: Vec2,
 
     const log = std.log.scoped(.angle_calc);
 
-    pub fn init(res: *const GpuResourceManager, tex_width: usize, tex_height: usize) !AngleCalc {
-        return .{
-            .res = res,
-            .u_resolution = vec2(@floatFromInt(tex_width), @floatFromInt(tex_height)),
-        };
+    pub fn init(res: *const GpuResourceManager) !AngleCalc {
+        return .{ .res = res };
     }
 
     pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
@@ -636,7 +631,6 @@ const AngleCalc = struct {
 
         gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(program, "u_uv_tex"), 1);
-        gl.Uniform2fv(gl.GetUniformLocation(program, "u_resolution"), 1, &.{self.u_resolution.v});
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
