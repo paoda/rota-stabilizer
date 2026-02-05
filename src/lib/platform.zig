@@ -35,6 +35,14 @@ pub const Ui = struct {
 };
 
 pub fn createWindow(width: u32, height: u32) !Ui {
+    return createWindowEx(width, height, false);
+}
+
+pub fn createHeadless(width: u32, height: u32) !Ui {
+    return createWindowEx(width, height, true);
+}
+
+fn createWindowEx(width: u32, height: u32, headless: bool) !Ui {
     c.SDL_SetMainReady();
     try errify(c.SDL_Init(c.SDL_INIT_AUDIO | c.SDL_INIT_VIDEO));
 
@@ -47,7 +55,8 @@ pub fn createWindow(width: u32, height: u32) !Ui {
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_MULTISAMPLESAMPLES, 4));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_ALPHA_SIZE, 8));
 
-    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", @intCast(width), @intCast(height), c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE));
+    const window_flags: c.SDL_WindowFlags = c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE | (if (headless) c.SDL_WINDOW_HIDDEN else 0);
+    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", @intCast(width), @intCast(height), window_flags));
     errdefer c.SDL_DestroyWindow(window);
 
     const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
