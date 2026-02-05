@@ -116,6 +116,10 @@ pub const audio = struct {
 
         hw_latency_secs: f64,
 
+        /// Offset to align audio time with video stream time (set from first video PTS)
+        /// This accounts for videos that don't start at PTS=0
+        stream_start_offset: f64 = 0.0,
+
         is_muted: bool = true,
 
         stream: *c.SDL_AudioStream,
@@ -132,7 +136,8 @@ pub const audio = struct {
             errdefer c.SDL_DestroyAudioStream(stream);
 
             try errify(c.SDL_SetAudioStreamGain(stream, 0));
-            try errify(c.SDL_ResumeAudioStreamDevice(stream));
+            // Don't resume yet - wait for video to be ready (initial sync)
+            // try errify(c.SDL_ResumeAudioStreamDevice(stream));
 
             var actual: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             var sample_frames: c_int = undefined;
@@ -167,6 +172,19 @@ pub const audio = struct {
             c.SDL_DestroyAudioStream(self.stream);
         }
 
+        /// Start audio playback (called when video is ready for initial sync)
+        /// first_video_pts: The PTS of the first video frame, to sync audio time to video time
+        pub fn start(self: *@This(), first_video_pts: f64) !void {
+            if (c.SDL_AudioStreamDevicePaused(self.stream)) {
+                self.stream_start_offset = first_video_pts;
+                try errify(c.SDL_ResumeAudioStreamDevice(self.stream));
+            }
+        }
+
+        pub fn isPaused(self: *const @This()) bool {
+            return c.SDL_AudioStreamDevicePaused(self.stream);
+        }
+
         pub fn seconds_passed(self: @This()) f64 {
             const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
 
@@ -175,14 +193,36 @@ pub const audio = struct {
             const hw_latency_bytes = self.hw_latency_secs * bytes_per_sec;
 
             const pos = bytes_sent - queued - hw_latency_bytes;
-            return pos / bytes_per_sec;
+            // Add stream_start_offset to align with video PTS
+            return (pos / bytes_per_sec) + self.stream_start_offset;
+        }
+
+        /// Debug: Get detailed clock state for A/V sync debugging
+        pub fn debug_state(self: @This()) struct { bytes_sent: f64, queued: f64, hw_latency_bytes: f64, bytes_per_sec: f64, position_secs: f64, stream_start_offset: f64 } {
+            const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
+            const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream));
+            const bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
+            const hw_latency_bytes = self.hw_latency_secs * bytes_per_sec;
+            const pos = bytes_sent - queued - hw_latency_bytes;
+
+            return .{
+                .bytes_sent = bytes_sent,
+                .queued = queued,
+                .hw_latency_bytes = hw_latency_bytes,
+                .bytes_per_sec = bytes_per_sec,
+                .position_secs = (pos / bytes_per_sec) + self.stream_start_offset,
+                .stream_start_offset = self.stream_start_offset,
+            };
         }
     };
+
+    // A/V Sync Debug: Set to true to enable audio-side logging
 
     pub fn decode(clock: *Clock, pkt_queue: *packet.Queue, decode_ctx: DecodeContext) !void {
         const log = std.log.scoped(.audio_decode);
 
         log.info("audio decode thread start", .{});
+        log.debug("sample_rate: {} channels: {} bytes_per_sample: {}", .{ clock.sample_rate, clock.channels, clock.bytes_per_sample });
         defer log.info("audio decode thread end", .{});
 
         var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
@@ -205,6 +245,9 @@ pub const audio = struct {
 
         const swr = maybe_swr orelse return error.out_of_memory;
 
+        // debug
+        var frame_count: u64 = 0;
+
         var end_of_file = false;
         while (!decode_ctx.should_quit.load(.monotonic)) {
             // Try to receive a frame first if we have packets already in the decoder
@@ -213,20 +256,29 @@ pub const audio = struct {
                     0 => { // got a frame
                         defer c.av_frame_unref(src_frame);
 
+                        frame_count += 1;
+
                         const bytes_per_sec = clock.sample_rate * clock.bytes_per_sample * clock.channels;
-                        const max_len = 1 * bytes_per_sec;
+                        // Reduced from 1 second to 150ms for lower latency
+                        const max_queue_secs = 0.150;
+                        const max_len: c_int = @intFromFloat(@as(f64, @floatFromInt(bytes_per_sec)) * max_queue_secs);
 
                         _ = try libav.err(c.swr_convert_frame(swr, dst_frame, src_frame));
 
+                        // Track stalls when audio buffer is full
+                        var stall_count: u32 = 0;
                         while (true) {
-                            const queued_len = c.SDL_GetAudioStreamQueued(clock.stream);
-                            if (queued_len < max_len) break;
+                            if (c.SDL_GetAudioStreamQueued(clock.stream) < max_len) break;
+                            defer stall_count += 1;
 
                             std.Thread.sleep(5 * std.time.ns_per_ms);
                         }
 
-                        const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
+                        if (stall_count > 0) {
+                            log.debug("STALL frame #{} waited {}x5ms", .{ frame_count, stall_count });
+                        }
 
+                        const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
                         _ = c.SDL_PutAudioStreamData(clock.stream, dst_frame.data[0], len);
                         _ = clock.bytes_sent.fetchAdd(@intCast(len), .monotonic);
                     },
