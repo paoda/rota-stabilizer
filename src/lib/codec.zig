@@ -49,16 +49,34 @@ pub const packet = struct {
             self.cond.signal();
         }
 
-        pub fn pop(self: *@This()) ?*c.AVPacket {
+        pub fn pop(self: *@This(), should_quit: *std.atomic.Value(bool)) ?*c.AVPacket {
             self.mutex.lock();
             defer self.mutex.unlock();
 
             while (self.list.readableLength() == 0) {
                 if (self.end_of_stream.load(.monotonic)) return null;
+                if (should_quit.load(.monotonic)) return null;
                 self.cond.wait(&self.mutex);
             }
 
             return self.list.readItem();
+        }
+
+        /// Non-blocking pop - returns null immediately if queue is empty
+        pub fn tryPop(self: *@This()) ?*c.AVPacket {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (self.list.readableLength() == 0) return null;
+            return self.list.readItem();
+        }
+
+        /// Signal any threads waiting on this queue to wake up and check their quit flag
+        pub fn quit(self: *@This()) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.cond.broadcast();
         }
     };
 
@@ -136,15 +154,12 @@ pub const audio = struct {
             errdefer c.SDL_DestroyAudioStream(stream);
 
             try errify(c.SDL_SetAudioStreamGain(stream, 0));
-            // Don't resume yet - wait for video to be ready (initial sync)
-            // try errify(c.SDL_ResumeAudioStreamDevice(stream));
 
             var actual: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             var sample_frames: c_int = undefined;
 
             try errify(c.SDL_GetAudioDeviceFormat(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &actual, &sample_frames));
             const offset = @as(f64, @floatFromInt(sample_frames)) / @as(f64, @floatFromInt(actual.freq));
-            // const offset = 1999 / std.time.ms_per_s;
 
             log.debug("{d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
 
@@ -288,7 +303,8 @@ pub const audio = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
+            var pkt: ?*c.AVPacket = pkt_queue.pop(decode_ctx.should_quit) orelse {
+                if (decode_ctx.should_quit.load(.monotonic)) return;
                 const flush_ret = c.avcodec_send_packet(audio_ctx, null);
                 if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
                 end_of_file = true;
@@ -311,7 +327,10 @@ pub const video = struct {
         const log = std.log.scoped(.video_decode);
 
         log.info("video decode thread start", .{});
-        defer log.info("video decode thread end", .{});
+        defer {
+            frame_queue.end_of_stream.store(true, .monotonic);
+            log.info("video decode thread end", .{});
+        }
 
         var src_frame: AvFrame = try .init();
         defer src_frame.deinit();
@@ -357,7 +376,8 @@ pub const video = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
+            var pkt: ?*c.AVPacket = pkt_queue.pop(decode_ctx.should_quit) orelse {
+                if (decode_ctx.should_quit.load(.monotonic)) return;
                 const flush_ret = c.avcodec_send_packet(video_ctx, null);
                 if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
                 end_of_file = true;
@@ -398,6 +418,7 @@ pub const FrameQueue = struct {
     slot: Slot,
     read_idx: usize,
     write_idx: usize,
+    end_of_stream: std.atomic.Value(bool) = .init(false),
 
     mutex: std.Thread.Mutex = .{},
     cond: std.Thread.Condition = .{},
@@ -482,7 +503,294 @@ pub const FrameQueue = struct {
         std.debug.panic("attempted to recycle a frame that was not in the queue", .{});
     }
 
+    pub fn isEmpty(self: *@This()) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const idx = self.mask(self.read_idx);
+        return self.slot.state[idx] != .in_use;
+    }
+
     inline fn mask(self: @This(), idx: usize) usize {
         return idx & (self.slot.frame.len - 1);
+    }
+};
+
+pub const Encoder = struct {
+    width: u32,
+    height: u32,
+
+    hw_device_ctx: *c.AVBufferRef,
+    av_codec_ctx: *c.AVCodecContext,
+    sws_ctx: *c.SwsContext,
+
+    fmt_ctx: *c.AVFormatContext,
+
+    audio_stream: *c.AVStream,
+    video_stream: *c.AVStream,
+
+    /// for encoding video
+    _pkt: *c.AVPacket,
+
+    _sw_frame: *c.AVFrame,
+    _hw_frame: *c.AVFrame,
+
+    const log = std.log.scoped(.encode);
+
+    pub const Options = struct {
+        width: u32,
+        height: u32,
+        fps: c.AVRational,
+        input_fmt_ctx: *c.AVFormatContext,
+        input_video_stream: c_int,
+        input_audio_stream: c_int,
+    };
+
+    pub fn init(opt: Options) !Encoder {
+        return initHardware(opt);
+    }
+
+    pub fn initHardware(opt: Options) !Encoder {
+        const path = "output.mkv";
+
+        const fmt_ctx = blk: {
+            var ptr: ?*c.AVFormatContext = null;
+            _ = try libav.err(c.avformat_alloc_output_context2(&ptr, null, null, path));
+            errdefer c.avformat_free_context(ptr);
+
+            break :blk ptr.?;
+        };
+
+        const hw_device_ctx = blk: {
+            var ptr: ?*c.AVBufferRef = null;
+            _ = try libav.err(c.av_hwdevice_ctx_create(&ptr, c.AV_HWDEVICE_TYPE_VAAPI, null, null, 0));
+            errdefer c.av_buffer_unref(&ptr);
+
+            break :blk ptr.?;
+        };
+
+        // FIXME: figure out how to list all hardware encoders
+        const codec = blk: {
+            // TODO: can we free this?
+            const ptr: ?*const c.AVCodec = c.avcodec_find_encoder_by_name("h264_vaapi");
+            break :blk ptr.?;
+        };
+
+        const input_audio = opt.input_fmt_ctx.streams[@intCast(opt.input_audio_stream)];
+        const input_video = opt.input_fmt_ctx.streams[@intCast(opt.input_video_stream)];
+
+        const av_codec_ctx = blk: {
+            var ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec);
+            errdefer c.avcodec_free_context(&ptr);
+
+            const ctx = ptr.?;
+            // TODO: AI added some extra params idk if i need 'em
+
+            ctx.width = @intCast(opt.width);
+            ctx.height = @intCast(opt.height);
+            ctx.time_base = input_video.*.time_base;
+            ctx.framerate = opt.fps;
+            ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
+            ctx.pix_fmt = c.AV_PIX_FMT_VAAPI;
+
+            // Set global header flag BEFORE opening codec if muxer needs it
+            if (fmt_ctx.oformat.*.flags & c.AVFMT_GLOBALHEADER != 0) {
+                ctx.flags |= c.AV_CODEC_FLAG_GLOBAL_HEADER;
+            }
+
+            break :blk ctx;
+        };
+
+        try setHwframeContext(opt, av_codec_ctx, hw_device_ctx);
+
+        _ = try libav.err(c.avcodec_open2(av_codec_ctx, codec, null));
+
+        const audio_stream = blk: {
+            const ptr: ?*c.AVStream = c.avformat_new_stream(fmt_ctx, null);
+            const stream = ptr.?;
+
+            _ = try libav.err(c.avcodec_parameters_copy(stream.codecpar, input_audio.*.codecpar));
+            // stream.time_base = input_audio.*.time_base;
+            stream.codecpar.*.codec_tag = 0;
+
+            break :blk stream;
+        };
+
+        const video_stream = blk: {
+            const ptr: ?*c.AVStream = c.avformat_new_stream(fmt_ctx, null);
+            const stream = ptr.?;
+
+            _ = try libav.err(c.avcodec_parameters_from_context(stream.codecpar, av_codec_ctx));
+            stream.time_base = av_codec_ctx.time_base;
+
+            break :blk stream;
+        };
+
+        c.av_dump_format(fmt_ctx, 0, path, 1);
+
+        _ = try libav.err(c.avio_open(&fmt_ctx.pb, path, c.AVIO_FLAG_WRITE));
+
+        _ = try libav.err(c.avformat_write_header(fmt_ctx, null));
+
+        return .{
+            .width = opt.width,
+            .height = opt.height,
+            .hw_device_ctx = hw_device_ctx,
+            .av_codec_ctx = av_codec_ctx,
+            .fmt_ctx = fmt_ctx,
+
+            .audio_stream = audio_stream,
+            .video_stream = video_stream,
+
+            ._pkt = blk: {
+                const ptr: ?*c.AVPacket = c.av_packet_alloc();
+                break :blk ptr.?;
+            },
+            ._sw_frame = blk: {
+                const ptr: ?*c.AVFrame = c.av_frame_alloc();
+                const frame = ptr.?;
+
+                frame.format = c.AV_PIX_FMT_NV12;
+                frame.width = @intCast(opt.width);
+                frame.height = @intCast(opt.height);
+                _ = try libav.err(c.av_frame_get_buffer(frame, 0));
+
+                break :blk frame;
+            },
+            ._hw_frame = blk: {
+                const ptr: ?*c.AVFrame = c.av_frame_alloc();
+                break :blk ptr.?;
+            },
+            .sws_ctx = blk: {
+                const ptr: ?*c.SwsContext = c.sws_getContext(
+                    @intCast(opt.width),
+                    @intCast(opt.height),
+                    c.AV_PIX_FMT_RGB24,
+                    @intCast(opt.width),
+                    @intCast(opt.height),
+                    c.AV_PIX_FMT_NV12,
+                    c.SWS_POINT,
+                    null,
+                    null,
+                    null,
+                );
+
+                break :blk ptr.?;
+            },
+        };
+    }
+
+    fn setHwframeContext(opt: Options, ctx: *c.AVCodecContext, hw_device_ctx: *c.AVBufferRef) !void {
+        const hw_frames_ref = blk: {
+            const ptr: ?*c.AVBufferRef = c.av_hwframe_ctx_alloc(hw_device_ctx);
+            // TODO: errdefer free
+
+            break :blk ptr.?;
+        };
+        // TODO: re-enable this free
+        // defer c.av_buffer_unref(&hw_frames_ref);
+
+        var frames_ctx: *c.AVHWFramesContext = @ptrCast(@alignCast(hw_frames_ref.data));
+        frames_ctx.format = c.AV_PIX_FMT_VAAPI;
+        frames_ctx.sw_format = c.AV_PIX_FMT_NV12;
+        frames_ctx.width = @intCast(opt.width);
+        frames_ctx.height = @intCast(opt.height);
+        frames_ctx.initial_pool_size = 20; // FIXME: why?
+
+        _ = try libav.err(c.av_hwframe_ctx_init(hw_frames_ref));
+        ctx.hw_frames_ctx = c.av_buffer_ref(hw_frames_ref);
+    }
+
+    pub fn encodeRgbFrame(self: *Encoder, buf: []const u8, frame_pts: i64) !void {
+        const RGB_BPP = 3;
+        _ = try libav.err(c.av_frame_make_writable(self._sw_frame));
+
+        // OpenGL gives us bottom-to-top RGB, swscale expects top-to-bottom
+        // Use negative source stride to flip during conversion
+        const stride = self.width * RGB_BPP;
+
+        // Point to last row (first row of OpenGL image) with negative stride to read bottom-up
+        const last_row_ptr: [*]const u8 = @ptrCast(buf.ptr + (@as(usize, self.height - 1) * @as(usize, stride)));
+        const src_data: [4][*]const u8 = .{ last_row_ptr, undefined, undefined, undefined };
+        const src_stride: [4]c_int = .{ -@as(c_int, @intCast(stride)), 0, 0, 0 };
+
+        _ = c.sws_scale(
+            self.sws_ctx,
+            @ptrCast(&src_data),
+            @ptrCast(&src_stride),
+            0,
+            @intCast(self.height),
+            @ptrCast(&self._sw_frame.data),
+            &self._sw_frame.linesize,
+        );
+
+        // Use PTS directly since we're using the same time_base as input
+        self._sw_frame.pts = frame_pts;
+
+        c.av_frame_unref(self._hw_frame);
+        _ = try libav.err(c.av_hwframe_get_buffer(self.av_codec_ctx.hw_frames_ctx, self._hw_frame, 0));
+        _ = try libav.err(c.av_hwframe_transfer_data(self._hw_frame, self._sw_frame, 0));
+        _ = try libav.err(c.av_frame_copy_props(self._hw_frame, self._sw_frame));
+
+        try self.writeVideoFrame(self._hw_frame);
+    }
+
+    pub fn writeAudioPacket(self: *Encoder, in: *c.AVStream, pkt: *c.AVPacket) !void {
+        const UNKN_POS = -1;
+
+        c.av_packet_rescale_ts(pkt, in.time_base, self.audio_stream.time_base);
+        pkt.pos = UNKN_POS;
+        pkt.stream_index = self.audio_stream.index;
+
+        _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx, pkt));
+    }
+
+    fn writeVideoFrame(self: *Encoder, frame: ?*c.AVFrame) !void {
+        _ = try libav.err(c.avcodec_send_frame(self.av_codec_ctx, frame));
+
+        while (true) {
+            const ret = c.avcodec_receive_packet(self.av_codec_ctx, self._pkt);
+            if (ret == c.AVERROR(c.EAGAIN) or ret == c.AVERROR_EOF) break;
+            _ = try libav.err(ret);
+
+            c.av_packet_rescale_ts(self._pkt, self.av_codec_ctx.time_base, self.video_stream.time_base);
+            self._pkt.stream_index = self.video_stream.index;
+
+            _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx, self._pkt));
+        }
+    }
+
+    pub fn deinit(self: *Encoder) void {
+        self.writeVideoFrame(null) catch @panic("failed to flush encoder");
+        _ = c.av_write_trailer(self.fmt_ctx);
+
+        {
+            var tmp: ?*c.AVFrame = self._sw_frame;
+            c.av_frame_free(&tmp);
+
+            tmp = self._hw_frame;
+            c.av_frame_free(&tmp);
+        }
+        {
+            var tmp: ?*c.AVPacket = self._pkt;
+            c.av_packet_free(&tmp);
+        }
+        {
+            var tmp: ?*c.AVCodecContext = self.av_codec_ctx;
+            c.avcodec_free_context(&tmp);
+        }
+        {
+            var tmp: ?*c.AVBufferRef = self.hw_device_ctx;
+            c.av_buffer_unref(&tmp);
+        }
+
+        if (self.fmt_ctx.oformat.*.flags & c.AVFMT_NOFILE == 0) {
+            _ = c.avio_closep(&self.fmt_ctx.pb);
+        }
+
+        // var tmp: ?*c.AVFormatContext = self.fmt_ctx;
+        c.avformat_free_context(self.fmt_ctx);
+
+        self.* = undefined;
     }
 };

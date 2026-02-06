@@ -8,6 +8,7 @@ const video = @import("lib/codec.zig").video;
 const audio = @import("lib/codec.zig").audio;
 const packet = @import("lib/codec.zig").packet;
 const platform = @import("lib/platform.zig");
+const Encoder = @import("lib/codec.zig").Encoder;
 
 const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const BlurManager = @import("lib.zig").BlurManager;
@@ -33,7 +34,10 @@ const sleep = @import("lib.zig").sleep;
 
 const RGB24_BPP = @import("lib.zig").RGB24_BPP;
 
-// Log when frame diff exceeds this threshold (in seconds)
+// ===== MODE SWITCH =====
+// Set to true to render to file instead of realtime playback
+const RENDER_MODE = true;
+
 const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
@@ -76,7 +80,7 @@ pub fn main() !void {
     const vid_width: u32 = @intCast(video_ctx.inner.?.width);
     const vid_height: u32 = @intCast(video_ctx.inner.?.height);
 
-    const ui = try platform.createWindow(800, 800);
+    const ui = if (RENDER_MODE) try platform.createHeadless(1920, 1080) else try platform.createWindow(800, 800);
     defer ui.deinit();
 
     var audio_clock = try AudioClock.init(audio_ctx);
@@ -128,260 +132,487 @@ pub fn main() !void {
     const video_decode = try std.Thread.spawn(.{}, video.decode, .{ &queue, &video_pkt_queue, vid_decode });
     defer video_decode.join();
 
-    const audio_decode = try std.Thread.spawn(.{}, audio.decode, .{ &audio_clock, &audio_pkt_queue, aud_decode });
-    defer audio_decode.join();
+    // In render mode, we consume audio packets directly instead of decoding for playback
+    const audio_decode: ?std.Thread = if (!RENDER_MODE) try std.Thread.spawn(.{}, audio.decode, .{ &audio_clock, &audio_pkt_queue, aud_decode }) else null;
+    defer if (audio_decode) |h| h.join();
 
     const w, const h = try ui.windowSize();
     var camera = Camera.init(vid_width, vid_height, w, h);
 
     var view = Viewport.init(w, h);
-    const frame_period = 1.0 / c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate);
+    const frame_rate = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate;
+    const frame_period = 1.0 / c.av_q2d(frame_rate);
 
     // A/V Sync Debug State
     var frame_count: u64 = 0;
 
-    if (@import("builtin").mode == .Debug) {
-        const drop_behind_ms = @max(0.025, frame_period * 2.0) * std.time.ms_per_s;
-        const delay_ahead_ms = @max(0.012, frame_period * 1.5) * std.time.ms_per_s;
-        log.info("Frame period: {d:.3}ms ({d:.2} fps)", .{ frame_period * std.time.ms_per_s, 1.0 / frame_period });
-        log.info("Sync thresholds: drop_behind={d:.1}ms (~{d:.1} frames), delay_ahead={d:.1}ms (~{d:.1} frames), max_delay=500ms", .{
-            drop_behind_ms,
-            drop_behind_ms / (frame_period * std.time.ms_per_s),
-            delay_ahead_ms,
-            delay_ahead_ms / (frame_period * std.time.ms_per_s),
+    if (RENDER_MODE) {
+        // Initialize encoder
+        var encoder = try Encoder.init(.{
+            .width = @intCast(view.width),
+            .height = @intCast(view.height),
+            .fps = frame_rate,
+            .input_fmt_ctx = fmt_ctx.ptr(),
+            .input_video_stream = video_ctx.stream,
+            .input_audio_stream = audio_ctx.stream,
         });
-        log.info("audio hw_latency: {d:.2}ms", .{audio_clock.hw_latency_secs * std.time.ms_per_s});
-    }
+        defer encoder.deinit();
 
-    while (!should_quit.load(.monotonic)) {
-        var event: c.SDL_Event = undefined;
+        // Initialize encoder
+        // var encoder = try Encoder.init(RENDER_OUTPUT_PATH, .{
+        //     .width = @intCast(view.width),
+        //     .height = @intCast(view.height),
+        //     .fps = frame_rate,
+        //     .input_fmt_ctx = fmt_ctx.ptr(),
+        //     .input_video_stream = video_ctx.stream,
+        //     .input_audio_stream = audio_ctx.stream,
+        // });
+        // defer encoder.deinit();
 
-        while (c.SDL_PollEvent(&event)) {
-            switch (event.type) {
-                c.SDL_EVENT_QUIT => should_quit.store(true, .monotonic),
-                c.SDL_EVENT_MOUSE_WHEEL => {
-                    const wheel_delta = event.wheel.y * 0.1;
-                    camera.adjustZoom(wheel_delta);
-                    log.debug("Zoom: {d:.2}x", .{camera.zoom});
-                },
-                c.SDL_EVENT_WINDOW_RESIZED => {
-                    view = Viewport.init(event.window.data1, event.window.data2);
-                    camera.updateWindow(view.width, view.height);
+        const render_start_time = c.SDL_GetPerformanceCounter();
+        const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
 
-                    log.debug("Window resized to {}x{}", .{ view.width, view.height });
-                },
-                c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
-                    c.SDL_SCANCODE_P => {
-                        log.debug("saving screenshot", .{});
-                        var img: zstbi.Image = try .createEmpty(@intCast(view.width), @intCast(view.height), RGB24_BPP, .{});
-                        defer img.deinit();
+        // Get estimated total frames for progress
+        const video_stream = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)];
+        const audio_stream = fmt_ctx.ptr().streams[@intCast(audio_ctx.stream)];
 
-                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
-                        gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, img.data.ptr);
+        const estimated_frames: usize = blk: {
+            // Try nb_frames first
+            if (video_stream.*.nb_frames > 0) {
+                break :blk @intCast(video_stream.*.nb_frames);
+            }
+            // Fall back to estimating from duration
+            if (fmt_ctx.ptr().duration > 0) {
+                const duration_secs = @as(f64, @floatFromInt(fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
+                const fps = c.av_q2d(frame_rate);
+                break :blk @intFromFloat(duration_secs * fps);
+            }
+            break :blk 0; // Unknown
+        };
 
-                        zstbi.setFlipVerticallyOnWrite(true);
-                        try img.writeToFile("screenshot.png", .png);
+        // Initialize progress
+        var progress_buffer: [256]u8 = undefined;
+        const progress_node = std.Progress.start(.{
+            .root_name = "Encoding",
+            .estimated_total_items = estimated_frames,
+            .draw_buffer = &progress_buffer,
+        });
+        defer progress_node.end();
+
+        // Setup PBO double-buffering for async readback
+        // This overlaps GPU→CPU transfer with encoding of the previous frame
+        const rgb_size: isize = @intCast(@as(usize, @intCast(view.width)) * @as(usize, @intCast(view.height)) * RGB24_BPP);
+        var readback_pbos: [2]c_uint = undefined;
+        gl.GenBuffers(2, &readback_pbos);
+        defer gl.DeleteBuffers(2, &readback_pbos);
+
+        // Initialize both PBOs with the same size
+        for (readback_pbos) |pbo| {
+            gl.BindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+            gl.BufferData(gl.PIXEL_PACK_BUFFER, rgb_size, null, gl.STREAM_READ);
+        }
+        gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+
+        var current_pbo: u1 = 0;
+        var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
+
+        while (!should_quit.load(.monotonic)) {
+            // No event polling needed - window is hidden in render mode
+
+            // Process any pending audio packets (remux to output)
+            while (audio_pkt_queue.tryPop()) |audio_pkt| {
+                defer {
+                    var pkt: ?*c.AVPacket = audio_pkt;
+                    c.av_packet_free(&pkt);
+                }
+
+                try encoder.writeAudioPacket(audio_stream, audio_pkt);
+            }
+
+            if (queue.pop()) |frame| {
+                defer queue.recycle(frame);
+                defer stable_buffer.swap();
+
+                if (frame.format != c.AV_PIX_FMT_NV12) {
+                    @branchHint(.cold);
+                    const expected = c.av_get_pix_fmt_name(c.AV_PIX_FMT_NV12);
+                    const actual = c.av_get_pix_fmt_name(frame.format);
+                    log.err("unsupported pixel format: expected {s} got {s}", .{ expected, actual });
+                    return error.ffmpeg_error;
+                }
+
+                frame_count += 1;
+
+                // Upload Y plane to GPU
+                {
+                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
+                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
+                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+                    if (pbo) |ptr| {
+                        const bytes_per_line: usize = @intCast(frame.linesize[0]);
+                        const height: usize = @intCast(frame.height);
+                        const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
+
+                        for (0..height) |y| {
+                            const src_offset = y * bytes_per_line;
+                            const dst_offset = y * dst_stride;
+                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
+                        }
+                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+                    }
+
+                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
+                    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, gl.RED, gl.UNSIGNED_BYTE, null);
+                }
+
+                // Upload UV plane to GPU
+                {
+                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
+                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
+                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+                    if (pbo) |ptr| {
+                        const bytes_per_line: usize = @intCast(frame.linesize[1]);
+                        const height: usize = @intCast(@divTrunc(frame.height, 2));
+                        const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
+
+                        for (0..height) |y| {
+                            const src_offset = y * bytes_per_line;
+                            const dst_offset = y * dst_stride;
+                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
+                        }
+                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+                    }
+
+                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
+                    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @divTrunc(frame.width, 2), @divTrunc(frame.height, 2), gl.RG, gl.UNSIGNED_BYTE, null);
+                }
+
+                // Render the frame
+                try render(&view, &stable_buffer, angle_calc, res, camera);
+
+                // Start async readback into current PBO
+                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readback_pbos[current_pbo]);
+                gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
+                gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
+
+                // If we have a pending frame in the other PBO, map and encode it
+                if (pending_frame_pts) |pts| {
+                    const prev_pbo = current_pbo +% 1;
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readback_pbos[prev_pbo]);
+
+                    const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
+                    if (mapped) |rgb_data| {
+                        // try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
+                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
+                        _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+                    }
+                }
+                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+
+                // Store current frame's PTS for next iteration, swap PBOs
+                pending_frame_pts = frame.best_effort_timestamp;
+                current_pbo +%= 1;
+
+                // Update progress
+                progress_node.setCompletedItems(frame_count);
+
+                // No need to swap in headless render mode
+            } else if (queue.end_of_stream.load(.monotonic) and queue.isEmpty()) {
+                // Encode the last pending frame
+                if (pending_frame_pts) |pts| {
+                    const prev_pbo = current_pbo +% 1;
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readback_pbos[prev_pbo]);
+
+                    const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
+                    if (mapped) |rgb_data| {
+                        // try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
+                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
+                        _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+                    }
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+                }
+
+                // End of video
+                progress_node.setCompletedItems(frame_count);
+                std.Progress.setStatus(.success);
+
+                // Calculate and display final stats
+                const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
+                const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
+                const speed = video_duration / elapsed;
+                log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
+                break;
+            }
+        }
+
+        // Signal threads to quit (in case they're blocked waiting)
+        should_quit.store(true, .monotonic);
+        video_pkt_queue.quit();
+        audio_pkt_queue.quit();
+    } else {
+        // ===== PLAYBACK MODE =====
+        if (@import("builtin").mode == .Debug) {
+            const drop_behind_ms = @max(0.025, frame_period * 2.0) * std.time.ms_per_s;
+            const delay_ahead_ms = @max(0.012, frame_period * 1.5) * std.time.ms_per_s;
+            log.info("Frame period: {d:.3}ms ({d:.2} fps)", .{ frame_period * std.time.ms_per_s, 1.0 / frame_period });
+            log.info("Sync thresholds: drop_behind={d:.1}ms (~{d:.1} frames), delay_ahead={d:.1}ms (~{d:.1} frames), max_delay=500ms", .{
+                drop_behind_ms,
+                drop_behind_ms / (frame_period * std.time.ms_per_s),
+                delay_ahead_ms,
+                delay_ahead_ms / (frame_period * std.time.ms_per_s),
+            });
+            log.info("audio hw_latency: {d:.2}ms", .{audio_clock.hw_latency_secs * std.time.ms_per_s});
+        }
+
+        while (!should_quit.load(.monotonic)) {
+            var event: c.SDL_Event = undefined;
+
+            while (c.SDL_PollEvent(&event)) {
+                switch (event.type) {
+                    c.SDL_EVENT_QUIT => {
+                        should_quit.store(true, .monotonic);
+                        // Wake up threads blocked on queue pop
+                        video_pkt_queue.quit();
+                        audio_pkt_queue.quit();
                     },
-                    c.SDL_SCANCODE_M => {
-                        try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
+                    c.SDL_EVENT_MOUSE_WHEEL => {
+                        const wheel_delta = event.wheel.y * 0.1;
+                        camera.adjustZoom(wheel_delta);
+                        log.debug("Zoom: {d:.2}x", .{camera.zoom});
                     },
-                    c.SDL_SCANCODE_L => {
-                        // Debug: print world vs window viewport info
-                        const world_bounds = camera.world_bounds;
-                        log.debug("World bounds: {d:.1}x{d:.1}, Window: {}x{}", .{ world_bounds.x(), world_bounds.y(), camera.window_size[0], camera.window_size[1] });
+                    c.SDL_EVENT_WINDOW_RESIZED => {
+                        view = Viewport.init(event.window.data1, event.window.data2);
+                        camera.updateWindow(view.width, view.height);
+
+                        log.debug("Window resized to {}x{}", .{ view.width, view.height });
                     },
-                    c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
+                    c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
+                        c.SDL_SCANCODE_P => {
+                            log.debug("saving screenshot", .{});
+                            var img: zstbi.Image = try .createEmpty(@intCast(view.width), @intCast(view.height), RGB24_BPP, .{});
+                            defer img.deinit();
+
+                            gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
+                            gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, img.data.ptr);
+
+                            zstbi.setFlipVerticallyOnWrite(true);
+                            try img.writeToFile("screenshot.png", .png);
+                        },
+                        c.SDL_SCANCODE_M => {
+                            try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
+                        },
+                        c.SDL_SCANCODE_L => {
+                            // Debug: print world vs window viewport info
+                            const world_bounds = camera.world_bounds;
+                            log.debug("World bounds: {d:.1}x{d:.1}, Window: {}x{}", .{ world_bounds.x(), world_bounds.y(), camera.window_size[0], camera.window_size[1] });
+                        },
+                        c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
+                        else => {},
+                    },
                     else => {},
-                },
-                else => {},
-            }
-        }
-
-        if (queue.pop()) |frame| {
-            defer queue.recycle(frame);
-            defer stable_buffer.swap();
-
-            // Calculate PTS early - needed for initial sync
-            const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
-            const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
-
-            // Track if this is the first frame (for delayed audio start)
-            const is_first_frame = audio_clock.isPaused();
-            const first_frame_pts: f64 = if (is_first_frame) pt_in_seconds else 0.0;
-
-            if (frame.format != c.AV_PIX_FMT_NV12) {
-                @branchHint(.cold);
-
-                const expected = c.av_get_pix_fmt_name(c.AV_PIX_FMT_NV12);
-                const actual = c.av_get_pix_fmt_name(frame.format);
-                log.err("unsupported pixel format: expected {s} got {s}", .{ expected, actual });
-                return error.ffmpeg_error;
+                }
             }
 
-            // FIXME: we currently assume colour space. We can't do that.
+            if (queue.pop()) |frame| {
+                defer queue.recycle(frame);
+                defer stable_buffer.swap();
 
-            // Determine Colorspace
-            // log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
-            // log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
-            // log.debug("colour primaries: {s}", .{c.av_color_transfer_name(frame.color_trc)});
+                // Calculate PTS early - needed for initial sync
+                const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
+                const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
-            // A/V sync thresholds - tuned for both high refresh (120fps) and standard (60fps) content
-            // drop_behind: How far audio can get ahead before dropping video frames
-            //   - 2 frames gives some tolerance without visible desync
-            const drop_behind = @max(0.025, frame_period * 2.0);
-            // delay_ahead: How far video can get ahead before we delay
-            //   - 1.5 frames allows natural jitter without excessive delays
-            const delay_ahead = @max(0.012, frame_period * 1.5);
-            // max_delay: Cap on sleep time to handle PTS discontinuities
-            //   - 500ms handles jumps without freezing UI too long
-            const max_delay = 0.500;
-            // desync_reset: Major desync threshold - skip frame entirely
-            const desync_reset = 2.0;
+                // Track if this is the first frame (for delayed audio start)
+                const is_first_frame = audio_clock.isPaused();
+                const first_frame_pts: f64 = if (is_first_frame) pt_in_seconds else 0.0;
 
-            stable_buffer.set_display_time(pt_in_seconds);
+                if (frame.format != c.AV_PIX_FMT_NV12) {
+                    @branchHint(.cold);
 
-            // Skip A/V sync on first frame - audio hasn't started yet
-            if (is_first_frame) {
-                // Just render the first frame without sync logic
-                frame_count += 1;
+                    const expected = c.av_get_pix_fmt_name(c.AV_PIX_FMT_NV12);
+                    const actual = c.av_get_pix_fmt_name(frame.format);
+                    log.err("unsupported pixel format: expected {s} got {s}", .{ expected, actual });
+                    return error.ffmpeg_error;
+                }
+
+                // FIXME: we currently assume colour space. We can't do that.
+
+                // Determine Colorspace
+                // log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
+                // log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
+                // log.debug("colour primaries: {s}", .{c.av_color_transfer_name(frame.color_trc)});
+
+                // A/V sync thresholds - tuned for both high refresh (120fps) and standard (60fps) content
+                // drop_behind: How far audio can get ahead before dropping video frames
+                //   - 2 frames gives some tolerance without visible desync
+                const drop_behind = @max(0.025, frame_period * 2.0);
+                // delay_ahead: How far video can get ahead before we delay
+                //   - 1.5 frames allows natural jitter without excessive delays
+                const delay_ahead = @max(0.012, frame_period * 1.5);
+                // max_delay: Cap on sleep time to handle PTS discontinuities
+                //   - 500ms handles jumps without freezing UI too long
+                const max_delay = 0.500;
+                // desync_reset: Major desync threshold - skip frame entirely
+                const desync_reset = 2.0;
+
+                stable_buffer.set_display_time(pt_in_seconds);
+
+                // Skip A/V sync on first frame - audio hasn't started yet
+                if (is_first_frame) {
+                    // Just render the first frame without sync logic
+                    frame_count += 1;
+                } else {
+                    // A/V sync: compare the frame being DISPLAYED (previous frame from invert()) to audio clock
+                    // Double-buffer pattern: we upload to current slot, but display from inverted slot
+                    const audio_time = audio_clock.seconds_passed();
+                    const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
+                    const diff = frame_time - audio_time;
+
+                    // Increment frame counter for debug
+                    frame_count += 1;
+
+                    // skip frame
+                    if (@abs(diff) > desync_reset) {
+                        log.err("A/V desync: {d:.1}ms - skipping frame", .{diff * std.time.ms_per_s});
+                        continue;
+                    }
+
+                    // drop frame
+                    if (diff < -drop_behind) {
+                        log.debug("DROP #{} | display: {d:.3}s upload: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m", .{
+                            frame_count, frame_time, pt_in_seconds, audio_time, diff * std.time.ms_per_s,
+                        });
+                        continue;
+                    }
+
+                    // delay frame
+                    if (diff > delay_ahead) {
+                        const delay_ns = @min(diff * std.time.ns_per_s, max_delay * std.time.ns_per_s);
+                        log.debug("DELAY #{} | display: {d:.3}s upload: {d:.3}s audio={d:.3}s diff: \x1B[33m{d:.1}ms\x1B[39m sleep: {d:.1}ms", .{
+                            frame_count, frame_time, pt_in_seconds, audio_time, diff * std.time.ms_per_s, delay_ns / std.time.ns_per_ms,
+                        });
+
+                        sleep(@intFromFloat(delay_ns));
+                    }
+                }
+
+                {
+                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
+                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
+                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+                    if (pbo) |ptr| {
+                        // Copy line by line instead of a single large memcpy
+                        const bytes_per_line: usize = @intCast(frame.linesize[0]);
+                        const height: usize = @intCast(frame.height);
+
+                        // Destination stride in the PBO may be different from the source
+                        const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
+
+                        for (0..height) |y| {
+                            const src_offset = y * bytes_per_line;
+                            const dst_offset = y * dst_stride;
+
+                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
+                        }
+
+                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+                    }
+
+                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+                    gl.TexSubImage2D(
+                        gl.TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        frame.width,
+                        frame.height,
+                        gl.RED,
+                        gl.UNSIGNED_BYTE,
+                        null,
+                    );
+                }
+
+                {
+                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
+                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
+                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+                    if (pbo) |ptr| {
+                        // Copy line by line instead of a single large memcpy
+                        const bytes_per_line: usize = @intCast(frame.linesize[1]);
+                        const height: usize = @intCast(@divTrunc(frame.height, 2));
+
+                        // Destination stride in the PBO may be different from the source
+                        const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
+
+                        for (0..height) |y| {
+                            const src_offset = y * bytes_per_line;
+                            const dst_offset = y * dst_stride;
+
+                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
+                        }
+
+                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+                    }
+
+                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
+
+                    gl.TexSubImage2D(
+                        gl.TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        @divTrunc(frame.width, 2),
+                        @divTrunc(frame.height, 2),
+                        gl.RG,
+                        gl.UNSIGNED_BYTE,
+                        null,
+                    );
+                }
+
+                try render(
+                    &view,
+                    &stable_buffer,
+                    angle_calc,
+                    res,
+                    camera,
+                );
+
+                // Start audio AFTER first frame is rendered (not before)
+                // This ensures audio timing aligns with actual frame display
+                if (is_first_frame) {
+                    try audio_clock.start(first_frame_pts);
+                }
             } else {
-                // A/V sync: compare the frame being DISPLAYED (previous frame from invert()) to audio clock
-                // Double-buffer pattern: we upload to current slot, but display from inverted slot
-                const audio_time = audio_clock.seconds_passed();
-                const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
-                const diff = frame_time - audio_time;
-
-                // Increment frame counter for debug
-                frame_count += 1;
-
-                // skip frame
-                if (@abs(diff) > desync_reset) {
-                    log.err("A/V desync: {d:.1}ms - skipping frame", .{diff * std.time.ms_per_s});
-                    continue;
-                }
-
-                // drop frame
-                if (diff < -drop_behind) {
-                    log.debug("DROP #{} | display: {d:.3}s upload: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m", .{
-                        frame_count, frame_time, pt_in_seconds, audio_time, diff * std.time.ms_per_s,
-                    });
-                    continue;
-                }
-
-                // delay frame
-                if (diff > delay_ahead) {
-                    const delay_ns = @min(diff * std.time.ns_per_s, max_delay * std.time.ns_per_s);
-                    log.debug("DELAY #{} | display: {d:.3}s upload: {d:.3}s audio={d:.3}s diff: \x1B[33m{d:.1}ms\x1B[39m sleep: {d:.1}ms", .{
-                        frame_count, frame_time, pt_in_seconds, audio_time, diff * std.time.ms_per_s, delay_ns / std.time.ns_per_ms,
-                    });
-
-                    sleep(@intFromFloat(delay_ns));
-                }
+                // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
+                continue;
             }
 
-            {
-                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
-                defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
-
-                gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
-                defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-                const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
-
-                if (pbo) |ptr| {
-                    // Copy line by line instead of a single large memcpy
-                    const bytes_per_line: usize = @intCast(frame.linesize[0]);
-                    const height: usize = @intCast(frame.height);
-
-                    // Destination stride in the PBO may be different from the source
-                    const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
-
-                    for (0..height) |y| {
-                        const src_offset = y * bytes_per_line;
-                        const dst_offset = y * dst_stride;
-
-                        @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
-                    }
-
-                    _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
-                }
-
-                gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
-
-                gl.TexSubImage2D(
-                    gl.TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    frame.width,
-                    frame.height,
-                    gl.RED,
-                    gl.UNSIGNED_BYTE,
-                    null,
-                );
-            }
-
-            {
-                gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
-                defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
-
-                gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
-                defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-                const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
-
-                if (pbo) |ptr| {
-                    // Copy line by line instead of a single large memcpy
-                    const bytes_per_line: usize = @intCast(frame.linesize[1]);
-                    const height: usize = @intCast(@divTrunc(frame.height, 2));
-
-                    // Destination stride in the PBO may be different from the source
-                    const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
-
-                    for (0..height) |y| {
-                        const src_offset = y * bytes_per_line;
-                        const dst_offset = y * dst_stride;
-
-                        @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
-                    }
-
-                    _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
-                }
-
-                gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
-
-                gl.TexSubImage2D(
-                    gl.TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    @divTrunc(frame.width, 2),
-                    @divTrunc(frame.height, 2),
-                    gl.RG,
-                    gl.UNSIGNED_BYTE,
-                    null,
-                );
-            }
-
-            try render(
-                &view,
-                &stable_buffer,
-                angle_calc,
-                res,
-                camera,
-            );
-
-            // Start audio AFTER first frame is rendered (not before)
-            // This ensures audio timing aligns with actual frame display
-            if (is_first_frame) {
-                try audio_clock.start(first_frame_pts);
-            }
-        } else {
-            // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
-            continue;
+            try ui.swap();
         }
+    } // end of RENDER_MODE else block
 
-        try ui.swap();
+    if (RENDER_MODE) {
+        log.info("Render completed successfully", .{});
     }
 }
 
@@ -705,7 +936,7 @@ const Camera = struct {
     scale: f32,
     inv_scale: f32,
 
-    zoom: f32 = 1.0,
+    zoom: f32 = 1.45, // TODO: revert to 1.0
 
     pub fn init(video_width: u32, video_height: u32, window_width: c_int, window_height: c_int) Camera {
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
@@ -794,6 +1025,7 @@ const Camera = struct {
     }
 
     fn setZoom(self: *@This(), new_zoom: f32) void {
+        std.log.info("zoom: {d:.2}", .{new_zoom});
         self.zoom = @max(1.0, @min(10.0, new_zoom));
     }
 };
