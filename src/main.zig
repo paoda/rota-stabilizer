@@ -207,9 +207,11 @@ pub fn main() !void {
         defer gl.DeleteBuffers(2, &readback_pbos);
 
         // Initialize both PBOs with the same size
+        // Add padding so swscale SIMD (SSE2/AVX2) can safely over-read past the last row
+        const SWS_INPUT_PADDING = 64;
         for (readback_pbos) |pbo| {
             gl.BindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
-            gl.BufferData(gl.PIXEL_PACK_BUFFER, rgb_size, null, gl.STREAM_READ);
+            gl.BufferData(gl.PIXEL_PACK_BUFFER, rgb_size + SWS_INPUT_PADDING, null, gl.STREAM_READ);
         }
         gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 

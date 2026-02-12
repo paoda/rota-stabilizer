@@ -563,7 +563,7 @@ pub const Encoder = struct {
 
         const hw_device_ctx = blk: {
             var ptr: ?*c.AVBufferRef = null;
-            _ = try libav.err(c.av_hwdevice_ctx_create(&ptr, c.AV_HWDEVICE_TYPE_VAAPI, null, null, 0));
+            _ = try libav.err(c.av_hwdevice_ctx_create(&ptr, c.AV_HWDEVICE_TYPE_VULKAN, null, null, 0));
             errdefer c.av_buffer_unref(&ptr);
 
             break :blk ptr.?;
@@ -572,7 +572,7 @@ pub const Encoder = struct {
         // FIXME: figure out how to list all hardware encoders
         const codec = blk: {
             // TODO: can we free this?
-            const ptr: ?*const c.AVCodec = c.avcodec_find_encoder_by_name("h264_vaapi");
+            const ptr: ?*const c.AVCodec = c.avcodec_find_encoder_by_name("hevc_vulkan");
             break :blk ptr.?;
         };
 
@@ -591,7 +591,7 @@ pub const Encoder = struct {
             ctx.time_base = input_video.*.time_base;
             ctx.framerate = opt.fps;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
-            ctx.pix_fmt = c.AV_PIX_FMT_VAAPI;
+            ctx.pix_fmt = c.AV_PIX_FMT_VULKAN;
 
             // Set global header flag BEFORE opening codec if muxer needs it
             if (fmt_ctx.oformat.*.flags & c.AVFMT_GLOBALHEADER != 0) {
@@ -691,7 +691,7 @@ pub const Encoder = struct {
         // defer c.av_buffer_unref(&hw_frames_ref);
 
         var frames_ctx: *c.AVHWFramesContext = @ptrCast(@alignCast(hw_frames_ref.data));
-        frames_ctx.format = c.AV_PIX_FMT_VAAPI;
+        frames_ctx.format = c.AV_PIX_FMT_VULKAN;
         frames_ctx.sw_format = c.AV_PIX_FMT_NV12;
         frames_ctx.width = @intCast(opt.width);
         frames_ctx.height = @intCast(opt.height);
