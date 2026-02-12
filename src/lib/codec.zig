@@ -551,7 +551,7 @@ pub const Encoder = struct {
     }
 
     pub fn initHardware(opt: Options) !Encoder {
-        const path = "output.mkv";
+        const path = "output.mp4";
 
         const fmt_ctx = blk: {
             var ptr: ?*c.AVFormatContext = null;
