@@ -702,29 +702,19 @@ pub const Encoder = struct {
     }
 
     pub fn encodeRgbFrame(self: *Encoder, buf: []const u8, frame_pts: i64) !void {
-        const RGB_BPP = 3;
         _ = try libav.err(c.av_frame_make_writable(self._sw_frame));
+        const stride: usize = self.width * 3;
 
-        // OpenGL gives us bottom-to-top RGB, swscale expects top-to-bottom
-        // Use negative source stride to flip during conversion
-        const stride = self.width * RGB_BPP;
+        var src_frame: c.AVFrame = .{
+            .format = c.AV_PIX_FMT_RGB24,
+            .width = @intCast(self.width),
+            .height = @intCast(self.height),
+        };
 
-        // Point to last row (first row of OpenGL image) with negative stride to read bottom-up
-        const last_row_ptr: [*]const u8 = @ptrCast(buf.ptr + (@as(usize, self.height - 1) * @as(usize, stride)));
-        const src_data: [4][*]const u8 = .{ last_row_ptr, undefined, undefined, undefined };
-        const src_stride: [4]c_int = .{ -@as(c_int, @intCast(stride)), 0, 0, 0 };
+        src_frame.data[0] = @constCast(buf.ptr + @as(usize, self.height - 1) * stride);
+        src_frame.linesize[0] = -@as(c_int, @intCast(stride)); // negative to flip vertically
 
-        _ = c.sws_scale(
-            self.sws_ctx,
-            @ptrCast(&src_data),
-            @ptrCast(&src_stride),
-            0,
-            @intCast(self.height),
-            @ptrCast(&self._sw_frame.data),
-            &self._sw_frame.linesize,
-        );
-
-        // Use PTS directly since we're using the same time_base as input
+        _ = try libav.err(c.sws_scale_frame(self.sws_ctx, self._sw_frame, &src_frame));
         self._sw_frame.pts = frame_pts;
 
         c.av_frame_unref(self._hw_frame);
