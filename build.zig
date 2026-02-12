@@ -27,8 +27,7 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
-    const sdl_optimize = if (target.result.os.tag == .windows) .ReleaseFast else optimize; // SDL3 on windows crashes in debug build on window dra
-    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = sdl_optimize, .preferred_linkage = .static });
+    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = .ReleaseFast, .preferred_linkage = .static });
     exe_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
     switch (target.result.os.tag) {
