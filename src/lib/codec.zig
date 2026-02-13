@@ -520,20 +520,42 @@ pub const Encoder = struct {
     width: u32,
     height: u32,
 
-    hw_device_ctx: *c.AVBufferRef,
-    av_codec_ctx: *c.AVCodecContext,
-    sws_ctx: *c.SwsContext,
+    hw_device_ctx: ?*c.AVBufferRef,
+    av_codec_ctx: ?*c.AVCodecContext,
+    sws_ctx: ?*c.SwsContext,
 
     fmt_ctx: *c.AVFormatContext,
 
     audio_stream: *c.AVStream,
     video_stream: *c.AVStream,
 
-    /// for encoding video
-    _pkt: *c.AVPacket,
+    _pkt: ?*c.AVPacket,
+    _sw_frame: ?*c.AVFrame,
+    _hw_frame: ?*c.AVFrame,
 
-    _sw_frame: *c.AVFrame,
-    _hw_frame: *c.AVFrame,
+    pub const EncoderReal = struct {
+        hw_device_ctx: *c.AVBufferRef,
+        av_codec_ctx: *c.AVCodecContext,
+        sws_ctx: *c.SwsContext,
+        fmt_ctx: *c.AVFormatContext,
+
+        _pkt: *c.AVPacket,
+        _sw_frame: *c.AVFrame,
+        _hw_frame: *c.AVFrame,
+    };
+
+    pub fn unwrap(self: *Encoder) EncoderReal {
+        return .{
+            .hw_device_ctx = self.hw_device_ctx.?,
+            .av_codec_ctx = self.av_codec_ctx.?,
+            .sws_ctx = self.sws_ctx.?,
+            .fmt_ctx = self.fmt_ctx,
+
+            ._pkt = self._pkt.?,
+            ._sw_frame = self._sw_frame.?,
+            ._hw_frame = self._hw_frame.?,
+        };
+    }
 
     const log = std.log.scoped(.encode);
 
@@ -702,7 +724,9 @@ pub const Encoder = struct {
     }
 
     pub fn encodeRgbFrame(self: *Encoder, buf: []const u8, frame_pts: i64) !void {
-        _ = try libav.err(c.av_frame_make_writable(self._sw_frame));
+        const enc = self.unwrap();
+
+        _ = try libav.err(c.av_frame_make_writable(enc._sw_frame));
         const stride: usize = self.width * 3;
 
         var src_frame: c.AVFrame = .{
@@ -714,15 +738,15 @@ pub const Encoder = struct {
         src_frame.data[0] = @constCast(buf.ptr + @as(usize, self.height - 1) * stride);
         src_frame.linesize[0] = -@as(c_int, @intCast(stride)); // negative to flip vertically
 
-        _ = try libav.err(c.sws_scale_frame(self.sws_ctx, self._sw_frame, &src_frame));
-        self._sw_frame.pts = frame_pts;
+        _ = try libav.err(c.sws_scale_frame(self.sws_ctx, enc._sw_frame, &src_frame));
+        enc._sw_frame.pts = frame_pts;
 
-        c.av_frame_unref(self._hw_frame);
-        _ = try libav.err(c.av_hwframe_get_buffer(self.av_codec_ctx.hw_frames_ctx, self._hw_frame, 0));
-        _ = try libav.err(c.av_hwframe_transfer_data(self._hw_frame, self._sw_frame, 0));
-        _ = try libav.err(c.av_frame_copy_props(self._hw_frame, self._sw_frame));
+        c.av_frame_unref(enc._hw_frame);
+        _ = try libav.err(c.av_hwframe_get_buffer(enc.av_codec_ctx.hw_frames_ctx, enc._hw_frame, 0));
+        _ = try libav.err(c.av_hwframe_transfer_data(enc._hw_frame, enc._sw_frame, 0));
+        _ = try libav.err(c.av_frame_copy_props(enc._hw_frame, enc._sw_frame));
 
-        try self.writeVideoFrame(self._hw_frame);
+        try self.writeVideoFrame(enc._hw_frame);
     }
 
     pub fn writeAudioPacket(self: *Encoder, in: *c.AVStream, pkt: *c.AVPacket) !void {
@@ -736,17 +760,19 @@ pub const Encoder = struct {
     }
 
     fn writeVideoFrame(self: *Encoder, frame: ?*c.AVFrame) !void {
-        _ = try libav.err(c.avcodec_send_frame(self.av_codec_ctx, frame));
+        const enc = self.unwrap();
+
+        _ = try libav.err(c.avcodec_send_frame(enc.av_codec_ctx, frame));
 
         while (true) {
-            const ret = c.avcodec_receive_packet(self.av_codec_ctx, self._pkt);
+            const ret = c.avcodec_receive_packet(enc.av_codec_ctx, enc._pkt);
             if (ret == c.AVERROR(c.EAGAIN) or ret == c.AVERROR_EOF) break;
             _ = try libav.err(ret);
 
-            c.av_packet_rescale_ts(self._pkt, self.av_codec_ctx.time_base, self.video_stream.time_base);
-            self._pkt.stream_index = self.video_stream.index;
+            c.av_packet_rescale_ts(enc._pkt, enc.av_codec_ctx.time_base, self.video_stream.time_base);
+            enc._pkt.stream_index = self.video_stream.index;
 
-            _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx, self._pkt));
+            _ = try libav.err(c.av_interleaved_write_frame(enc.fmt_ctx, enc._pkt));
         }
     }
 
@@ -754,31 +780,16 @@ pub const Encoder = struct {
         self.writeVideoFrame(null) catch @panic("failed to flush encoder");
         _ = c.av_write_trailer(self.fmt_ctx);
 
-        {
-            var tmp: ?*c.AVFrame = self._sw_frame;
-            c.av_frame_free(&tmp);
-
-            tmp = self._hw_frame;
-            c.av_frame_free(&tmp);
-        }
-        {
-            var tmp: ?*c.AVPacket = self._pkt;
-            c.av_packet_free(&tmp);
-        }
-        {
-            var tmp: ?*c.AVCodecContext = self.av_codec_ctx;
-            c.avcodec_free_context(&tmp);
-        }
-        {
-            var tmp: ?*c.AVBufferRef = self.hw_device_ctx;
-            c.av_buffer_unref(&tmp);
-        }
+        c.av_frame_free(&self._sw_frame);
+        c.av_frame_free(&self._hw_frame);
+        c.av_packet_free(&self._pkt);
+        c.avcodec_free_context(&self.av_codec_ctx);
+        c.av_buffer_unref(&self.hw_device_ctx);
 
         if (self.fmt_ctx.oformat.*.flags & c.AVFMT_NOFILE == 0) {
             _ = c.avio_closep(&self.fmt_ctx.pb);
         }
 
-        // var tmp: ?*c.AVFormatContext = self.fmt_ctx;
         c.avformat_free_context(self.fmt_ctx);
 
         self.* = undefined;
