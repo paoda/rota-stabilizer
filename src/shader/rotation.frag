@@ -32,7 +32,7 @@ vec3 nv12ToRgb(float y_norm, vec2 uv_norm) {
     vec3 yuv = vec3(y, uv.r - 0.5, uv.g - 0.5);
 
     // TODO: select colorspace based on AVFrame
-    return clamp(bt601 * yuv, 0.0, 1.0);
+    return clamp(bt709 * yuv, 0.0, 1.0);
 }
 
 vec3 sampleTexture(int size, ivec2 start_pos) {

@@ -606,7 +606,7 @@ pub const Encoder = struct {
             errdefer c.avcodec_free_context(&ptr);
 
             const ctx = ptr.?;
-            // TODO: AI added some extra params idk if i need 'em
+            const kbps_to_bps = 1000;
 
             ctx.width = @intCast(opt.width);
             ctx.height = @intCast(opt.height);
@@ -614,6 +614,12 @@ pub const Encoder = struct {
             ctx.framerate = opt.fps;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
             ctx.pix_fmt = c.AV_PIX_FMT_VULKAN;
+            ctx.bit_rate = 60_000 * kbps_to_bps; // 30Mbps
+
+            ctx.color_range = c.AVCOL_RANGE_MPEG;
+            ctx.color_primaries = c.AVCOL_PRI_BT709;
+            ctx.color_trc = c.AVCOL_TRC_BT709;
+            ctx.colorspace = c.AVCOL_SPC_BT709;
 
             // Set global header flag BEFORE opening codec if muxer needs it
             if (fmt_ctx.oformat.*.flags & c.AVFMT_GLOBALHEADER != 0) {
@@ -675,6 +681,12 @@ pub const Encoder = struct {
                 frame.format = c.AV_PIX_FMT_NV12;
                 frame.width = @intCast(opt.width);
                 frame.height = @intCast(opt.height);
+
+                frame.color_range = c.AVCOL_RANGE_MPEG;
+                frame.color_primaries = c.AVCOL_PRI_BT709;
+                frame.color_trc = c.AVCOL_TRC_BT709;
+                frame.colorspace = c.AVCOL_SPC_BT709;
+
                 _ = try libav.err(c.av_frame_get_buffer(frame, 0));
 
                 break :blk frame;

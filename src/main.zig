@@ -447,9 +447,9 @@ pub fn main() !void {
                 // FIXME: we currently assume colour space. We can't do that.
 
                 // Determine Colorspace
-                // log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
-                // log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
-                // log.debug("colour primaries: {s}", .{c.av_color_transfer_name(frame.color_trc)});
+                log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
+                log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
+                log.debug("colour primaries: {s}", .{c.av_color_transfer_name(frame.color_trc)});
 
                 // A/V sync thresholds - tuned for both high refresh (120fps) and standard (60fps) content
                 // drop_behind: How far audio can get ahead before dropping video frames
