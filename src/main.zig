@@ -107,7 +107,7 @@ pub fn main() !void {
     }
 
     var stable_buffer = DoubleBuffer.init(res);
-    const angle_calc = try AngleCalc.init(res);
+    const angle_calc = try AngleCalc.init(res, video_ctx.inner.?.colorspace);
 
     // -- opengl end --
     var queue = try FrameQueue.init(allocator, 0x80); // 1s at 120fps?
@@ -137,7 +137,11 @@ pub fn main() !void {
     defer if (audio_decode) |h| h.join();
 
     const w, const h = try ui.windowSize();
-    var camera = Camera.init(vid_width, vid_height, w, h);
+    var camera = Camera.init(vid_width, vid_height, w, h, angle_calc.colour_space);
+
+    log.debug("colour space: {s}", .{c.av_color_space_name(video_ctx.inner.?.colorspace)});
+    log.debug("colour range: {s}", .{c.av_color_range_name(video_ctx.inner.?.color_range)});
+    log.debug("colour primaries: {s}", .{c.av_color_transfer_name(video_ctx.inner.?.color_trc)});
 
     var view = Viewport.init(w, h);
     const frame_rate = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate;
@@ -446,11 +450,6 @@ pub fn main() !void {
 
                 // FIXME: we currently assume colour space. We can't do that.
 
-                // Determine Colorspace
-                log.debug("colour space: {s}", .{c.av_color_space_name(frame.colorspace)});
-                log.debug("colour range: {s}", .{c.av_color_range_name(frame.color_range)});
-                log.debug("colour primaries: {s}", .{c.av_color_transfer_name(frame.color_trc)});
-
                 // A/V sync thresholds - tuned for both high refresh (120fps) and standard (60fps) content
                 // drop_behind: How far audio can get ahead before dropping video frames
                 //   - 2 frames gives some tolerance without visible desync
@@ -707,7 +706,7 @@ fn render(
     angle_calc.execute(view, tex);
 
     {
-        blur(res.blur(), res, view, tex, 4);
+        blur(res.blur(), res, view, tex, camera.colour_space, 4);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
@@ -788,17 +787,18 @@ fn render(
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
+        gl.Uniform1ui(gl.GetUniformLocation(prog, "u_colour_space"), camera.colour_space);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 }
 
-fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, comptime passes: u32) void {
+fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, colour_space: c.AVColorSpace, comptime passes: u32) void {
     if (passes == 0) return;
 
     std.debug.assert(passes & 1 == 0);
@@ -834,6 +834,7 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
     gl.Uniform1i(gl.GetUniformLocation(program, "u_screen"), 0);
     gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 1);
     gl.Uniform1i(gl.GetUniformLocation(program, "u_uv_tex"), 2);
+    gl.Uniform1ui(gl.GetUniformLocation(program, "u_colour_space"), colour_space);
 
     const horiz_loc = gl.GetUniformLocation(program, "u_horizontal");
     const use_nv12_loc = gl.GetUniformLocation(program, "u_use_nv12");
@@ -890,11 +891,12 @@ const Nv12Tex = struct { y: c_uint, uv: c_uint };
 
 const AngleCalc = struct {
     res: *const GpuResourceManager,
+    colour_space: c.AVColorSpace,
 
     const log = std.log.scoped(.angle_calc);
 
-    pub fn init(res: *const GpuResourceManager) !AngleCalc {
-        return .{ .res = res };
+    pub fn init(res: *const GpuResourceManager, colour_space: c.AVColorSpace) !AngleCalc {
+        return .{ .res = res, .colour_space = colour_space };
     }
 
     pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
@@ -921,6 +923,7 @@ const AngleCalc = struct {
 
         gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(program, "u_uv_tex"), 1);
+        gl.Uniform1ui(gl.GetUniformLocation(program, "u_colour_space"), self.colour_space);
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
@@ -936,9 +939,11 @@ const Camera = struct {
     scale: f32,
     inv_scale: f32,
 
+    colour_space: c.AVColorSpace,
+
     zoom: f32 = 1.45, // TODO: revert to 1.0
 
-    pub fn init(video_width: u32, video_height: u32, window_width: c_int, window_height: c_int) Camera {
+    pub fn init(video_width: u32, video_height: u32, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
         const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
 
@@ -959,6 +964,8 @@ const Camera = struct {
             .world_bounds = world_bounds,
             .window_size = .{ window_width, window_height },
             .video_aspect = video_aspect,
+
+            .colour_space = colour_space,
 
             .scale = scale,
             .inv_scale = inv_scale,
