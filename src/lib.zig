@@ -196,7 +196,7 @@ pub const GpuResourceManager = struct {
                     .blur => try opengl_impl.program("shader/blur.vert", "shader/blur.frag"),
                     .ring => try opengl_impl.program("shader/ring.vert", "shader/ring.frag"),
                     .circle => try opengl_impl.program("shader/ring.vert", "shader/circle.frag"),
-                    .angle => try opengl_impl.program("./shader/blur.vert", "./shader/rotation.frag"),
+                    .angle => try opengl_impl.program("shader/blur.vert", "shader/rotation.frag"),
                 };
             }
         }
@@ -473,6 +473,8 @@ pub fn sleep(ns: u64) void {
 }
 
 const opengl_impl = struct {
+    const log = std.log.scoped(.shader);
+
     fn program(comptime vert_path: []const u8, comptime frag_path: []const u8) !c_uint {
         const vert_shader: [1][*]const u8 = .{@embedFile(vert_path)[0..].ptr};
         const frag_shader: [1][*]const u8 = .{@embedFile(frag_path)[0..].ptr};
@@ -480,6 +482,7 @@ const opengl_impl = struct {
         const vs = gl.CreateShader(gl.VERTEX_SHADER);
         defer gl.DeleteShader(vs);
 
+        log.debug("compiling shader: {s}", .{vert_path});
         gl.ShaderSource(vs, 1, vert_shader[0..], null);
         gl.CompileShader(vs);
 
@@ -488,6 +491,7 @@ const opengl_impl = struct {
         const fs = gl.CreateShader(gl.FRAGMENT_SHADER);
         defer gl.DeleteShader(fs);
 
+        log.debug("compiling shader: {s}", .{frag_path});
         gl.ShaderSource(fs, 1, frag_shader[0..], null);
         gl.CompileShader(fs);
 
@@ -502,8 +506,6 @@ const opengl_impl = struct {
     }
 
     const shader = struct {
-        const log = std.log.scoped(.shader);
-
         fn didCompile(id: c_uint) bool {
             var success: c_int = undefined;
             gl.GetShaderiv(id, gl.COMPILE_STATUS, @ptrCast(&success));
