@@ -42,7 +42,7 @@ const UV_BPP = @import("lib.zig").UV_BPP;
 
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
-    .linux => c.AV_HWDEVICE_TYPE_VAAPI,
+    .linux => c.AV_HWDEVICE_TYPE_CUDA,
     .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
     // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?
@@ -157,7 +157,7 @@ pub fn main() !void {
                 .audio_ctx = audio_ctx,
                 .video_ctx = video_ctx,
             },
-        });
+        }, hw_device);
         defer encoder.deinit();
 
         // Initialize encoder

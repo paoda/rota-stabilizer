@@ -548,17 +548,21 @@ pub const Encoder = struct {
         };
     };
 
-    pub fn init(opt: Options) !Encoder {
-        return initHardware(opt);
+    pub fn init(opt: Options, device_type: ?c.AVHWDeviceType) !Encoder {
+        if (device_type) |kind| {
+            return initHardware(opt, kind);
+        } else {
+            @panic("TODO: software encode");
+        }
     }
 
-    pub fn initHardware(opt: Options) !Encoder {
+    pub fn initHardware(opt: Options, device_type: c.AVHWDeviceType) !Encoder {
         const path = "output.mp4"; // TODO: this should be an argument
 
         var fmt_ctx = try enc.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
-        const codec = try AvCodec.fromName("hevc_vulkan");
+        const codec = AvCodec.find(device_type, c.AV_CODEC_ID_HEVC);
 
         var codec_ctx = try enc.AvCodecContext.init(codec, fmt_ctx, .{
             .width = @intCast(opt.width),
