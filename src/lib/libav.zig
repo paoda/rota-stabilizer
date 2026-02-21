@@ -113,7 +113,8 @@ pub const enc = struct {
             ctx.framerate = inpt_vid.*.avg_frame_rate;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
             ctx.pix_fmt = codec.pix_fmt;
-            ctx.bit_rate = 60_000 * KBPS_TO_BPS; // FIXME: configurable?
+            ctx.bit_rate = 30_000 * KBPS_TO_BPS; // FIXME: configurable?
+            ctx.gop_size = @intFromFloat(c.av_q2d(ctx.framerate) / 2);
 
             ctx.color_range = c.AVCOL_RANGE_MPEG;
             ctx.color_primaries = c.AVCOL_PRI_BT709;

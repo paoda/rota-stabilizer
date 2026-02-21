@@ -77,7 +77,7 @@ pub fn main() !void {
     const vid_width: u32 = @intCast(video_ctx.inner.?.width);
     const vid_height: u32 = @intCast(video_ctx.inner.?.height);
 
-    const ui = if (RENDER_MODE) try platform.createHeadless(1920, 1080) else try platform.createWindow(800, 800);
+    const ui = if (RENDER_MODE) try platform.createHeadless(1920, 1080) else try platform.createWindow(1280, 720);
     defer ui.deinit();
 
     var audio_clock = try AudioClock.init(audio_ctx);
