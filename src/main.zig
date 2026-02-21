@@ -20,8 +20,7 @@ const AudioClock = @import("lib/codec.zig").audio.Clock;
 const FrameQueue = @import("lib/codec.zig").FrameQueue;
 const DecodeContext = @import("lib/codec.zig").DecodeContext;
 
-const AvFormatContext = @import("lib/libav.zig").AvFormatContext;
-const AvCodecContext = @import("lib/libav.zig").AvCodecContext;
+const dec = @import("lib/libav.zig").dec;
 const AvFrame = @import("lib/libav.zig").AvFrame;
 const AvPacket = @import("lib/libav.zig").AvPacket;
 
@@ -58,23 +57,21 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    // tmp: testing frame capture
-    zstbi.init(allocator);
-    defer zstbi.deinit();
-
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
     _ = args.skip(); // self
     const path = args.next() orelse return error.missing_file;
 
-    var fmt_ctx = try AvFormatContext.init(path);
+    // TODO: move this to Decoder struct
+
+    var fmt_ctx = try dec.AvFormatContext.init(path);
     defer fmt_ctx.deinit();
 
-    var video_ctx = try AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
+    var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
     defer video_ctx.deinit(allocator);
 
-    var audio_ctx = try AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
+    var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
     defer audio_ctx.deinit(allocator);
 
     const vid_width: u32 = @intCast(video_ctx.inner.?.width);
@@ -155,10 +152,11 @@ pub fn main() !void {
         var encoder = try Encoder.init(.{
             .width = @intCast(view.width),
             .height = @intCast(view.height),
-            .fps = frame_rate,
-            .input_fmt_ctx = fmt_ctx.ptr(),
-            .input_video_stream = video_ctx.stream,
-            .input_audio_stream = audio_ctx.stream,
+            .input = .{
+                .fmt_ctx = fmt_ctx,
+                .audio_ctx = audio_ctx,
+                .video_ctx = video_ctx,
+            },
         });
         defer encoder.deinit();
 
@@ -400,18 +398,7 @@ pub fn main() !void {
 
                         log.debug("Window resized to {}x{}", .{ view.width, view.height });
                     },
-                    c.SDL_EVENT_KEY_DOWN => switch (event.key.scancode) {
-                        c.SDL_SCANCODE_P => {
-                            log.debug("saving screenshot", .{});
-                            var img: zstbi.Image = try .createEmpty(@intCast(view.width), @intCast(view.height), RGB24_BPP, .{});
-                            defer img.deinit();
-
-                            gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
-                            gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, img.data.ptr);
-
-                            zstbi.setFlipVerticallyOnWrite(true);
-                            try img.writeToFile("screenshot.png", .png);
-                        },
+                    c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
                         c.SDL_SCANCODE_M => {
                             try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
                         },
