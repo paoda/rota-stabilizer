@@ -530,8 +530,8 @@ pub const Encoder = struct {
     video_stream: enc.AvStream,
 
     _pkt: AvPacket,
-    _sw_frame: AvFrame,
-    _hw_frame: AvFrame,
+    _frame: AvFrame,
+    _hw: ?struct { frame: AvFrame } = null,
 
     const log = std.log.scoped(.encode);
 
@@ -549,20 +549,22 @@ pub const Encoder = struct {
     };
 
     pub fn init(opt: Options, device_type: ?c.AVHWDeviceType) !Encoder {
-        if (device_type) |kind| {
-            return initHardware(opt, kind);
-        } else {
-            @panic("TODO: software encode");
+        const path = "output.mp4";
+        const codec_id = c.AV_CODEC_ID_HEVC;
+
+        if (device_type) |dev| {
+            return initHardware(opt, dev, codec_id, path) catch blk: {
+                log.err("failed to set up hardware device, defaulting to software", .{});
+                break :blk initSoftware(opt, codec_id, path);
+            };
         }
+
+        return initSoftware(opt, codec_id, path);
     }
 
-    pub fn initHardware(opt: Options, device_type: c.AVHWDeviceType) !Encoder {
-        const path = "output.mp4"; // TODO: this should be an argument
-
+    fn initShared(opt: Options, codec: AvCodec, sw_pix_fmt: c.AVPixelFormat, path: []const u8) !Encoder {
         var fmt_ctx = try enc.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
-
-        const codec = AvCodec.find(device_type, c.AV_CODEC_ID_HEVC);
 
         var codec_ctx = try enc.AvCodecContext.init(codec, fmt_ctx, .{
             .width = @intCast(opt.width),
@@ -586,10 +588,9 @@ pub const Encoder = struct {
         _ = try libav.err(c.avcodec_parameters_from_context(video_stream.ptr().codecpar, codec_ctx.ptr()));
         video_stream.ptr().time_base = codec_ctx.ptr().time_base;
 
-        c.av_dump_format(fmt_ctx.ptr(), 0, path, 1);
+        c.av_dump_format(fmt_ctx.ptr(), 0, path.ptr, 1);
 
-        _ = try libav.err(c.avio_open(&fmt_ctx.ptr().pb, path, c.AVIO_FLAG_WRITE));
-
+        _ = try libav.err(c.avio_open(&fmt_ctx.ptr().pb, path.ptr, c.AVIO_FLAG_WRITE));
         _ = try libav.err(c.avformat_write_header(fmt_ctx.ptr(), null));
 
         return .{
@@ -602,7 +603,7 @@ pub const Encoder = struct {
             .video_stream = video_stream,
 
             ._pkt = try AvPacket.try_init(),
-            ._sw_frame = blk: {
+            ._frame = blk: {
                 var frame = try AvFrame.init();
                 errdefer frame.deinit();
 
@@ -613,11 +614,11 @@ pub const Encoder = struct {
                 ptr.color_trc = c.AVCOL_TRC_BT709;
                 ptr.colorspace = c.AVCOL_SPC_BT709;
 
-                try frame.setup(@intCast(opt.width), @intCast(opt.height), c.AV_PIX_FMT_NV12);
+                try frame.setup(@intCast(opt.width), @intCast(opt.height), sw_pix_fmt);
 
                 break :blk frame;
             },
-            ._hw_frame = try AvFrame.init(),
+            ._hw = if (codec.hw) |_| .{ .frame = try AvFrame.init() } else null,
             .sws_ctx = blk: {
                 const ptr: ?*c.SwsContext = c.sws_getContext(
                     @intCast(opt.width),
@@ -625,7 +626,7 @@ pub const Encoder = struct {
                     c.AV_PIX_FMT_RGB24,
                     @intCast(opt.width),
                     @intCast(opt.height),
-                    c.AV_PIX_FMT_NV12,
+                    sw_pix_fmt,
                     c.SWS_POINT,
                     null,
                     null,
@@ -637,13 +638,22 @@ pub const Encoder = struct {
         };
     }
 
+    fn initHardware(opt: Options, device_type: c.AVHWDeviceType, codec_id: c.AVCodecID, path: []const u8) !Encoder {
+        const codec = AvCodec.findHardware(device_type, codec_id) orelse return initSoftware(opt, codec_id, path);
+        return initShared(opt, codec, c.AV_PIX_FMT_NV12, path);
+    }
+
+    fn initSoftware(opt: Options, codec_id: c.AVCodecID, path: []const u8) !Encoder {
+        const codec = AvCodec.findSoftware(codec_id);
+        return initShared(opt, codec, codec.pix_fmt, path);
+    }
+
     pub fn encodeRgbFrame(self: *Encoder, buf: []const u8, frame_pts: i64) !void {
         @setRuntimeSafety(false);
 
-        const sw_frame = self._sw_frame.ptr();
-        const hw_frame = self._hw_frame.ptr();
-
+        const sw_frame = self._frame.ptr();
         _ = try libav.err(c.av_frame_make_writable(sw_frame));
+
         const stride: usize = self.width * 3;
 
         var src_frame: c.AVFrame = .{
@@ -658,12 +668,18 @@ pub const Encoder = struct {
         _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, &src_frame));
         sw_frame.pts = frame_pts;
 
-        c.av_frame_unref(hw_frame);
-        _ = try libav.err(c.av_hwframe_get_buffer(self.codec_ctx.ptr().hw_frames_ctx, hw_frame, 0));
-        _ = try libav.err(c.av_hwframe_transfer_data(hw_frame, sw_frame, 0));
-        _ = try libav.err(c.av_frame_copy_props(hw_frame, sw_frame));
+        if (self._hw) |hw| {
+            const hw_frame = hw.frame.ptr();
 
-        try self.writeVideoFrame(hw_frame);
+            c.av_frame_unref(hw_frame);
+            _ = try libav.err(c.av_hwframe_get_buffer(self.codec_ctx.ptr().hw_frames_ctx, hw_frame, 0));
+            _ = try libav.err(c.av_hwframe_transfer_data(hw_frame, sw_frame, 0));
+            _ = try libav.err(c.av_frame_copy_props(hw_frame, sw_frame));
+
+            try self.writeVideoFrame(hw_frame);
+        } else {
+            try self.writeVideoFrame(sw_frame);
+        }
     }
 
     pub fn writeAudioPacket(self: *Encoder, in: *c.AVStream, pkt: *c.AVPacket) !void {
@@ -701,8 +717,8 @@ pub const Encoder = struct {
         self.writeVideoFrame(null) catch @panic("failed to flush encoder");
         _ = c.av_write_trailer(self.fmt_ctx.ptr());
 
-        self._sw_frame.deinit();
-        self._hw_frame.deinit();
+        self._frame.deinit();
+        if (self._hw) |*hw| hw.frame.deinit();
         self._pkt.deinit();
 
         self.codec_ctx.deinit();

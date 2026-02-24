@@ -82,7 +82,7 @@ pub const enc = struct {
     pub const AvCodecContext = struct {
         inner: ?*c.AVCodecContext,
 
-        hw_device_ctx: AvHwDeviceContext,
+        hw: ?struct { dev_ctx: AvHwDeviceContext } = null,
 
         const Options = struct {
             // Viewport of the video that will be encoded
@@ -125,16 +125,16 @@ pub const enc = struct {
                 ctx.flags |= c.AV_CODEC_FLAG_GLOBAL_HEADER;
             }
 
-            // AvHwDeviceContext
-            var hw_device_ctx = try AvHwDeviceContext.init(codec.device_type);
-            errdefer hw_device_ctx.deinit();
+            if (codec.hw) |hw| {
+                var dev_ctx = try AvHwDeviceContext.init(hw.dev_type);
+                errdefer dev_ctx.deinit();
 
-            try setHwframeContext(p.?, hw_device_ctx, codec.pix_fmt);
+                try setHwframeContext(p.?, dev_ctx, codec.pix_fmt);
 
-            return .{
-                .inner = p,
-                .hw_device_ctx = hw_device_ctx,
-            };
+                return .{ .inner = p, .hw = .{ .dev_ctx = dev_ctx } };
+            }
+
+            return .{ .inner = p };
         }
 
         pub fn ptr(self: AvCodecContext) *c.AVCodecContext {
@@ -158,7 +158,8 @@ pub const enc = struct {
 
         pub fn deinit(self: *AvCodecContext) void {
             // FIXME: do we need to call av_buffer_unref on codec.hw_frames_ctx?
-            self.hw_device_ctx.deinit();
+
+            if (self.hw) |*hw| hw.dev_ctx.deinit();
             c.avcodec_free_context(&self.inner);
         }
     };
@@ -174,7 +175,7 @@ pub const dec = struct {
 
         device: ?Device = null, //TODO: move Device to inside this struct
 
-        const log = std.log.scoped(.codec);
+        const log = std.log.scoped(.decode);
 
         // FIXME: why is this heap allocated?
         pub fn init(allocator: std.mem.Allocator, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) !*AvCodecContext {
@@ -183,9 +184,8 @@ pub const dec = struct {
             if (kind == .video) blk: {
                 const device_type = opt.dev_type orelse break :blk;
 
-                self.initHardware(fmt_ctx, device_type) catch |e| {
-                    log.err("failed to set up hardware context: {}", .{e});
-                    break :blk log.warn("defaulting to software", .{});
+                self.initHardware(fmt_ctx, device_type) catch {
+                    break :blk log.err("failed to set up hardware device, defaulting to software", .{});
                 };
 
                 self.device.?.configure();
@@ -384,11 +384,26 @@ pub const AvCodec = struct {
     inner: ?*const c.AVCodec,
 
     pix_fmt: c.AVPixelFormat,
-    device_type: c.AVHWDeviceType,
+
+    hw: ?struct { dev_type: c.AVHWDeviceType } = null,
 
     const log = std.log.scoped(.codec);
 
-    pub fn find(@"type": c.AVHWDeviceType, codec_id: c.AVCodecID) AvCodec {
+    pub fn findSoftware(codec_id: c.AVCodecID) AvCodec {
+        const codec = c.avcodec_find_encoder(codec_id);
+        const ideal_fmt = c.AV_PIX_FMT_RGB24;
+
+        const pix_fmts: [*]const c.AVPixelFormat = @as(?[*]const c.AVPixelFormat, codec.*.pix_fmts) orelse @panic("FIXME: no supported sw encode pix fmt?");
+
+        var i: usize = 0;
+        while (pix_fmts[i] != c.AV_PIX_FMT_NONE) : (i += 1) {
+            if (pix_fmts[i] == ideal_fmt) return .{ .inner = codec, .pix_fmt = ideal_fmt };
+        }
+
+        return .{ .inner = codec, .pix_fmt = pix_fmts[0] };
+    }
+
+    pub fn findHardware(dev_type: c.AVHWDeviceType, codec_id: c.AVCodecID) ?AvCodec {
         log.debug("search for hardware encoder", .{});
         const av_codec_iterate = struct {
             fn inner(idx: *?*anyopaque) ?*const c.AVCodec {
@@ -405,20 +420,21 @@ pub const AvCodec = struct {
                 const config: *const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec, @intCast(j)) orelse break;
 
                 if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX == 0) continue;
-                if (config.device_type != @"type") continue;
+                if (config.device_type != dev_type) continue;
 
-                log.info("found {s} encoder for {s} ", .{ c.av_hwdevice_get_type_name(@"type"), codec.name });
-                return .{ .inner = codec, .pix_fmt = config.pix_fmt, .device_type = @"type" };
+                log.info("found {s} encoder for {s} ", .{ c.av_hwdevice_get_type_name(dev_type), codec.name });
+                return .{ .inner = codec, .pix_fmt = config.pix_fmt, .hw = .{ .dev_type = dev_type } };
             }
         }
 
-        @panic("TODO: Try H.264? If not, then software encode");
+        return null; // try for software encoder
     }
 
     pub fn ptr(self: AvCodec) *const c.AVCodec {
         return self.inner.?;
     }
 };
+
 pub inline fn err(value: c_int) error{ffmpeg_error}!c_int {
     if (value >= 0) return value;
     var buf: [0x100]u8 = undefined;
