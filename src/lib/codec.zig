@@ -9,7 +9,6 @@ const LinearFifo = @import("fifo.zig").LinearFifo(*c.AVPacket, .dynamic);
 const enc = @import("libav.zig").enc;
 const dec = @import("libav.zig").dec;
 
-const AvCodec = @import("libav.zig").AvCodec;
 const AvPacket = @import("libav.zig").AvPacket;
 const AvFrame = @import("libav.zig").AvFrame;
 
@@ -562,7 +561,7 @@ pub const Encoder = struct {
         return initSoftware(opt, codec_id, path);
     }
 
-    fn initShared(opt: Options, codec: AvCodec, sw_pix_fmt: c.AVPixelFormat, path: []const u8) !Encoder {
+    fn initShared(opt: Options, codec: enc.AvCodec, sw_pix_fmt: c.AVPixelFormat, path: []const u8) !Encoder {
         var fmt_ctx = try enc.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
@@ -639,12 +638,12 @@ pub const Encoder = struct {
     }
 
     fn initHardware(opt: Options, device_type: c.AVHWDeviceType, codec_id: c.AVCodecID, path: []const u8) !Encoder {
-        const codec = AvCodec.findHardware(device_type, codec_id) orelse return initSoftware(opt, codec_id, path);
+        const codec = enc.AvCodec.findHardware(device_type, codec_id) orelse return initSoftware(opt, codec_id, path);
         return initShared(opt, codec, c.AV_PIX_FMT_NV12, path);
     }
 
     fn initSoftware(opt: Options, codec_id: c.AVCodecID, path: []const u8) !Encoder {
-        const codec = AvCodec.findSoftware(codec_id);
+        const codec = enc.AvCodec.findSoftware(codec_id);
         return initShared(opt, codec, codec.pix_fmt, path);
     }
 

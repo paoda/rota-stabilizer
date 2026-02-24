@@ -42,7 +42,7 @@ const UV_BPP = @import("lib.zig").UV_BPP;
 
 /// set to enable hardware decoding
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
-    .linux => c.AV_HWDEVICE_TYPE_CUDA,
+    .linux => c.AV_HWDEVICE_TYPE_VULKAN,
     .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
     // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
     else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?

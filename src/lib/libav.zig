@@ -3,6 +3,61 @@ const std = @import("std");
 const c = @import("../lib.zig").c;
 
 pub const enc = struct {
+    const log = std.log.scoped(.encode);
+
+    pub const AvCodec = struct {
+        inner: ?*const c.AVCodec,
+
+        pix_fmt: c.AVPixelFormat,
+
+        hw: ?struct { dev_type: c.AVHWDeviceType } = null,
+
+        pub fn findSoftware(codec_id: c.AVCodecID) AvCodec {
+            const codec = c.avcodec_find_encoder(codec_id);
+            const ideal_fmt = c.AV_PIX_FMT_RGB24;
+
+            const pix_fmts: [*]const c.AVPixelFormat = @as(?[*]const c.AVPixelFormat, codec.*.pix_fmts) orelse @panic("FIXME: no supported sw encode pix fmt?");
+
+            var i: usize = 0;
+            while (pix_fmts[i] != c.AV_PIX_FMT_NONE) : (i += 1) {
+                if (pix_fmts[i] == ideal_fmt) return .{ .inner = codec, .pix_fmt = ideal_fmt };
+            }
+
+            return .{ .inner = codec, .pix_fmt = pix_fmts[0] };
+        }
+
+        pub fn findHardware(dev_type: c.AVHWDeviceType, codec_id: c.AVCodecID) ?AvCodec {
+            log.debug("search for hardware encoder", .{});
+            const av_codec_iterate = struct {
+                fn inner(idx: *?*anyopaque) ?*const c.AVCodec {
+                    return c.av_codec_iterate(idx);
+                }
+            }.inner;
+
+            var i: ?*anyopaque = null;
+            while (av_codec_iterate(&i)) |codec| {
+                if (c.av_codec_is_encoder(codec) == 0) continue;
+                if (codec.id != codec_id) continue;
+
+                for (0..0x100) |j| { // FIXME: some arbitrary limit
+                    const config: *const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec, @intCast(j)) orelse break;
+
+                    if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX == 0) continue;
+                    if (config.device_type != dev_type) continue;
+
+                    log.info("found {s} encoder for {s} ", .{ c.av_hwdevice_get_type_name(dev_type), codec.name });
+                    return .{ .inner = codec, .pix_fmt = config.pix_fmt, .hw = .{ .dev_type = dev_type } };
+                }
+            }
+
+            return null; // try for software encoder
+        }
+
+        pub fn ptr(self: AvCodec) *const c.AVCodec {
+            return self.inner.?;
+        }
+    };
+
     pub const AvFormatContext = struct {
         inner: ?*c.AVFormatContext,
 
@@ -166,6 +221,8 @@ pub const enc = struct {
 };
 
 pub const dec = struct {
+    const log = std.log.scoped(.decode);
+
     pub const AvCodecContext = struct {
         const Kind = enum { video, audio };
         const Options = struct { dev_type: ?c.AVHWDeviceType = null };
@@ -174,8 +231,6 @@ pub const dec = struct {
         stream: c_int,
 
         device: ?Device = null, //TODO: move Device to inside this struct
-
-        const log = std.log.scoped(.decode);
 
         // FIXME: why is this heap allocated?
         pub fn init(allocator: std.mem.Allocator, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) !*AvCodecContext {
@@ -376,61 +431,6 @@ pub const AvFrame = struct {
     }
 
     pub fn ptr(self: @This()) *c.AVFrame {
-        return self.inner.?;
-    }
-};
-
-pub const AvCodec = struct {
-    inner: ?*const c.AVCodec,
-
-    pix_fmt: c.AVPixelFormat,
-
-    hw: ?struct { dev_type: c.AVHWDeviceType } = null,
-
-    const log = std.log.scoped(.codec);
-
-    pub fn findSoftware(codec_id: c.AVCodecID) AvCodec {
-        const codec = c.avcodec_find_encoder(codec_id);
-        const ideal_fmt = c.AV_PIX_FMT_RGB24;
-
-        const pix_fmts: [*]const c.AVPixelFormat = @as(?[*]const c.AVPixelFormat, codec.*.pix_fmts) orelse @panic("FIXME: no supported sw encode pix fmt?");
-
-        var i: usize = 0;
-        while (pix_fmts[i] != c.AV_PIX_FMT_NONE) : (i += 1) {
-            if (pix_fmts[i] == ideal_fmt) return .{ .inner = codec, .pix_fmt = ideal_fmt };
-        }
-
-        return .{ .inner = codec, .pix_fmt = pix_fmts[0] };
-    }
-
-    pub fn findHardware(dev_type: c.AVHWDeviceType, codec_id: c.AVCodecID) ?AvCodec {
-        log.debug("search for hardware encoder", .{});
-        const av_codec_iterate = struct {
-            fn inner(idx: *?*anyopaque) ?*const c.AVCodec {
-                return c.av_codec_iterate(idx);
-            }
-        }.inner;
-
-        var i: ?*anyopaque = null;
-        while (av_codec_iterate(&i)) |codec| {
-            if (c.av_codec_is_encoder(codec) == 0) continue;
-            if (codec.id != codec_id) continue;
-
-            for (0..0x100) |j| { // FIXME: some arbitrary limit
-                const config: *const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec, @intCast(j)) orelse break;
-
-                if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX == 0) continue;
-                if (config.device_type != dev_type) continue;
-
-                log.info("found {s} encoder for {s} ", .{ c.av_hwdevice_get_type_name(dev_type), codec.name });
-                return .{ .inner = codec, .pix_fmt = config.pix_fmt, .hw = .{ .dev_type = dev_type } };
-            }
-        }
-
-        return null; // try for software encoder
-    }
-
-    pub fn ptr(self: AvCodec) *const c.AVCodec {
         return self.inner.?;
     }
 };
