@@ -4,9 +4,6 @@ const gl = @import("gl");
 const clap = @import("clap");
 
 const c = @import("lib.zig").c;
-const video = @import("lib/codec.zig").video;
-const audio = @import("lib/codec.zig").audio;
-const packet = @import("lib/codec.zig").packet;
 const platform = @import("lib/platform.zig");
 
 const Encoder = @import("lib/codec.zig").Encoder;
@@ -14,8 +11,6 @@ const Decoder = @import("lib/codec.zig").Decoder;
 
 const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const BlurManager = @import("lib.zig").BlurManager;
-
-const Ui = @import("lib/platform.zig").Ui;
 
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
