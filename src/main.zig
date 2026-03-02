@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gl = @import("gl");
-const zstbi = @import("zstbi");
+const clap = @import("clap");
 
 const c = @import("lib.zig").c;
 const video = @import("lib/codec.zig").video;
@@ -33,10 +33,6 @@ const sleep = @import("lib.zig").sleep;
 
 const RGB24_BPP = @import("lib.zig").RGB24_BPP;
 
-// ===== MODE SWITCH =====
-// Set to true to render to file instead of realtime playback
-const RENDER_MODE = true;
-
 const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
@@ -57,15 +53,30 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help            Display this help and exit.
+        \\-r, --render <str>    Render video to file.
+        \\<str>                 Path to source video.
+        \\
+    );
 
-    _ = args.skip(); // self
-    const path = args.next() orelse return error.missing_file;
+    var diag: clap.Diagnostic = .{};
+    var cli = clap.parse(clap.Help, &params, clap.parsers.default, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| {
+        try diag.reportToFile(.stderr(), err);
+        return; // TODO: What's going on with types here?
+    };
+    defer cli.deinit();
+
+    if (cli.args.help != 0)
+        return clap.helpToFile(.stdout(), clap.Help, &params, .{});
+
+    const src_path = cli.positionals[0] orelse return error.missing_file;
 
     // TODO: move this to Decoder struct
-
-    var fmt_ctx = try dec.AvFormatContext.init(path);
+    var fmt_ctx = try dec.AvFormatContext.init(src_path);
     defer fmt_ctx.deinit();
 
     var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
@@ -77,7 +88,7 @@ pub fn main() !void {
     const vid_width: u32 = @intCast(video_ctx.inner.?.width);
     const vid_height: u32 = @intCast(video_ctx.inner.?.height);
 
-    const ui = if (RENDER_MODE) try platform.createHeadless(1920, 1080) else try platform.createWindow(1280, 720);
+    const ui = if (cli.args.render) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1280, 720);
     defer ui.deinit();
 
     var audio_clock = try AudioClock.init(audio_ctx);
@@ -130,7 +141,7 @@ pub fn main() !void {
     defer video_decode.join();
 
     // In render mode, we consume audio packets directly instead of decoding for playback
-    const audio_decode: ?std.Thread = if (!RENDER_MODE) try std.Thread.spawn(.{}, audio.decode, .{ &audio_clock, &audio_pkt_queue, aud_decode }) else null;
+    const audio_decode: ?std.Thread = if (cli.args.render == null) try std.Thread.spawn(.{}, audio.decode, .{ &audio_clock, &audio_pkt_queue, aud_decode }) else null;
     defer if (audio_decode) |h| h.join();
 
     const w, const h = try ui.windowSize();
@@ -147,7 +158,9 @@ pub fn main() !void {
     // A/V Sync Debug State
     var frame_count: u64 = 0;
 
-    if (RENDER_MODE) {
+    if (cli.args.render) |dst_path| {
+        log.debug("destination path: {s}", .{dst_path});
+
         // Initialize encoder
         var encoder = try Encoder.init(.{
             .width = @intCast(view.width),
@@ -596,10 +609,6 @@ pub fn main() !void {
             try ui.swap();
         }
     } // end of RENDER_MODE else block
-
-    if (RENDER_MODE) {
-        log.info("Render completed successfully", .{});
-    }
 }
 
 const DoubleBuffer = struct {

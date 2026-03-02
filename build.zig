@@ -65,6 +65,9 @@ pub fn build(b: *std.Build) !void {
     const gl_mod = @import("zigglgen").generateBindingsModule(b, .{ .api = .gl, .version = .@"3.3", .profile = .core });
     exe_mod.addImport("gl", gl_mod);
 
+    const clap = b.dependency("clap", .{});
+    exe_mod.addImport("clap", clap.module("clap"));
+
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{
