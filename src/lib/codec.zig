@@ -697,17 +697,10 @@ pub const Encoder = struct {
         width: u32,
         height: u32,
 
-        input: Input,
-
-        const Input = struct {
-            fmt_ctx: dec.AvFormatContext,
-            audio_ctx: *const dec.AvCodecContext,
-            video_ctx: *const dec.AvCodecContext,
-        };
+        decoder: *const Decoder,
     };
 
-    pub fn init(opt: Options, device_type: ?c.AVHWDeviceType) !Encoder {
-        const path = "output.mp4";
+    pub fn init(opt: Options, device_type: ?c.AVHWDeviceType, path: []const u8) !Encoder {
         const codec_id = c.AV_CODEC_ID_HEVC;
 
         if (device_type) |dev| {
@@ -728,15 +721,15 @@ pub const Encoder = struct {
             .width = @intCast(opt.width),
             .height = @intCast(opt.height),
             .input = .{
-                .fmt_ctx = opt.input.fmt_ctx,
-                .video_ctx = opt.input.video_ctx,
+                .fmt_ctx = opt.decoder.fmt_ctx,
+                .video_ctx = opt.decoder.video_ctx,
             },
         });
         errdefer codec_ctx.deinit();
 
         _ = try libav.err(c.avcodec_open2(codec_ctx.ptr(), codec.ptr(), null));
 
-        const input_audio = opt.input.fmt_ctx.ptr().streams[@intCast(opt.input.audio_ctx.stream)];
+        const input_audio = opt.decoder.stream(.audio);
 
         const audio_stream = try enc.AvStream.init(fmt_ctx);
         _ = try libav.err(c.avcodec_parameters_copy(audio_stream.ptr().codecpar, input_audio.*.codecpar));

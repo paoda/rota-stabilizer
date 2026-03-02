@@ -92,48 +92,33 @@ pub fn main() !void {
 
     const frame_rate = decoder.framerate();
     const frame_period = 1.0 / c.av_q2d(frame_rate);
-
-    // A/V Sync Debug State
-    var frame_count: u64 = 0;
+    var frame_count: u64 = 0; // A/V Debug State
 
     const handles = try decoder.spawn(cli.args.render);
     defer handles.deinit();
 
     if (cli.args.render) |dst_path| {
-        log.debug("destination path: {s}", .{dst_path});
-
         // Initialize encoder
         var encoder = try Encoder.init(.{
             .width = @intCast(view.width),
             .height = @intCast(view.height),
-            .input = .{
-                .fmt_ctx = decoder.fmt_ctx, // TODO: replace with ptr to Decoder
-                .audio_ctx = decoder.audio_ctx,
-                .video_ctx = decoder.video_ctx,
-            },
-        }, hw_device);
+            .decoder = &decoder,
+        }, hw_device, dst_path);
         defer encoder.deinit();
 
         const render_start_time = c.SDL_GetPerformanceCounter();
         const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
 
-        // Get estimated total frames for progress
-
         const video_stream = decoder.stream(.video);
         const audio_stream = decoder.stream(.audio);
 
         const estimated_frames: usize = blk: {
-            // Try nb_frames first
-            if (video_stream.*.nb_frames > 0) {
-                break :blk @intCast(video_stream.*.nb_frames);
-            }
-            // Fall back to estimating from duration
-            if (decoder.fmt_ctx.ptr().duration > 0) {
-                const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
-                const fps = c.av_q2d(frame_rate);
-                break :blk @intFromFloat(duration_secs * fps);
-            }
-            break :blk 0; // Unknown
+            if (video_stream.nb_frames > 0) break :blk @intCast(video_stream.nb_frames);
+            if (decoder.fmt_ctx.ptr().duration <= 0) break :blk 0;
+
+            // estimate from duration
+            const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
+            break :blk @intFromFloat(duration_secs * c.av_q2d(frame_rate));
         };
 
         // Initialize progress
@@ -163,7 +148,6 @@ pub fn main() !void {
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
 
         while (!decoder.should_quit.load(.monotonic)) {
-            // No event polling needed - window is hidden in render mode
 
             // Process any pending audio packets (remux to output)
             while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
@@ -536,7 +520,7 @@ pub fn main() !void {
                     try decoder.audio_clock.start(first_frame_pts);
                 }
             } else {
-                // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
+                log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
                 continue;
             }
 
