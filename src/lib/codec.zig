@@ -516,6 +516,165 @@ pub const FrameQueue = struct {
     }
 };
 
+pub const Decoder = struct {
+    const PacketQueue = packet.Queue;
+    const AudioClock = audio.Clock;
+
+    fmt_ctx: dec.AvFormatContext,
+
+    video_ctx: *dec.AvCodecContext,
+    audio_ctx: *dec.AvCodecContext,
+
+    queue: Queues,
+
+    audio_clock: AudioClock,
+
+    should_quit: std.atomic.Value(bool) = .init(false),
+
+    // Important Information
+    colour_space: c.AVColorSpace,
+    dimensions: struct { u32, u32 },
+
+    const Queues = struct {
+        frame: FrameQueue,
+        pkt: struct { audio: PacketQueue, video: PacketQueue },
+
+        fn deinit(self: *Queues, allocator: std.mem.Allocator) void {
+            self.pkt.audio.deinit(allocator);
+            self.pkt.video.deinit(allocator);
+            self.frame.deinit(allocator);
+        }
+    };
+
+    const Handles = struct {
+        pkt: std.Thread,
+        audio: ?std.Thread,
+        video: std.Thread,
+
+        pub fn deinit(self: Handles) void {
+            self.pkt.join();
+            self.video.join();
+
+            if (self.audio) |a| a.join();
+        }
+    };
+
+    const log = std.log.scoped(.decode);
+
+    pub fn init(allocator: std.mem.Allocator, hw_device: ?c.AVHWDeviceType, path: []const u8) !Decoder {
+        var fmt_ctx = try dec.AvFormatContext.init(path);
+        errdefer fmt_ctx.deinit();
+
+        var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
+        errdefer video_ctx.deinit(allocator);
+
+        log.debug("colour space: {s}", .{c.av_color_space_name(video_ctx.inner.?.colorspace)});
+
+        var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
+        errdefer audio_ctx.deinit(allocator);
+
+        var frame_queue = try FrameQueue.init(allocator, 0x80); // 1s at 120fps?
+        errdefer frame_queue.deinit(allocator);
+
+        var video_queue = PacketQueue.init(allocator);
+        errdefer video_queue.deinit(allocator);
+
+        var audio_queue = PacketQueue.init(allocator);
+        errdefer audio_queue.deinit(allocator);
+
+        var audio_clock = try AudioClock.init(audio_ctx);
+        errdefer audio_clock.deinit();
+
+        return .{
+            .fmt_ctx = fmt_ctx,
+            .video_ctx = video_ctx,
+            .audio_ctx = audio_ctx,
+            .queue = .{
+                .frame = frame_queue,
+                .pkt = .{
+                    .video = video_queue,
+                    .audio = audio_queue,
+                },
+            },
+            .audio_clock = audio_clock,
+            .colour_space = video_ctx.inner.?.colorspace,
+            .dimensions = .{ @intCast(video_ctx.inner.?.width), @intCast(video_ctx.inner.?.height) },
+        };
+    }
+
+    pub fn framerate(self: Decoder) c.AVRational {
+        return self.fmt_ctx.ptr().streams[@intCast(self.video_ctx.stream)].*.avg_frame_rate;
+    }
+
+    const StreamKind = enum { audio, video };
+
+    pub fn stream(self: Decoder, comptime kind: StreamKind) *c.AVStream {
+        return self.fmt_ctx.ptr().streams[
+            switch (kind) {
+                .audio => @intCast(self.audio_ctx.stream),
+                .video => @intCast(self.video_ctx.stream),
+            }
+        ];
+    }
+
+    pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
+        self.audio_clock.deinit();
+        self.queue.deinit(allocator);
+
+        self.audio_ctx.deinit(allocator);
+        self.video_ctx.deinit(allocator);
+
+        self.fmt_ctx.deinit();
+    }
+
+    pub fn spawn(self: *Decoder, render: ?[]const u8) !Handles {
+        const opts: packet.ReadOptions = .{
+            .video_stream = self.video_ctx.stream,
+            .audio_stream = self.audio_ctx.stream,
+            .should_quit = &self.should_quit,
+        };
+
+        const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{
+            &self.queue.pkt.video, // TODO: combine these args
+            &self.queue.pkt.audio,
+            self.fmt_ctx,
+            opts,
+        });
+
+        const vid_ctx: DecodeContext = .{
+            .codec_ctx = self.video_ctx,
+            .fmt_ctx = self.fmt_ctx,
+            .should_quit = &self.should_quit,
+        };
+
+        const video_handle = try std.Thread.spawn(.{}, video.decode, .{
+            &self.queue.frame,
+            &self.queue.pkt.video,
+            vid_ctx,
+        });
+
+        const audio_handle = if (render) |_| null else blk: {
+            const aud_ctx: DecodeContext = .{
+                .codec_ctx = self.audio_ctx,
+                .fmt_ctx = self.fmt_ctx,
+                .should_quit = &self.should_quit,
+            };
+
+            break :blk try std.Thread.spawn(.{}, audio.decode, .{
+                &self.audio_clock,
+                &self.queue.pkt.audio,
+                aud_ctx,
+            });
+        };
+
+        return .{
+            .pkt = pkt_handle,
+            .video = video_handle,
+            .audio = audio_handle,
+        };
+    }
+};
+
 pub const Encoder = struct {
     width: u32,
     height: u32,

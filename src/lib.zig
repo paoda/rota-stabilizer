@@ -54,6 +54,8 @@ pub const GpuResourceManager = struct {
     meta: Metadata,
     allocator: std.mem.Allocator,
 
+    const log = std.log.scoped(.gpu);
+
     const Metadata = struct {
         circle_len: usize,
         circle_radius: f32,
@@ -212,10 +214,20 @@ pub const GpuResourceManager = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) !*GpuResourceManager {
+    pub fn init(allocator: std.mem.Allocator, dimensions: struct { u32, u32 }) !*GpuResourceManager {
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
         manager.allocator = allocator;
+
+        const width, const height = dimensions;
+
+        {
+            const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+            const gcd = std.math.gcd(width, height);
+
+            log.debug("Resolution: {}x{}", .{ width, height });
+            log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ width / gcd, height / gcd, aspect });
+        }
 
         manager.vao.init();
         manager.vbo.init();

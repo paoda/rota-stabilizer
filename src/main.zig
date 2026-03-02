@@ -8,21 +8,14 @@ const video = @import("lib/codec.zig").video;
 const audio = @import("lib/codec.zig").audio;
 const packet = @import("lib/codec.zig").packet;
 const platform = @import("lib/platform.zig");
+
 const Encoder = @import("lib/codec.zig").Encoder;
+const Decoder = @import("lib/codec.zig").Decoder;
 
 const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const BlurManager = @import("lib.zig").BlurManager;
 
 const Ui = @import("lib/platform.zig").Ui;
-
-const PacketQueue = @import("lib/codec.zig").packet.Queue;
-const AudioClock = @import("lib/codec.zig").audio.Clock;
-const FrameQueue = @import("lib/codec.zig").FrameQueue;
-const DecodeContext = @import("lib/codec.zig").DecodeContext;
-
-const dec = @import("lib/libav.zig").dec;
-const AvFrame = @import("lib/libav.zig").AvFrame;
-const AvPacket = @import("lib/libav.zig").AvPacket;
 
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
@@ -64,35 +57,18 @@ pub fn main() !void {
     var cli = clap.parse(clap.Help, &params, clap.parsers.default, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| {
-        try diag.reportToFile(.stderr(), err);
-        return; // TODO: What's going on with types here?
-    };
+    }) catch |err| return diag.reportToFile(.stderr(), err);
     defer cli.deinit();
 
-    if (cli.args.help != 0)
-        return clap.helpToFile(.stdout(), clap.Help, &params, .{});
+    if (cli.args.help != 0) return clap.helpToFile(.stdout(), clap.Help, &params, .{});
 
-    const src_path = cli.positionals[0] orelse return error.missing_file;
-
-    // TODO: move this to Decoder struct
-    var fmt_ctx = try dec.AvFormatContext.init(src_path);
-    defer fmt_ctx.deinit();
-
-    var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
-    defer video_ctx.deinit(allocator);
-
-    var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
-    defer audio_ctx.deinit(allocator);
-
-    const vid_width: u32 = @intCast(video_ctx.inner.?.width);
-    const vid_height: u32 = @intCast(video_ctx.inner.?.height);
-
-    const ui = if (cli.args.render) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1280, 720);
+    const ui = if (cli.args.render) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1600, 900);
     defer ui.deinit();
 
-    var audio_clock = try AudioClock.init(audio_ctx);
-    defer audio_clock.deinit();
+    const src_path = cli.positionals[0] orelse return error.missing_path;
+
+    var decoder = try Decoder.init(allocator, hw_device, src_path);
+    defer decoder.deinit(allocator);
 
     // -- opengl --
     log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
@@ -103,60 +79,25 @@ pub fn main() !void {
     gl.Disable(gl.FRAMEBUFFER_SRGB);
     _ = c.SDL_GL_SetSwapInterval(0);
 
-    var res = try GpuResourceManager.init(allocator, vid_width, vid_height);
+    var res = try GpuResourceManager.init(allocator, decoder.dimensions);
     defer res.deinit();
 
-    const aspect = @as(f32, @floatFromInt(vid_width)) / @as(f32, @floatFromInt(vid_height));
-
-    {
-        const gcd = std.math.gcd(vid_width, vid_height);
-        log.debug("Resolution: {}x{}", .{ vid_width, vid_height });
-        log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ vid_width / gcd, vid_height / gcd, aspect });
-    }
-
     var stable_buffer = DoubleBuffer.init(res);
-    const angle_calc = try AngleCalc.init(res, video_ctx.inner.?.colorspace);
-
-    // -- opengl end --
-    var queue = try FrameQueue.init(allocator, 0x80); // 1s at 120fps?
-    defer queue.deinit(allocator);
-
-    var should_quit: std.atomic.Value(bool) = .init(false);
-
-    var video_pkt_queue = PacketQueue.init(allocator);
-    defer video_pkt_queue.deinit(allocator);
-
-    var audio_pkt_queue = PacketQueue.init(allocator);
-    defer audio_pkt_queue.deinit(allocator);
-
-    const read_opts: packet.ReadOptions = .{ .video_stream = video_ctx.stream, .audio_stream = audio_ctx.stream, .should_quit = &should_quit };
-
-    const vid_decode: DecodeContext = .{ .codec_ctx = video_ctx, .fmt_ctx = fmt_ctx, .should_quit = &should_quit };
-    const aud_decode: DecodeContext = .{ .codec_ctx = audio_ctx, .fmt_ctx = fmt_ctx, .should_quit = &should_quit };
-
-    const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{ &video_pkt_queue, &audio_pkt_queue, fmt_ctx, read_opts });
-    defer pkt_handle.join();
-
-    const video_decode = try std.Thread.spawn(.{}, video.decode, .{ &queue, &video_pkt_queue, vid_decode });
-    defer video_decode.join();
-
-    // In render mode, we consume audio packets directly instead of decoding for playback
-    const audio_decode: ?std.Thread = if (cli.args.render == null) try std.Thread.spawn(.{}, audio.decode, .{ &audio_clock, &audio_pkt_queue, aud_decode }) else null;
-    defer if (audio_decode) |h| h.join();
+    const angle_calc = try AngleCalc.init(res, decoder.colour_space);
 
     const w, const h = try ui.windowSize();
-    var camera = Camera.init(vid_width, vid_height, w, h, angle_calc.colour_space);
-
-    log.debug("colour space: {s}", .{c.av_color_space_name(video_ctx.inner.?.colorspace)});
-    log.debug("colour range: {s}", .{c.av_color_range_name(video_ctx.inner.?.color_range)});
-    log.debug("colour primaries: {s}", .{c.av_color_transfer_name(video_ctx.inner.?.color_trc)});
-
+    var camera = Camera.init(decoder.dimensions, w, h, decoder.colour_space);
     var view = Viewport.init(w, h);
-    const frame_rate = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.avg_frame_rate;
+    // -- opengl end --
+
+    const frame_rate = decoder.framerate();
     const frame_period = 1.0 / c.av_q2d(frame_rate);
 
     // A/V Sync Debug State
     var frame_count: u64 = 0;
+
+    const handles = try decoder.spawn(cli.args.render);
+    defer handles.deinit();
 
     if (cli.args.render) |dst_path| {
         log.debug("destination path: {s}", .{dst_path});
@@ -166,30 +107,20 @@ pub fn main() !void {
             .width = @intCast(view.width),
             .height = @intCast(view.height),
             .input = .{
-                .fmt_ctx = fmt_ctx,
-                .audio_ctx = audio_ctx,
-                .video_ctx = video_ctx,
+                .fmt_ctx = decoder.fmt_ctx, // TODO: replace with ptr to Decoder
+                .audio_ctx = decoder.audio_ctx,
+                .video_ctx = decoder.video_ctx,
             },
         }, hw_device);
         defer encoder.deinit();
-
-        // Initialize encoder
-        // var encoder = try Encoder.init(RENDER_OUTPUT_PATH, .{
-        //     .width = @intCast(view.width),
-        //     .height = @intCast(view.height),
-        //     .fps = frame_rate,
-        //     .input_fmt_ctx = fmt_ctx.ptr(),
-        //     .input_video_stream = video_ctx.stream,
-        //     .input_audio_stream = audio_ctx.stream,
-        // });
-        // defer encoder.deinit();
 
         const render_start_time = c.SDL_GetPerformanceCounter();
         const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
 
         // Get estimated total frames for progress
-        const video_stream = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)];
-        const audio_stream = fmt_ctx.ptr().streams[@intCast(audio_ctx.stream)];
+
+        const video_stream = decoder.stream(.video);
+        const audio_stream = decoder.stream(.audio);
 
         const estimated_frames: usize = blk: {
             // Try nb_frames first
@@ -197,8 +128,8 @@ pub fn main() !void {
                 break :blk @intCast(video_stream.*.nb_frames);
             }
             // Fall back to estimating from duration
-            if (fmt_ctx.ptr().duration > 0) {
-                const duration_secs = @as(f64, @floatFromInt(fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
+            if (decoder.fmt_ctx.ptr().duration > 0) {
+                const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
                 const fps = c.av_q2d(frame_rate);
                 break :blk @intFromFloat(duration_secs * fps);
             }
@@ -231,11 +162,11 @@ pub fn main() !void {
         var current_pbo: u1 = 0;
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
 
-        while (!should_quit.load(.monotonic)) {
+        while (!decoder.should_quit.load(.monotonic)) {
             // No event polling needed - window is hidden in render mode
 
             // Process any pending audio packets (remux to output)
-            while (audio_pkt_queue.tryPop()) |audio_pkt| {
+            while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
                 defer {
                     var pkt: ?*c.AVPacket = audio_pkt;
                     c.av_packet_free(&pkt);
@@ -244,8 +175,8 @@ pub fn main() !void {
                 try encoder.writeAudioPacket(audio_stream, audio_pkt);
             }
 
-            if (queue.pop()) |frame| {
-                defer queue.recycle(frame);
+            if (decoder.queue.frame.pop()) |frame| {
+                defer decoder.queue.frame.recycle(frame);
                 defer stable_buffer.swap();
 
                 if (frame.format != c.AV_PIX_FMT_NV12) {
@@ -342,7 +273,7 @@ pub fn main() !void {
                 progress_node.setCompletedItems(frame_count);
 
                 // No need to swap in headless render mode
-            } else if (queue.end_of_stream.load(.monotonic) and queue.isEmpty()) {
+            } else if (decoder.queue.frame.end_of_stream.load(.monotonic) and decoder.queue.frame.isEmpty()) {
                 // Encode the last pending frame
                 if (pending_frame_pts) |pts| {
                     const prev_pbo = current_pbo +% 1;
@@ -371,9 +302,9 @@ pub fn main() !void {
         }
 
         // Signal threads to quit (in case they're blocked waiting)
-        should_quit.store(true, .monotonic);
-        video_pkt_queue.quit();
-        audio_pkt_queue.quit();
+        decoder.should_quit.store(true, .monotonic);
+        decoder.queue.pkt.video.quit();
+        decoder.queue.pkt.audio.quit();
     } else {
         // ===== PLAYBACK MODE =====
         if (@import("builtin").mode == .Debug) {
@@ -386,19 +317,20 @@ pub fn main() !void {
                 delay_ahead_ms,
                 delay_ahead_ms / (frame_period * std.time.ms_per_s),
             });
-            log.info("audio hw_latency: {d:.2}ms", .{audio_clock.hw_latency_secs * std.time.ms_per_s});
+
+            log.info("audio hw_latency: {d:.2}ms", .{decoder.audio_clock.hw_latency_secs * std.time.ms_per_s});
         }
 
-        while (!should_quit.load(.monotonic)) {
+        while (!decoder.should_quit.load(.monotonic)) {
             var event: c.SDL_Event = undefined;
 
             while (c.SDL_PollEvent(&event)) {
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => {
-                        should_quit.store(true, .monotonic);
+                        decoder.should_quit.store(true, .monotonic);
                         // Wake up threads blocked on queue pop
-                        video_pkt_queue.quit();
-                        audio_pkt_queue.quit();
+                        decoder.queue.pkt.video.quit();
+                        decoder.queue.pkt.audio.quit();
                     },
                     c.SDL_EVENT_MOUSE_WHEEL => {
                         const wheel_delta = event.wheel.y * 0.1;
@@ -413,7 +345,9 @@ pub fn main() !void {
                     },
                     c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
                         c.SDL_SCANCODE_M => {
-                            try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
+                            var clock = decoder.audio_clock;
+
+                            try if (clock.is_muted) clock.unmute() else clock.mute();
                         },
                         c.SDL_SCANCODE_L => {
                             // Debug: print world vs window viewport info
@@ -427,16 +361,16 @@ pub fn main() !void {
                 }
             }
 
-            if (queue.pop()) |frame| {
-                defer queue.recycle(frame);
+            if (decoder.queue.frame.pop()) |frame| {
+                defer decoder.queue.frame.recycle(frame);
                 defer stable_buffer.swap();
 
                 // Calculate PTS early - needed for initial sync
-                const time_base: f64 = c.av_q2d(fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.time_base);
+                const time_base: f64 = c.av_q2d(decoder.stream(.video).time_base);
                 const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
                 // Track if this is the first frame (for delayed audio start)
-                const is_first_frame = audio_clock.isPaused();
+                const is_first_frame = decoder.audio_clock.isPaused();
                 const first_frame_pts: f64 = if (is_first_frame) pt_in_seconds else 0.0;
 
                 if (frame.format != c.AV_PIX_FMT_NV12) {
@@ -472,7 +406,7 @@ pub fn main() !void {
                 } else {
                     // A/V sync: compare the frame being DISPLAYED (previous frame from invert()) to audio clock
                     // Double-buffer pattern: we upload to current slot, but display from inverted slot
-                    const audio_time = audio_clock.seconds_passed();
+                    const audio_time = decoder.audio_clock.seconds_passed();
                     const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
                     const diff = frame_time - audio_time;
 
@@ -599,7 +533,7 @@ pub fn main() !void {
                 // Start audio AFTER first frame is rendered (not before)
                 // This ensures audio timing aligns with actual frame display
                 if (is_first_frame) {
-                    try audio_clock.start(first_frame_pts);
+                    try decoder.audio_clock.start(first_frame_pts);
                 }
             } else {
                 // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
@@ -939,7 +873,9 @@ const Camera = struct {
 
     zoom: f32 = 1.45, // TODO: revert to 1.0
 
-    pub fn init(video_width: u32, video_height: u32, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
+    pub fn init(dimensions: struct { u32, u32 }, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
+        const video_width, const video_height = dimensions;
+
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
         const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
 
