@@ -5,14 +5,16 @@ const libav = @import("libav.zig");
 const errify = @import("platform.zig").errify;
 
 const LinearFifo = @import("fifo.zig").LinearFifo(*c.AVPacket, .dynamic);
-const AvFormatContext = @import("libav.zig").AvFormatContext;
-const AvCodecContext = @import("libav.zig").AvCodecContext;
+
+const enc = @import("libav.zig").enc;
+const dec = @import("libav.zig").dec;
+
+const AvPacket = @import("libav.zig").AvPacket;
+const AvFrame = @import("libav.zig").AvFrame;
 
 // TODO: some universal thread sync primitive
 
 pub const packet = struct {
-    const AvPacket = libav.AvPacket;
-
     pub const Queue = struct { // FIXME: is there any point to rolling my own?
         list: LinearFifo,
 
@@ -49,16 +51,34 @@ pub const packet = struct {
             self.cond.signal();
         }
 
-        pub fn pop(self: *@This()) ?*c.AVPacket {
+        pub fn pop(self: *@This(), should_quit: *std.atomic.Value(bool)) ?*c.AVPacket {
             self.mutex.lock();
             defer self.mutex.unlock();
 
             while (self.list.readableLength() == 0) {
                 if (self.end_of_stream.load(.monotonic)) return null;
+                if (should_quit.load(.monotonic)) return null;
                 self.cond.wait(&self.mutex);
             }
 
             return self.list.readItem();
+        }
+
+        /// Non-blocking pop - returns null immediately if queue is empty
+        pub fn tryPop(self: *@This()) ?*c.AVPacket {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (self.list.readableLength() == 0) return null;
+            return self.list.readItem();
+        }
+
+        /// Signal any threads waiting on this queue to wake up and check their quit flag
+        pub fn quit(self: *@This()) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.cond.broadcast();
         }
     };
 
@@ -68,7 +88,7 @@ pub const packet = struct {
         should_quit: *std.atomic.Value(bool),
     };
 
-    pub fn read(video_queue: *Queue, audio_queue: *Queue, fmt_ctx: AvFormatContext, opt: ReadOptions) !void {
+    pub fn read(video_queue: *Queue, audio_queue: *Queue, fmt_ctx: dec.AvFormatContext, opt: ReadOptions) !void {
         const log = std.log.scoped(.packet_read);
 
         log.info("packet read thread start", .{});
@@ -100,8 +120,8 @@ pub const packet = struct {
 };
 
 pub const DecodeContext = struct {
-    codec_ctx: *AvCodecContext,
-    fmt_ctx: AvFormatContext,
+    codec_ctx: *dec.AvCodecContext,
+    fmt_ctx: dec.AvFormatContext,
     should_quit: *std.atomic.Value(bool),
 };
 
@@ -126,7 +146,7 @@ pub const audio = struct {
 
         const log = std.log.scoped(.audio);
 
-        pub fn init(ctx: *const AvCodecContext) !@This() {
+        pub fn init(ctx: *const dec.AvCodecContext) !@This() {
             var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             desired.freq = ctx.inner.?.sample_rate;
             desired.format = c.SDL_AUDIO_F32;
@@ -136,15 +156,12 @@ pub const audio = struct {
             errdefer c.SDL_DestroyAudioStream(stream);
 
             try errify(c.SDL_SetAudioStreamGain(stream, 0));
-            // Don't resume yet - wait for video to be ready (initial sync)
-            // try errify(c.SDL_ResumeAudioStreamDevice(stream));
 
             var actual: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             var sample_frames: c_int = undefined;
 
             try errify(c.SDL_GetAudioDeviceFormat(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &actual, &sample_frames));
             const offset = @as(f64, @floatFromInt(sample_frames)) / @as(f64, @floatFromInt(actual.freq));
-            // const offset = 1999 / std.time.ms_per_s;
 
             log.debug("{d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
 
@@ -288,7 +305,8 @@ pub const audio = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
+            var pkt: ?*c.AVPacket = pkt_queue.pop(decode_ctx.should_quit) orelse {
+                if (decode_ctx.should_quit.load(.monotonic)) return;
                 const flush_ret = c.avcodec_send_packet(audio_ctx, null);
                 if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
                 end_of_file = true;
@@ -305,13 +323,14 @@ pub const audio = struct {
 };
 
 pub const video = struct {
-    const AvFrame = libav.AvFrame;
-
     pub fn decode(frame_queue: *FrameQueue, pkt_queue: *packet.Queue, decode_ctx: DecodeContext) !void {
         const log = std.log.scoped(.video_decode);
 
         log.info("video decode thread start", .{});
-        defer log.info("video decode thread end", .{});
+        defer {
+            frame_queue.end_of_stream.store(true, .monotonic);
+            log.info("video decode thread end", .{});
+        }
 
         var src_frame: AvFrame = try .init();
         defer src_frame.deinit();
@@ -357,7 +376,8 @@ pub const video = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
+            var pkt: ?*c.AVPacket = pkt_queue.pop(decode_ctx.should_quit) orelse {
+                if (decode_ctx.should_quit.load(.monotonic)) return;
                 const flush_ret = c.avcodec_send_packet(video_ctx, null);
                 if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
                 end_of_file = true;
@@ -372,7 +392,7 @@ pub const video = struct {
         }
     }
 
-    fn convert(codec_ctx: *const AvCodecContext, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
+    fn convert(codec_ctx: *const dec.AvCodecContext, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
         @setRuntimeSafety(false);
 
         if (codec_ctx.device) |dev| {
@@ -398,6 +418,7 @@ pub const FrameQueue = struct {
     slot: Slot,
     read_idx: usize,
     write_idx: usize,
+    end_of_stream: std.atomic.Value(bool) = .init(false),
 
     mutex: std.Thread.Mutex = .{},
     cond: std.Thread.Condition = .{},
@@ -482,7 +503,378 @@ pub const FrameQueue = struct {
         std.debug.panic("attempted to recycle a frame that was not in the queue", .{});
     }
 
+    pub fn isEmpty(self: *@This()) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const idx = self.mask(self.read_idx);
+        return self.slot.state[idx] != .in_use;
+    }
+
     inline fn mask(self: @This(), idx: usize) usize {
         return idx & (self.slot.frame.len - 1);
+    }
+};
+
+pub const Decoder = struct {
+    const PacketQueue = packet.Queue;
+    const AudioClock = audio.Clock;
+
+    fmt_ctx: dec.AvFormatContext,
+
+    video_ctx: *dec.AvCodecContext,
+    audio_ctx: *dec.AvCodecContext,
+
+    queue: Queues,
+
+    audio_clock: AudioClock,
+
+    should_quit: std.atomic.Value(bool) = .init(false),
+
+    // Important Information
+    colour_space: c.AVColorSpace,
+    dimensions: struct { u32, u32 },
+
+    const Queues = struct {
+        frame: FrameQueue,
+        pkt: struct { audio: PacketQueue, video: PacketQueue },
+
+        fn deinit(self: *Queues, allocator: std.mem.Allocator) void {
+            self.pkt.audio.deinit(allocator);
+            self.pkt.video.deinit(allocator);
+            self.frame.deinit(allocator);
+        }
+    };
+
+    const Handles = struct {
+        pkt: std.Thread,
+        audio: ?std.Thread,
+        video: std.Thread,
+
+        pub fn deinit(self: Handles) void {
+            self.pkt.join();
+            self.video.join();
+
+            if (self.audio) |a| a.join();
+        }
+    };
+
+    const log = std.log.scoped(.decode);
+
+    pub fn init(allocator: std.mem.Allocator, hw_device: ?c.AVHWDeviceType, path: []const u8) !Decoder {
+        var fmt_ctx = try dec.AvFormatContext.init(path);
+        errdefer fmt_ctx.deinit();
+
+        var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
+        errdefer video_ctx.deinit(allocator);
+
+        log.debug("colour space: {s}", .{c.av_color_space_name(video_ctx.inner.?.colorspace)});
+
+        var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
+        errdefer audio_ctx.deinit(allocator);
+
+        var frame_queue = try FrameQueue.init(allocator, 0x80); // 1s at 120fps?
+        errdefer frame_queue.deinit(allocator);
+
+        var video_queue = PacketQueue.init(allocator);
+        errdefer video_queue.deinit(allocator);
+
+        var audio_queue = PacketQueue.init(allocator);
+        errdefer audio_queue.deinit(allocator);
+
+        var audio_clock = try AudioClock.init(audio_ctx);
+        errdefer audio_clock.deinit();
+
+        return .{
+            .fmt_ctx = fmt_ctx,
+            .video_ctx = video_ctx,
+            .audio_ctx = audio_ctx,
+            .queue = .{
+                .frame = frame_queue,
+                .pkt = .{
+                    .video = video_queue,
+                    .audio = audio_queue,
+                },
+            },
+            .audio_clock = audio_clock,
+            .colour_space = video_ctx.inner.?.colorspace,
+            .dimensions = .{ @intCast(video_ctx.inner.?.width), @intCast(video_ctx.inner.?.height) },
+        };
+    }
+
+    pub fn framerate(self: Decoder) c.AVRational {
+        return self.fmt_ctx.ptr().streams[@intCast(self.video_ctx.stream)].*.avg_frame_rate;
+    }
+
+    const StreamKind = enum { audio, video };
+
+    pub fn stream(self: Decoder, comptime kind: StreamKind) *c.AVStream {
+        return self.fmt_ctx.ptr().streams[
+            switch (kind) {
+                .audio => @intCast(self.audio_ctx.stream),
+                .video => @intCast(self.video_ctx.stream),
+            }
+        ];
+    }
+
+    pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
+        self.audio_clock.deinit();
+        self.queue.deinit(allocator);
+
+        self.audio_ctx.deinit(allocator);
+        self.video_ctx.deinit(allocator);
+
+        self.fmt_ctx.deinit();
+    }
+
+    pub fn spawn(self: *Decoder, render: ?[]const u8) !Handles {
+        const opts: packet.ReadOptions = .{
+            .video_stream = self.video_ctx.stream,
+            .audio_stream = self.audio_ctx.stream,
+            .should_quit = &self.should_quit,
+        };
+
+        const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{
+            &self.queue.pkt.video, // TODO: combine these args
+            &self.queue.pkt.audio,
+            self.fmt_ctx,
+            opts,
+        });
+
+        const vid_ctx: DecodeContext = .{
+            .codec_ctx = self.video_ctx,
+            .fmt_ctx = self.fmt_ctx,
+            .should_quit = &self.should_quit,
+        };
+
+        const video_handle = try std.Thread.spawn(.{}, video.decode, .{
+            &self.queue.frame,
+            &self.queue.pkt.video,
+            vid_ctx,
+        });
+
+        const audio_handle = if (render) |_| null else blk: {
+            const aud_ctx: DecodeContext = .{
+                .codec_ctx = self.audio_ctx,
+                .fmt_ctx = self.fmt_ctx,
+                .should_quit = &self.should_quit,
+            };
+
+            break :blk try std.Thread.spawn(.{}, audio.decode, .{
+                &self.audio_clock,
+                &self.queue.pkt.audio,
+                aud_ctx,
+            });
+        };
+
+        return .{
+            .pkt = pkt_handle,
+            .video = video_handle,
+            .audio = audio_handle,
+        };
+    }
+};
+
+pub const Encoder = struct {
+    width: u32,
+    height: u32,
+
+    codec_ctx: enc.AvCodecContext,
+    fmt_ctx: enc.AvFormatContext,
+
+    sws_ctx: ?*c.SwsContext,
+
+    audio_stream: enc.AvStream,
+    video_stream: enc.AvStream,
+
+    _pkt: AvPacket,
+    _frame: AvFrame,
+    _hw: ?struct { frame: AvFrame } = null,
+
+    const log = std.log.scoped(.encode);
+
+    pub const Options = struct {
+        width: u32,
+        height: u32,
+
+        decoder: *const Decoder,
+    };
+
+    pub fn init(opt: Options, device_type: ?c.AVHWDeviceType, path: []const u8) !Encoder {
+        const codec_id = c.AV_CODEC_ID_HEVC;
+
+        if (device_type) |dev| {
+            return initHardware(opt, dev, codec_id, path) catch blk: {
+                log.err("failed to set up hardware device, defaulting to software", .{});
+                break :blk initSoftware(opt, codec_id, path);
+            };
+        }
+
+        return initSoftware(opt, codec_id, path);
+    }
+
+    fn initShared(opt: Options, codec: enc.AvCodec, sw_pix_fmt: c.AVPixelFormat, path: []const u8) !Encoder {
+        var fmt_ctx = try enc.AvFormatContext.init(path);
+        errdefer fmt_ctx.deinit();
+
+        var codec_ctx = try enc.AvCodecContext.init(codec, fmt_ctx, .{
+            .width = @intCast(opt.width),
+            .height = @intCast(opt.height),
+            .input = .{
+                .fmt_ctx = opt.decoder.fmt_ctx,
+                .video_ctx = opt.decoder.video_ctx,
+            },
+        });
+        errdefer codec_ctx.deinit();
+
+        _ = try libav.err(c.avcodec_open2(codec_ctx.ptr(), codec.ptr(), null));
+
+        const input_audio = opt.decoder.stream(.audio);
+
+        const audio_stream = try enc.AvStream.init(fmt_ctx);
+        _ = try libav.err(c.avcodec_parameters_copy(audio_stream.ptr().codecpar, input_audio.*.codecpar));
+        audio_stream.ptr().codecpar.*.codec_tag = 0; // reset
+
+        const video_stream = try enc.AvStream.init(fmt_ctx);
+        _ = try libav.err(c.avcodec_parameters_from_context(video_stream.ptr().codecpar, codec_ctx.ptr()));
+        video_stream.ptr().time_base = codec_ctx.ptr().time_base;
+
+        c.av_dump_format(fmt_ctx.ptr(), 0, path.ptr, 1);
+
+        _ = try libav.err(c.avio_open(&fmt_ctx.ptr().pb, path.ptr, c.AVIO_FLAG_WRITE));
+        _ = try libav.err(c.avformat_write_header(fmt_ctx.ptr(), null));
+
+        return .{
+            .width = opt.width,
+            .height = opt.height,
+            .codec_ctx = codec_ctx,
+            .fmt_ctx = fmt_ctx,
+
+            .audio_stream = audio_stream,
+            .video_stream = video_stream,
+
+            ._pkt = try AvPacket.try_init(),
+            ._frame = blk: {
+                var frame = try AvFrame.init();
+                errdefer frame.deinit();
+
+                // additional setup
+                const ptr = frame.ptr();
+                ptr.color_range = c.AVCOL_RANGE_MPEG;
+                ptr.color_primaries = c.AVCOL_PRI_BT709;
+                ptr.color_trc = c.AVCOL_TRC_BT709;
+                ptr.colorspace = c.AVCOL_SPC_BT709;
+
+                try frame.setup(@intCast(opt.width), @intCast(opt.height), sw_pix_fmt);
+
+                break :blk frame;
+            },
+            ._hw = if (codec.hw) |_| .{ .frame = try AvFrame.init() } else null,
+            .sws_ctx = blk: {
+                const ptr: ?*c.SwsContext = c.sws_getContext(
+                    @intCast(opt.width),
+                    @intCast(opt.height),
+                    c.AV_PIX_FMT_RGB24,
+                    @intCast(opt.width),
+                    @intCast(opt.height),
+                    sw_pix_fmt,
+                    c.SWS_POINT,
+                    null,
+                    null,
+                    null,
+                );
+
+                break :blk ptr.?;
+            },
+        };
+    }
+
+    fn initHardware(opt: Options, device_type: c.AVHWDeviceType, codec_id: c.AVCodecID, path: []const u8) !Encoder {
+        const codec = enc.AvCodec.findHardware(device_type, codec_id) orelse return initSoftware(opt, codec_id, path);
+        return initShared(opt, codec, c.AV_PIX_FMT_NV12, path);
+    }
+
+    fn initSoftware(opt: Options, codec_id: c.AVCodecID, path: []const u8) !Encoder {
+        const codec = enc.AvCodec.findSoftware(codec_id);
+        return initShared(opt, codec, codec.pix_fmt, path);
+    }
+
+    pub fn encodeRgbFrame(self: *Encoder, buf: []const u8, frame_pts: i64) !void {
+        @setRuntimeSafety(false);
+
+        const sw_frame = self._frame.ptr();
+        _ = try libav.err(c.av_frame_make_writable(sw_frame));
+
+        const stride: usize = self.width * 3;
+
+        var src_frame: c.AVFrame = .{
+            .format = c.AV_PIX_FMT_RGB24,
+            .width = @intCast(self.width),
+            .height = @intCast(self.height),
+        };
+
+        src_frame.data[0] = @constCast(buf.ptr + @as(usize, self.height - 1) * stride);
+        src_frame.linesize[0] = -@as(c_int, @intCast(stride)); // negative to flip vertically
+
+        _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, &src_frame));
+        sw_frame.pts = frame_pts;
+
+        if (self._hw) |hw| {
+            const hw_frame = hw.frame.ptr();
+
+            c.av_frame_unref(hw_frame);
+            _ = try libav.err(c.av_hwframe_get_buffer(self.codec_ctx.ptr().hw_frames_ctx, hw_frame, 0));
+            _ = try libav.err(c.av_hwframe_transfer_data(hw_frame, sw_frame, 0));
+            _ = try libav.err(c.av_frame_copy_props(hw_frame, sw_frame));
+
+            try self.writeVideoFrame(hw_frame);
+        } else {
+            try self.writeVideoFrame(sw_frame);
+        }
+    }
+
+    pub fn writeAudioPacket(self: *Encoder, in: *c.AVStream, pkt: *c.AVPacket) !void {
+        const UNKN_POS = -1;
+        const audio_stream = self.audio_stream.ptr();
+
+        c.av_packet_rescale_ts(pkt, in.time_base, audio_stream.time_base);
+        pkt.pos = UNKN_POS;
+        pkt.stream_index = audio_stream.index;
+
+        _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx.ptr(), pkt));
+    }
+
+    fn writeVideoFrame(self: *Encoder, frame: ?*c.AVFrame) !void {
+        const codec_ctx = self.codec_ctx.ptr();
+        const video_stream = self.video_stream.ptr();
+
+        const pkt = self._pkt.ptr();
+
+        _ = try libav.err(c.avcodec_send_frame(codec_ctx, frame));
+
+        while (true) {
+            const ret = c.avcodec_receive_packet(codec_ctx, pkt);
+            if (ret == c.AVERROR(c.EAGAIN) or ret == c.AVERROR_EOF) break;
+            _ = try libav.err(ret);
+
+            c.av_packet_rescale_ts(pkt, codec_ctx.time_base, video_stream.time_base);
+            pkt.stream_index = video_stream.index;
+
+            _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx.ptr(), pkt));
+        }
+    }
+
+    pub fn deinit(self: *Encoder) void {
+        self.writeVideoFrame(null) catch @panic("failed to flush encoder");
+        _ = c.av_write_trailer(self.fmt_ctx.ptr());
+
+        self._frame.deinit();
+        if (self._hw) |*hw| hw.frame.deinit();
+        self._pkt.deinit();
+
+        self.codec_ctx.deinit();
+        self.fmt_ctx.deinit();
+
+        self.* = undefined;
     }
 };

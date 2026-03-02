@@ -27,8 +27,7 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
-    const sdl_optimize = if (target.result.os.tag == .windows) .ReleaseFast else optimize; // SDL3 on windows crashes in debug build on window dra
-    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = sdl_optimize, .preferred_linkage = .static });
+    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = .ReleaseFast, .preferred_linkage = .static });
     exe_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
     switch (target.result.os.tag) {
@@ -66,14 +65,15 @@ pub fn build(b: *std.Build) !void {
     const gl_mod = @import("zigglgen").generateBindingsModule(b, .{ .api = .gl, .version = .@"3.3", .profile = .core });
     exe_mod.addImport("gl", gl_mod);
 
-    const zstbi = b.dependency("zstbi", .{});
-    exe_mod.addImport("zstbi", zstbi.module("root"));
+    const clap = b.dependency("clap", .{});
+    exe_mod.addImport("clap", clap.module("clap"));
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{
         .name = "rota_stabilizer",
         .root_module = exe_mod,
+        .use_llvm = true,
     });
 
     // This declares intent for the executable to be installed into the

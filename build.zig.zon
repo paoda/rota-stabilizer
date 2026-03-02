@@ -45,13 +45,13 @@
             .hash = "zigglgen-0.4.0-bmyqLQGMLwA0EPVmSm-Nc6Olb84zBzvwMjguxwKYLf1S",
         },
         .ffmpeg = .{
-            .url = "https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip",
-            .hash = "N-V-__8AAD_XPwuvbf8c117TB8ikaKnS8MpyEmyxvhv617i0",
+            .url = "https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.zip",
+            .hash = "N-V-__8AAD5ElQ9Xj423PJwgugxkxIRgGuH9qQ90LtfkmRQd",
             .lazy = true,
         },
-        .zstbi = .{
-            .url = "git+https://github.com/zig-gamedev/zstbi#2c4b3100ccb7aed90ecc9439030899764e2a8d47",
-            .hash = "zstbi-0.11.0-dev-L0Ea_yaWBwAHwFoCuyjkFyaiSsbjt4UOrkntR0c_nmzz",
+        .clap = .{
+            .url = "git+https://github.com/Hejsil/zig-clap#5289e0753cd274d65344bef1c114284c633536ea",
+            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
         },
     },
     .paths = .{

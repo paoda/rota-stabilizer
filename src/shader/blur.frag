@@ -14,12 +14,17 @@ const float weight[5] = float[](
 uniform vec2 u_resolution;
 uniform bool u_horizontal;
 uniform bool u_use_nv12;
+uniform uint u_colour_space;
 
 uniform sampler2D u_screen;
 uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
 
-vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
+mat3 colourSpace() {
+    const uint AVCOL_SPC_BT709 = 1u; // BT.709
+    const uint AVCOL_SPC_BT470BG = 5u; // BT.601 (NTSC)
+    const uint AVCOL_SPC_SMPTE170M = 6u; // BT.601 (PAL)
+
     const mat3 bt601 = mat3(
             1.0, 1.0, 1.0,
             0.0, -0.39465, 2.03211,
@@ -32,6 +37,20 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
             1.5748, -0.4681, 0.0
         );
 
+     switch (u_colour_space) {
+        case AVCOL_SPC_BT709:
+            return bt709;
+
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M :
+            return bt601;
+        default:
+            return bt709; // FIXME: do i need to suport BT.2020?
+    }
+}
+
+
+vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
     const float offset = 16.0 / 255.0;
     float y = (normalized_y - offset) * (255.0 / (235.0 - 16.0));
     vec2 uv = (normalized_uv - offset) * (255.0 / (240.0 - 16.0));
@@ -42,7 +61,7 @@ vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
     float u = uv.r - 0.5;
     float v = uv.g - 0.5;
 
-    return clamp(bt601 * vec3(y, u, v), 0.0, 1.0);
+    return clamp(colourSpace() * vec3(y, u, v), 0.0, 1.0);
 }
 
 vec3 getTexture(vec2 uv) {
