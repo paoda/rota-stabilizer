@@ -43,8 +43,8 @@ pub fn main() !void {
 
     const params = comptime clap.parseParamsComptime(
         \\-h, --help            Display this help and exit.
-        \\-r, --render <str>    Render video to file.
-        \\<str>                 Path to source video.
+        \\-i, --input <str>     Path to input file.
+        \\<str>                 Path to output file.
         \\
     );
 
@@ -57,10 +57,10 @@ pub fn main() !void {
 
     if (cli.args.help != 0) return clap.helpToFile(.stdout(), clap.Help, &params, .{});
 
-    const ui = if (cli.args.render) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1600, 900);
+    const ui = if (cli.positionals[0]) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1600, 900);
     defer ui.deinit();
 
-    const src_path = cli.positionals[0] orelse return error.missing_path;
+    const src_path = cli.args.input orelse return error.missing_input_path;
 
     var decoder = try Decoder.init(allocator, hw_device, src_path);
     defer decoder.deinit(allocator);
@@ -89,10 +89,10 @@ pub fn main() !void {
     const frame_period = 1.0 / c.av_q2d(frame_rate);
     var frame_count: u64 = 0; // A/V Debug State
 
-    const handles = try decoder.spawn(cli.args.render);
+    const handles = try decoder.spawn(cli.positionals[0]);
     defer handles.deinit();
 
-    if (cli.args.render) |dst_path| {
+    if (cli.positionals[0]) |dst_path| {
         // Initialize encoder
         var encoder = try Encoder.init(.{
             .width = @intCast(view.width),
@@ -515,7 +515,7 @@ pub fn main() !void {
                     try decoder.audio_clock.start(first_frame_pts);
                 }
             } else {
-                log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
+                // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
                 continue;
             }
 
