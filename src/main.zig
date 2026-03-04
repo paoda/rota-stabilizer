@@ -181,7 +181,7 @@ pub fn main() !void {
 
                 // Update progress
                 progress_node.setCompletedItems(frame_count);
-            } else if (decoder.queue.frame.end_of_stream.load(.monotonic) and decoder.queue.frame.isEmpty()) {
+            } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
                 // Encode the last pending frame
                 if (pending_frame_pts) |pts| {
                     const prev_pbo = current_pbo +% 1;
