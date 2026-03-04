@@ -131,7 +131,7 @@ pub const GpuResourceManager = struct {
     };
 
     const PixelBufferPool = struct {
-        const Index = enum(usize) { y_front, y_back, uv_front, uv_back };
+        const Index = enum(usize) { y_front, y_back, uv_front, uv_back, rgb_front, rgb_back };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -289,6 +289,18 @@ pub const GpuResourceManager = struct {
         if (ret != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
     }
 
+    pub fn setupReadbackBuffers(self: *const GpuResourceManager, width: u32, height: u32) void {
+        const BufIndex = PixelBufferPool.Index;
+
+        const len = (width * RGB24_BPP) * height;
+
+        for ([_]BufIndex{ .rgb_front, .rgb_back }) |idx| {
+            gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.pbo.get(idx));
+            gl.BufferData(gl.PIXEL_PACK_BUFFER, len, null, gl.STREAM_READ);
+        }
+        gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+    }
+
     pub fn setupVideoTextures(self: *const GpuResourceManager, width: u32, height: u32) void {
         const TexIndex = TexturePool.Index;
         const BufIndex = PixelBufferPool.Index;
@@ -326,6 +338,7 @@ pub const GpuResourceManager = struct {
             const len: c_int = switch (idx) {
                 .uv_front, .uv_back => @intCast((width / 2) * (height / 2) * UV_BPP),
                 .y_front, .y_back => @intCast(width * height * Y_BPP),
+                else => unreachable,
             };
 
             gl.BufferData(gl.PIXEL_UNPACK_BUFFER, len, null, gl.STREAM_DRAW);

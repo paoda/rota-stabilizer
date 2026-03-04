@@ -125,19 +125,7 @@ pub fn main() !void {
         });
         defer progress_node.end();
 
-        // Setup PBO double-buffering for async readback
-        // This overlaps GPU→CPU transfer with encoding of the previous frame
-        const rgb_size: isize = @intCast(@as(usize, @intCast(view.width)) * @as(usize, @intCast(view.height)) * RGB24_BPP);
-        var readback_pbos: [2]c_uint = undefined;
-        gl.GenBuffers(2, &readback_pbos);
-        defer gl.DeleteBuffers(2, &readback_pbos);
-
-        // Initialize both PBOs with the same size
-        for (readback_pbos) |pbo| {
-            gl.BindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
-            gl.BufferData(gl.PIXEL_PACK_BUFFER, rgb_size, null, gl.STREAM_READ);
-        }
-        gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+        res.setupReadbackBuffers(@intCast(view.width), @intCast(view.height));
 
         var current_pbo: u1 = 0;
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
@@ -226,19 +214,18 @@ pub fn main() !void {
                 try render(&view, &stable_buffer, angle_calc, res, camera);
 
                 // Start async readback into current PBO
-                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readback_pbos[current_pbo]);
+                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (current_pbo == 1) .rgb_front else .rgb_back));
                 gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
                 gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
 
                 // If we have a pending frame in the other PBO, map and encode it
                 if (pending_frame_pts) |pts| {
                     const prev_pbo = current_pbo +% 1;
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readback_pbos[prev_pbo]);
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
 
                     const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
                     if (mapped) |rgb_data| {
-                        // try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
-                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
+                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
                         _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
                     }
                 }
@@ -256,12 +243,12 @@ pub fn main() !void {
                 // Encode the last pending frame
                 if (pending_frame_pts) |pts| {
                     const prev_pbo = current_pbo +% 1;
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readback_pbos[prev_pbo]);
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
 
                     const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
                     if (mapped) |rgb_data| {
                         // try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
-                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
+                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
                         _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
                     }
                     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
