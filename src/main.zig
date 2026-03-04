@@ -24,12 +24,12 @@ const RGB24_BPP = @import("lib.zig").RGB24_BPP;
 const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
-/// set to enable hardware decoding
+// FIXME: Separate into Decode / Encode?
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
-    .linux => c.AV_HWDEVICE_TYPE_VULKAN,
+    .linux => c.AV_HWDEVICE_TYPE_VAAPI,
     .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
-    // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-    else => null, // TODO: maybe use c.AV_HWDEVICE_TYPE_VULKAN on everything?
+    // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, // TODO: get a macbook
+    else => null,
 };
 
 pub fn main() !void {
@@ -131,105 +131,45 @@ pub fn main() !void {
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
 
         while (!decoder.should_quit.load(.monotonic)) {
-
             // Process any pending audio packets (remux to output)
             while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
-                defer {
-                    var pkt: ?*c.AVPacket = audio_pkt;
-                    c.av_packet_free(&pkt);
-                }
-
                 try encoder.writeAudioPacket(audio_stream, audio_pkt);
+
+                var pkt: ?*c.AVPacket = audio_pkt;
+                c.av_packet_free(&pkt);
             }
 
             if (decoder.queue.frame.pop()) |frame| {
                 defer decoder.queue.frame.recycle(frame);
                 defer stable_buffer.swap();
 
-                if (frame.format != c.AV_PIX_FMT_NV12) {
-                    @branchHint(.cold);
-                    const expected = c.av_get_pix_fmt_name(c.AV_PIX_FMT_NV12);
-                    const actual = c.av_get_pix_fmt_name(frame.format);
-                    log.err("unsupported pixel format: expected {s} got {s}", .{ expected, actual });
-                    return error.ffmpeg_error;
-                }
-
                 frame_count += 1;
 
-                // Upload Y plane to GPU
-                {
-                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
-                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+                uploadYTexture(stable_buffer, frame);
+                uploadUvTexture(stable_buffer, frame);
 
-                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
-                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
-
-                    if (pbo) |ptr| {
-                        const bytes_per_line: usize = @intCast(frame.linesize[0]);
-                        const height: usize = @intCast(frame.height);
-                        const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
-
-                        for (0..height) |y| {
-                            const src_offset = y * bytes_per_line;
-                            const dst_offset = y * dst_stride;
-                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
-                        }
-                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
-                    }
-
-                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
-                    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, gl.RED, gl.UNSIGNED_BYTE, null);
-                }
-
-                // Upload UV plane to GPU
-                {
-                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
-                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
-
-                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
-                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
-
-                    if (pbo) |ptr| {
-                        const bytes_per_line: usize = @intCast(frame.linesize[1]);
-                        const height: usize = @intCast(@divTrunc(frame.height, 2));
-                        const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
-
-                        for (0..height) |y| {
-                            const src_offset = y * bytes_per_line;
-                            const dst_offset = y * dst_stride;
-                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
-                        }
-                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
-                    }
-
-                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
-                    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @divTrunc(frame.width, 2), @divTrunc(frame.height, 2), gl.RG, gl.UNSIGNED_BYTE, null);
-                }
-
-                // Render the frame
                 try render(&view, &stable_buffer, angle_calc, res, camera);
 
-                // Start async readback into current PBO
-                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (current_pbo == 1) .rgb_front else .rgb_back));
-                gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
-                gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
+                {
+                    // Start async readback into current PBO
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (current_pbo == 1) .rgb_front else .rgb_back));
+                    defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
-                // If we have a pending frame in the other PBO, map and encode it
-                if (pending_frame_pts) |pts| {
-                    const prev_pbo = current_pbo +% 1;
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
+                    gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
+                    gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
 
-                    const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
-                    if (mapped) |rgb_data| {
-                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
-                        _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+                    // If we have a pending frame in the other PBO, map and encode it
+                    if (pending_frame_pts) |pts| {
+                        const prev_pbo = current_pbo +% 1;
+                        gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
+
+                        const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
+                        if (mapped) |rgb_data| {
+                            try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
+                            _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+                        }
                     }
                 }
-                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
                 // Store current frame's PTS for next iteration, swap PBOs
                 pending_frame_pts = frame.best_effort_timestamp;
@@ -237,21 +177,21 @@ pub fn main() !void {
 
                 // Update progress
                 progress_node.setCompletedItems(frame_count);
-
-                // No need to swap in headless render mode
             } else if (decoder.queue.frame.end_of_stream.load(.monotonic) and decoder.queue.frame.isEmpty()) {
                 // Encode the last pending frame
                 if (pending_frame_pts) |pts| {
                     const prev_pbo = current_pbo +% 1;
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
 
-                    const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
-                    if (mapped) |rgb_data| {
-                        // try encoder.encodeRgbFrame(rgb_data[0..@intCast(rgb_size)], pts);
-                        try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
-                        _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+                    {
+                        gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
+                        defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+
+                        const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
+                        if (mapped) |rgb_data| {
+                            try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
+                            _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+                        }
                     }
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
                 }
 
                 // End of video
@@ -262,8 +202,8 @@ pub fn main() !void {
                 const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
                 const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
                 const speed = video_duration / elapsed;
-                log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
-                break;
+
+                break log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
             }
         }
 
@@ -294,7 +234,6 @@ pub fn main() !void {
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => {
                         decoder.should_quit.store(true, .monotonic);
-                        // Wake up threads blocked on queue pop
                         decoder.queue.pkt.video.quit();
                         decoder.queue.pkt.audio.quit();
                     },
@@ -348,8 +287,6 @@ pub fn main() !void {
                     return error.ffmpeg_error;
                 }
 
-                // FIXME: we currently assume colour space. We can't do that.
-
                 // A/V sync thresholds - tuned for both high refresh (120fps) and standard (60fps) content
                 // drop_behind: How far audio can get ahead before dropping video frames
                 //   - 2 frames gives some tolerance without visible desync
@@ -365,19 +302,14 @@ pub fn main() !void {
 
                 stable_buffer.set_display_time(pt_in_seconds);
 
-                // Skip A/V sync on first frame - audio hasn't started yet
-                if (is_first_frame) {
-                    // Just render the first frame without sync logic
-                    frame_count += 1;
-                } else {
+                frame_count += 1; // A/V Sync Purposes
+
+                if (!is_first_frame) {
                     // A/V sync: compare the frame being DISPLAYED (previous frame from invert()) to audio clock
                     // Double-buffer pattern: we upload to current slot, but display from inverted slot
                     const audio_time = decoder.audio_clock.seconds_passed();
                     const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
                     const diff = frame_time - audio_time;
-
-                    // Increment frame counter for debug
-                    frame_count += 1;
 
                     // skip frame
                     if (@abs(diff) > desync_reset) {
@@ -404,103 +336,14 @@ pub fn main() !void {
                     }
                 }
 
-                {
-                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
-                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+                uploadYTexture(stable_buffer, frame);
+                uploadUvTexture(stable_buffer, frame);
 
-                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
-                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
-
-                    if (pbo) |ptr| {
-                        // Copy line by line instead of a single large memcpy
-                        const bytes_per_line: usize = @intCast(frame.linesize[0]);
-                        const height: usize = @intCast(frame.height);
-
-                        // Destination stride in the PBO may be different from the source
-                        const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
-
-                        for (0..height) |y| {
-                            const src_offset = y * bytes_per_line;
-                            const dst_offset = y * dst_stride;
-
-                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
-                        }
-
-                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
-                    }
-
-                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
-
-                    gl.TexSubImage2D(
-                        gl.TEXTURE_2D,
-                        0,
-                        0,
-                        0,
-                        frame.width,
-                        frame.height,
-                        gl.RED,
-                        gl.UNSIGNED_BYTE,
-                        null,
-                    );
-                }
-
-                {
-                    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
-                    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
-
-                    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
-                    defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-                    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
-
-                    if (pbo) |ptr| {
-                        // Copy line by line instead of a single large memcpy
-                        const bytes_per_line: usize = @intCast(frame.linesize[1]);
-                        const height: usize = @intCast(@divTrunc(frame.height, 2));
-
-                        // Destination stride in the PBO may be different from the source
-                        const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
-
-                        for (0..height) |y| {
-                            const src_offset = y * bytes_per_line;
-                            const dst_offset = y * dst_stride;
-
-                            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
-                        }
-
-                        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
-                    }
-
-                    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
-
-                    gl.TexSubImage2D(
-                        gl.TEXTURE_2D,
-                        0,
-                        0,
-                        0,
-                        @divTrunc(frame.width, 2),
-                        @divTrunc(frame.height, 2),
-                        gl.RG,
-                        gl.UNSIGNED_BYTE,
-                        null,
-                    );
-                }
-
-                try render(
-                    &view,
-                    &stable_buffer,
-                    angle_calc,
-                    res,
-                    camera,
-                );
+                try render(&view, &stable_buffer, angle_calc, res, camera);
 
                 // Start audio AFTER first frame is rendered (not before)
                 // This ensures audio timing aligns with actual frame display
-                if (is_first_frame) {
-                    try decoder.audio_clock.start(first_frame_pts);
-                }
+                if (is_first_frame) try decoder.audio_clock.start(first_frame_pts);
             } else {
                 // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
                 continue;
@@ -508,7 +351,7 @@ pub fn main() !void {
 
             try ui.swap();
         }
-    } // end of RENDER_MODE else block
+    }
 }
 
 const DoubleBuffer = struct {
@@ -934,3 +777,55 @@ const Camera = struct {
         self.zoom = @max(1.0, @min(10.0, new_zoom));
     }
 };
+
+pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
+    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
+    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
+    defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+    if (pbo) |ptr| {
+        const bytes_per_line: usize = @intCast(frame.linesize[0]);
+        const height: usize = @intCast(frame.height);
+        const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
+
+        for (0..height) |y| {
+            const src_offset = y * bytes_per_line;
+            const dst_offset = y * dst_stride;
+            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
+        }
+        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+    }
+
+    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, gl.RED, gl.UNSIGNED_BYTE, null);
+}
+
+pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
+    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
+    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+
+    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
+    defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+
+    if (pbo) |ptr| {
+        const bytes_per_line: usize = @intCast(frame.linesize[1]);
+        const height: usize = @intCast(@divTrunc(frame.height, 2));
+        const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
+
+        for (0..height) |y| {
+            const src_offset = y * bytes_per_line;
+            const dst_offset = y * dst_stride;
+            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
+        }
+        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+    }
+
+    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
+    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @divTrunc(frame.width, 2), @divTrunc(frame.height, 2), gl.RG, gl.UNSIGNED_BYTE, null);
+}
