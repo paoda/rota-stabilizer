@@ -66,7 +66,7 @@ pub fn main() !void {
 
     const src_path = cli.args.input orelse return error.missing_input_path;
 
-    var decoder = try Decoder.init(allocator, &should_quit, hw_device, src_path);
+    var decoder = try Decoder.init(allocator, &should_quit, hw_device, src_path, cli.positionals[0] != null);
     defer decoder.deinit(allocator);
 
     // -- opengl --
@@ -217,6 +217,8 @@ pub fn main() !void {
         decoder.queue.pkt.audio.quit();
     } else {
         // ===== PLAYBACK MODE =====
+        const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
+
         if (@import("builtin").mode == .Debug) {
             const drop_behind_ms = @max(0.025, frame_period * 2.0) * std.time.ms_per_s;
             const delay_ahead_ms = @max(0.012, frame_period * 1.5) * std.time.ms_per_s;
@@ -228,7 +230,7 @@ pub fn main() !void {
                 delay_ahead_ms / (frame_period * std.time.ms_per_s),
             });
 
-            log.info("audio hw_latency: {d:.2}ms", .{decoder.audio_clock.hw_latency_secs * std.time.ms_per_s});
+            log.info("audio hw_latency: {d:.2}ms", .{audio_clock.hw_latency_secs * std.time.ms_per_s});
         }
 
         while (!should_quit.load(.monotonic)) {
@@ -254,9 +256,7 @@ pub fn main() !void {
                     },
                     c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
                         c.SDL_SCANCODE_M => {
-                            var clock = decoder.audio_clock;
-
-                            try if (clock.is_muted) clock.unmute() else clock.mute();
+                            try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
                         },
                         c.SDL_SCANCODE_L => {
                             // Debug: print world vs window viewport info
@@ -279,7 +279,7 @@ pub fn main() !void {
                 const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
                 // Track if this is the first frame (for delayed audio start)
-                const is_first_frame = decoder.audio_clock.isPaused();
+                const is_first_frame = audio_clock.isPaused();
                 const first_frame_pts: f64 = if (is_first_frame) pt_in_seconds else 0.0;
 
                 if (frame.format != c.AV_PIX_FMT_NV12) {
@@ -311,7 +311,7 @@ pub fn main() !void {
                 if (!is_first_frame) {
                     // A/V sync: compare the frame being DISPLAYED (previous frame from invert()) to audio clock
                     // Double-buffer pattern: we upload to current slot, but display from inverted slot
-                    const audio_time = decoder.audio_clock.seconds_passed();
+                    const audio_time = audio_clock.seconds_passed();
                     const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
                     const diff = frame_time - audio_time;
 
@@ -347,7 +347,7 @@ pub fn main() !void {
 
                 // Start audio AFTER first frame is rendered (not before)
                 // This ensures audio timing aligns with actual frame display
-                if (is_first_frame) try decoder.audio_clock.start(first_frame_pts);
+                if (is_first_frame) try audio_clock.start(first_frame_pts);
             } else {
                 // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
                 continue;

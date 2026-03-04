@@ -44,7 +44,7 @@ pub fn createHeadless(width: u32, height: u32) !Ui {
 
 fn createWindowEx(width: u32, height: u32, headless: bool) !Ui {
     c.SDL_SetMainReady();
-    try errify(c.SDL_Init(c.SDL_INIT_AUDIO | c.SDL_INIT_VIDEO));
+    try errify(c.SDL_Init(c.SDL_INIT_VIDEO | (if (headless) 0 else c.SDL_INIT_AUDIO)));
 
     try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", "0.1.0", "moe.paoda.rota-stabilizer"));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));

@@ -232,7 +232,7 @@ pub const audio = struct {
         log.info("audio decode thread start", .{});
         defer log.info("audio decode thread end", .{});
 
-        const clock = &decoder.audio_clock;
+        const clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
         const codec_ctx = &decoder.audio_ctx;
         const pkt_queue = &decoder.queue.pkt.audio;
 
@@ -522,7 +522,7 @@ pub const Decoder = struct {
 
     queue: Queues,
 
-    audio_clock: AudioClock,
+    audio_clock: ?AudioClock,
 
     should_quit: *const std.atomic.Value(bool),
 
@@ -556,7 +556,7 @@ pub const Decoder = struct {
 
     const log = std.log.scoped(.decode);
 
-    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), hw_device: ?c.AVHWDeviceType, path: []const u8) !Decoder {
+    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), hw_device: ?c.AVHWDeviceType, path: []const u8, headless: bool) !Decoder {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
@@ -577,8 +577,8 @@ pub const Decoder = struct {
         var audio_queue = PacketQueue.init(allocator);
         errdefer audio_queue.deinit(allocator);
 
-        var audio_clock = try AudioClock.init(audio_ctx);
-        errdefer audio_clock.deinit();
+        const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx);
+        errdefer if (audio_clock) |clock| clock.deinit();
 
         return .{
             .should_quit = should_quit,
@@ -615,7 +615,7 @@ pub const Decoder = struct {
     }
 
     pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
-        self.audio_clock.deinit();
+        if (self.audio_clock) |clock| clock.deinit();
         self.queue.deinit(allocator);
 
         self.audio_ctx.deinit(allocator);
