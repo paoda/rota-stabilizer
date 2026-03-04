@@ -162,16 +162,10 @@ pub fn main() !void {
                     gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
                     gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
 
-                    // If we have a pending frame in the other PBO, map and encode it
-                    if (pending_frame_pts) |pts| {
-                        const prev_pbo = current_pbo +% 1;
-                        gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
-
-                        const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
-                        if (mapped) |rgb_data| {
-                            try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
-                            _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
-                        }
+                    // encode buffered frame
+                    if (pending_frame_pts) |pts| blk: {
+                        const frame_buf = downloadFrame(res, view, current_pbo) orelse break :blk;
+                        try encoder.encodeRgbFrame(frame_buf, pts);
                     }
                 }
 
@@ -182,24 +176,13 @@ pub fn main() !void {
                 // Update progress
                 progress_node.setCompletedItems(frame_count);
             } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
-                // Encode the last pending frame
-                if (pending_frame_pts) |pts| {
-                    const prev_pbo = current_pbo +% 1;
 
-                    {
-                        gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (prev_pbo == 1) .rgb_front else .rgb_back));
-                        defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
-
-                        const mapped: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
-                        if (mapped) |rgb_data| {
-                            try encoder.encodeRgbFrame(rgb_data[0..@intCast(view.width * view.height * RGB24_BPP)], pts);
-                            _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
-                        }
-                    }
+                // encode buffered frame
+                if (pending_frame_pts) |pts| blk: {
+                    const frame_buf = downloadFrame(res, view, current_pbo) orelse break :blk;
+                    try encoder.encodeRgbFrame(frame_buf, pts);
                 }
 
-                // End of video
-                progress_node.setCompletedItems(frame_count);
                 std.Progress.setStatus(.success);
 
                 // Calculate and display final stats
@@ -860,4 +843,17 @@ pub fn setupSignalHandler() void {
         .windows => windows.kernel32.SetConsoleCtrlHandler(winHandler, 1),
         else => posix.sigaction(posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = posix.sigemptyset(), .flags = 0 }, null),
     }
+}
+
+pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?[]const u8 {
+    const idx = current_pbo +% 1;
+
+    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (idx == 1) .rgb_front else .rgb_back));
+    defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+
+    const maybe_ptr: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
+    defer _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+
+    const ptr = maybe_ptr orelse return null;
+    return ptr[0..@intCast(view.width * view.height * RGB24_BPP)];
 }
