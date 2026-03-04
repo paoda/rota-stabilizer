@@ -51,13 +51,12 @@ pub const packet = struct {
             self.cond.signal();
         }
 
-        pub fn pop(self: *@This(), should_quit: *std.atomic.Value(bool)) ?*c.AVPacket {
+        pub fn pop(self: *@This()) ?*c.AVPacket {
             self.mutex.lock();
             defer self.mutex.unlock();
 
             while (self.list.readableLength() == 0) {
                 if (self.end_of_stream.load(.monotonic)) return null;
-                if (should_quit.load(.monotonic)) return null;
                 self.cond.wait(&self.mutex);
             }
 
@@ -82,13 +81,7 @@ pub const packet = struct {
         }
     };
 
-    pub const ReadOptions = struct {
-        video_stream: c_int,
-        audio_stream: c_int,
-        should_quit: *std.atomic.Value(bool),
-    };
-
-    pub fn read(video_queue: *Queue, audio_queue: *Queue, fmt_ctx: dec.AvFormatContext, opt: ReadOptions) !void {
+    pub fn read(decode: *Decoder) !void {
         const log = std.log.scoped(.packet_read);
 
         log.info("packet read thread start", .{});
@@ -97,14 +90,18 @@ pub const packet = struct {
         var pkt = AvPacket.init();
         defer pkt.deinit();
 
-        while (!opt.should_quit.load(.monotonic)) {
+        const audio_queue = &decode.queue.pkt.audio;
+        const video_queue = &decode.queue.pkt.video;
+        const fmt_ctx = &decode.fmt_ctx;
+
+        while (!decode.should_quit.load(.monotonic)) {
             switch (c.av_read_frame(fmt_ctx.ptr(), pkt.ptr())) {
                 0...std.math.maxInt(c_int) => {
                     defer c.av_packet_unref(pkt.ptr());
 
-                    if (pkt.ptr().stream_index == opt.video_stream) {
+                    if (pkt.ptr().stream_index == decode.video_ctx.stream) {
                         try video_queue.push(pkt.ptr());
-                    } else if (pkt.ptr().stream_index == opt.audio_stream) {
+                    } else if (pkt.ptr().stream_index == decode.audio_ctx.stream) {
                         try audio_queue.push(pkt.ptr());
                     }
                 },
@@ -117,12 +114,6 @@ pub const packet = struct {
             }
         }
     }
-};
-
-pub const DecodeContext = struct {
-    codec_ctx: *dec.AvCodecContext,
-    fmt_ctx: dec.AvFormatContext,
-    should_quit: *std.atomic.Value(bool),
 };
 
 pub const audio = struct {
@@ -235,12 +226,17 @@ pub const audio = struct {
 
     // A/V Sync Debug: Set to true to enable audio-side logging
 
-    pub fn decode(clock: *Clock, pkt_queue: *packet.Queue, decode_ctx: DecodeContext) !void {
+    pub fn decode(decoder: *Decoder) !void {
         const log = std.log.scoped(.audio_decode);
 
         log.info("audio decode thread start", .{});
-        log.debug("sample_rate: {} channels: {} bytes_per_sample: {}", .{ clock.sample_rate, clock.channels, clock.bytes_per_sample });
         defer log.info("audio decode thread end", .{});
+
+        const clock = &decoder.audio_clock;
+        const codec_ctx = &decoder.audio_ctx;
+        const pkt_queue = &decoder.queue.pkt.audio;
+
+        log.debug("sample_rate: {} channels: {} bytes_per_sample: {}", .{ clock.sample_rate, clock.channels, clock.bytes_per_sample });
 
         var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
         defer c.av_frame_free(&maybe_src_frame);
@@ -251,7 +247,7 @@ pub const audio = struct {
         const src_frame = maybe_src_frame orelse return error.out_of_memory;
         const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
 
-        const audio_ctx = decode_ctx.codec_ctx.inner.?;
+        const audio_ctx = codec_ctx.*.inner.?;
 
         _ = try libav.err(c.av_channel_layout_copy(&dst_frame.ch_layout, &audio_ctx.ch_layout));
         dst_frame.sample_rate = audio_ctx.sample_rate;
@@ -265,8 +261,7 @@ pub const audio = struct {
         // debug
         var frame_count: u64 = 0;
 
-        var end_of_file = false;
-        while (!decode_ctx.should_quit.load(.monotonic)) {
+        while (!decoder.should_quit.load(.monotonic)) {
             // Try to receive a frame first if we have packets already in the decoder
             recv_loop: while (true) {
                 switch (c.avcodec_receive_frame(audio_ctx, src_frame)) {
@@ -305,11 +300,10 @@ pub const audio = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop(decode_ctx.should_quit) orelse {
-                if (decode_ctx.should_quit.load(.monotonic)) return;
+            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
                 const flush_ret = c.avcodec_send_packet(audio_ctx, null);
                 if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
-                end_of_file = true;
+
                 continue;
             };
             defer c.av_packet_free(&pkt);
@@ -323,14 +317,17 @@ pub const audio = struct {
 };
 
 pub const video = struct {
-    pub fn decode(frame_queue: *FrameQueue, pkt_queue: *packet.Queue, decode_ctx: DecodeContext) !void {
+    pub fn decode(decoder: *Decoder) !void {
         const log = std.log.scoped(.video_decode);
 
         log.info("video decode thread start", .{});
-        defer {
-            frame_queue.end_of_stream.store(true, .monotonic);
-            log.info("video decode thread end", .{});
-        }
+        defer log.info("video decode thread end", .{});
+
+        const frame_queue = &decoder.queue.frame;
+        defer frame_queue.end_of_stream.store(true, .monotonic);
+
+        const pkt_queue = &decoder.queue.pkt.video;
+        const codec_ctx = &decoder.video_ctx;
 
         var src_frame: AvFrame = try .init();
         defer src_frame.deinit();
@@ -338,7 +335,7 @@ pub const video = struct {
         var dst_frame: AvFrame = try .init();
         defer dst_frame.deinit();
 
-        const video_ctx = decode_ctx.codec_ctx.inner.?;
+        const video_ctx = codec_ctx.*.inner.?;
 
         try dst_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
 
@@ -359,15 +356,14 @@ pub const video = struct {
         const sws = maybe_sws orelse return error.out_of_memory;
 
         // TODO: using a fn ptr I think we can deduplicate this massive loop
-        var end_of_file = false;
-        while (!decode_ctx.should_quit.load(.monotonic)) {
+        while (!decoder.should_quit.load(.monotonic)) {
             // Try to receive a frame first if we have packets already in the decoder
             recv_loop: while (true) {
                 switch (c.avcodec_receive_frame(video_ctx, src_frame.ptr())) {
                     0 => {
                         defer c.av_frame_unref(dst_frame.ptr());
 
-                        try convert(decode_ctx.codec_ctx, src_frame.ptr(), dst_frame.ptr(), sws);
+                        try convert(decoder.video_ctx, src_frame.ptr(), dst_frame.ptr(), sws);
                         try frame_queue.push(dst_frame.ptr());
                     },
                     c.AVERROR(c.EAGAIN) => break :recv_loop,
@@ -376,11 +372,10 @@ pub const video = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop(decode_ctx.should_quit) orelse {
-                if (decode_ctx.should_quit.load(.monotonic)) return;
+            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
                 const flush_ret = c.avcodec_send_packet(video_ctx, null);
                 if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
-                end_of_file = true;
+
                 continue;
             };
             defer c.av_packet_free(&pkt);
@@ -529,7 +524,7 @@ pub const Decoder = struct {
 
     audio_clock: AudioClock,
 
-    should_quit: std.atomic.Value(bool) = .init(false),
+    should_quit: *const std.atomic.Value(bool),
 
     // Important Information
     colour_space: c.AVColorSpace,
@@ -561,7 +556,7 @@ pub const Decoder = struct {
 
     const log = std.log.scoped(.decode);
 
-    pub fn init(allocator: std.mem.Allocator, hw_device: ?c.AVHWDeviceType, path: []const u8) !Decoder {
+    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), hw_device: ?c.AVHWDeviceType, path: []const u8) !Decoder {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
@@ -586,6 +581,8 @@ pub const Decoder = struct {
         errdefer audio_clock.deinit();
 
         return .{
+            .should_quit = should_quit,
+
             .fmt_ctx = fmt_ctx,
             .video_ctx = video_ctx,
             .audio_ctx = audio_ctx,
@@ -628,44 +625,9 @@ pub const Decoder = struct {
     }
 
     pub fn spawn(self: *Decoder, render: ?[]const u8) !Handles {
-        const opts: packet.ReadOptions = .{
-            .video_stream = self.video_ctx.stream,
-            .audio_stream = self.audio_ctx.stream,
-            .should_quit = &self.should_quit,
-        };
-
-        const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{
-            &self.queue.pkt.video, // TODO: combine these args
-            &self.queue.pkt.audio,
-            self.fmt_ctx,
-            opts,
-        });
-
-        const vid_ctx: DecodeContext = .{
-            .codec_ctx = self.video_ctx,
-            .fmt_ctx = self.fmt_ctx,
-            .should_quit = &self.should_quit,
-        };
-
-        const video_handle = try std.Thread.spawn(.{}, video.decode, .{
-            &self.queue.frame,
-            &self.queue.pkt.video,
-            vid_ctx,
-        });
-
-        const audio_handle = if (render) |_| null else blk: {
-            const aud_ctx: DecodeContext = .{
-                .codec_ctx = self.audio_ctx,
-                .fmt_ctx = self.fmt_ctx,
-                .should_quit = &self.should_quit,
-            };
-
-            break :blk try std.Thread.spawn(.{}, audio.decode, .{
-                &self.audio_clock,
-                &self.queue.pkt.audio,
-                aud_ctx,
-            });
-        };
+        const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{self});
+        const video_handle = try std.Thread.spawn(.{}, video.decode, .{self});
+        const audio_handle = if (render) |_| null else try std.Thread.spawn(.{}, audio.decode, .{self});
 
         return .{
             .pkt = pkt_handle,

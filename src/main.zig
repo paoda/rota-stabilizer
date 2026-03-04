@@ -60,9 +60,11 @@ pub fn main() !void {
     const ui = if (cli.positionals[0]) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1600, 900);
     defer ui.deinit();
 
+    var should_quit: std.atomic.Value(bool) = .init(false);
+
     const src_path = cli.args.input orelse return error.missing_input_path;
 
-    var decoder = try Decoder.init(allocator, hw_device, src_path);
+    var decoder = try Decoder.init(allocator, &should_quit, hw_device, src_path);
     defer decoder.deinit(allocator);
 
     // -- opengl --
@@ -130,7 +132,7 @@ pub fn main() !void {
         var current_pbo: u1 = 0;
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
 
-        while (!decoder.should_quit.load(.monotonic)) {
+        while (!should_quit.load(.monotonic)) {
             // Process any pending audio packets (remux to output)
             while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
                 try encoder.writeAudioPacket(audio_stream, audio_pkt);
@@ -208,7 +210,7 @@ pub fn main() !void {
         }
 
         // Signal threads to quit (in case they're blocked waiting)
-        decoder.should_quit.store(true, .monotonic);
+        should_quit.store(true, .monotonic);
         decoder.queue.pkt.video.quit();
         decoder.queue.pkt.audio.quit();
     } else {
@@ -227,13 +229,13 @@ pub fn main() !void {
             log.info("audio hw_latency: {d:.2}ms", .{decoder.audio_clock.hw_latency_secs * std.time.ms_per_s});
         }
 
-        while (!decoder.should_quit.load(.monotonic)) {
+        while (!should_quit.load(.monotonic)) {
             var event: c.SDL_Event = undefined;
 
             while (c.SDL_PollEvent(&event)) {
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => {
-                        decoder.should_quit.store(true, .monotonic);
+                        should_quit.store(true, .monotonic);
                         decoder.queue.pkt.video.quit();
                         decoder.queue.pkt.audio.quit();
                     },
