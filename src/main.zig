@@ -24,6 +24,8 @@ const RGB24_BPP = @import("lib.zig").RGB24_BPP;
 const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
+var should_quit: std.atomic.Value(bool) = .init(false);
+
 // FIXME: Separate into Decode / Encode?
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
     .linux => c.AV_HWDEVICE_TYPE_VAAPI,
@@ -35,6 +37,8 @@ const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
 pub fn main() !void {
     const log = std.log.scoped(.ui);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
+
+    setupSignalHandler();
 
     var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -59,8 +63,6 @@ pub fn main() !void {
 
     const ui = if (cli.positionals[0]) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1600, 900);
     defer ui.deinit();
-
-    var should_quit: std.atomic.Value(bool) = .init(false);
 
     const src_path = cli.args.input orelse return error.missing_input_path;
 
@@ -830,4 +832,32 @@ pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
 
     gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
     gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @divTrunc(frame.width, 2), @divTrunc(frame.height, 2), gl.RG, gl.UNSIGNED_BYTE, null);
+}
+
+pub fn setupSignalHandler() void {
+    const windows = std.os.windows;
+    const posix = std.posix;
+
+    const winHandler = struct {
+        fn inner(ctrl_type: windows.DWORD) callconv(.winapi) windows.BOOL {
+            switch (ctrl_type) {
+                windows.CTRL_C_EVENT, windows.CTRL_BREAK_EVENT => {
+                    should_quit.store(true, .monotonic);
+                    return @intFromBool(true);
+                },
+                else => return @intFromBool(false),
+            }
+        }
+    }.inner;
+
+    const posixHandler = struct {
+        fn inner(_: i32) callconv(.c) void {
+            should_quit.store(true, .monotonic);
+        }
+    }.inner;
+
+    switch (builtin.os.tag) {
+        .windows => windows.kernel32.SetConsoleCtrlHandler(winHandler, 1),
+        else => posix.sigaction(posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = posix.sigemptyset(), .flags = 0 }, null),
+    }
 }
