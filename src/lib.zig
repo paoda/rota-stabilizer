@@ -52,7 +52,6 @@ pub const GpuResourceManager = struct {
     prog: ProgramPool,
 
     meta: Metadata,
-    allocator: std.mem.Allocator,
 
     const log = std.log.scoped(.gpu);
 
@@ -217,7 +216,6 @@ pub const GpuResourceManager = struct {
     pub fn init(allocator: std.mem.Allocator, dimensions: struct { u32, u32 }) !*GpuResourceManager {
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
-        manager.allocator = allocator;
 
         const width, const height = dimensions;
 
@@ -245,14 +243,14 @@ pub const GpuResourceManager = struct {
         return manager;
     }
 
-    pub fn deinit(self: *GpuResourceManager) void {
+    pub fn deinit(self: *GpuResourceManager, allocator: std.mem.Allocator) void {
         self.vao.deinit();
         self.vbo.deinit();
         self.fbo.deinit();
         self.pbo.deinit();
         self.tex.deinit();
 
-        self.allocator.destroy(self);
+        allocator.destroy(self);
     }
 
     pub fn blur(self: GpuResourceManager) BlurManager {

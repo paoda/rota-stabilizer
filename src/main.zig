@@ -79,7 +79,7 @@ pub fn main() !void {
     _ = c.SDL_GL_SetSwapInterval(0);
 
     var res = try GpuResourceManager.init(allocator, decoder.dimensions);
-    defer res.deinit();
+    defer res.deinit(allocator);
 
     var stable_buffer = DoubleBuffer.init(res);
     const angle_calc = try AngleCalc.init(res, decoder.colour_space);
