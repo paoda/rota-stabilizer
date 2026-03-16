@@ -263,7 +263,6 @@ pub fn main() !void {
 
                 // Track if this is the first frame (for delayed audio start)
                 const is_first_frame = audio_clock.isPaused();
-                const first_frame_pts: f64 = if (is_first_frame) pt_in_seconds else 0.0;
 
                 if (frame.format != c.AV_PIX_FMT_NV12) {
                     @branchHint(.cold);
@@ -274,63 +273,55 @@ pub fn main() !void {
                     return error.ffmpeg_error;
                 }
 
-                // A/V sync thresholds - tuned for both high refresh (120fps) and standard (60fps) content
-                // drop_behind: How far audio can get ahead before dropping video frames
-                //   - 2 frames gives some tolerance without visible desync
-                const drop_behind = @max(0.025, frame_period * 2.0);
-                // delay_ahead: How far video can get ahead before we delay
-                //   - 1.5 frames allows natural jitter without excessive delays
-                const delay_ahead = @max(0.012, frame_period * 1.5);
-                // max_delay: Cap on sleep time to handle PTS discontinuities
-                //   - 500ms handles jumps without freezing UI too long
-                const max_delay = 0.500;
-                // desync_reset: Major desync threshold - skip frame entirely
-                const desync_reset = 2.0;
+                const delay_threshold = @max(0.025, frame_period * 2.0);
 
                 stable_buffer.set_display_time(pt_in_seconds);
-
                 frame_count += 1; // A/V Sync Purposes
-
-                if (!is_first_frame) {
-                    // A/V sync: compare the frame being DISPLAYED (previous frame from invert()) to audio clock
-                    // Double-buffer pattern: we upload to current slot, but display from inverted slot
-                    const audio_time = audio_clock.seconds_passed();
-                    const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
-                    const diff = frame_time - audio_time;
-
-                    // skip frame
-                    if (@abs(diff) > desync_reset) {
-                        log.err("A/V desync: {d:.1}ms - skipping frame", .{diff * std.time.ms_per_s});
-                        continue;
-                    }
-
-                    // drop frame
-                    if (diff < -drop_behind) {
-                        log.debug("DROP #{} | display: {d:.3}s upload: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m", .{
-                            frame_count, frame_time, pt_in_seconds, audio_time, diff * std.time.ms_per_s,
-                        });
-                        continue;
-                    }
-
-                    // delay frame
-                    if (diff > delay_ahead) {
-                        const delay_ns = @min(diff * std.time.ns_per_s, max_delay * std.time.ns_per_s);
-                        log.debug("DELAY #{} | display: {d:.3}s upload: {d:.3}s audio={d:.3}s diff: \x1B[33m{d:.1}ms\x1B[39m sleep: {d:.1}ms", .{
-                            frame_count, frame_time, pt_in_seconds, audio_time, diff * std.time.ms_per_s, delay_ns / std.time.ns_per_ms,
-                        });
-
-                        sleep(@intFromFloat(delay_ns));
-                    }
-                }
 
                 uploadYTexture(stable_buffer, frame);
                 uploadUvTexture(stable_buffer, frame);
 
+                if (!is_first_frame) {
+                    const audio_time = audio_clock.seconds_passed();
+                    const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
+                    const diff_s = frame_time - audio_time;
+
+                    if (diff_s > 0.500) { // FIXME: magic value
+                        log.warn("wildly ahead: {d:.1}ms - hard syncing", .{diff_s * std.time.ms_per_s});
+                        c.SDL_DelayNS(@intFromFloat(diff_s * std.time.ns_per_s));
+                    }
+
+                    // drop frame
+                    if (diff_s < -delay_threshold) {
+                        const diff_ms = diff_s * std.time.ms_per_s;
+
+                        log.debug("drop #{} | video: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m", .{ frame_count, frame_time, audio_time, diff_ms });
+                        continue;
+                    }
+
+                    if (diff_s > 0) {
+                        const limit_s = frame_period * 1.25; // to allow catchup
+
+                        const diff_ms = diff_s * std.time.ms_per_s;
+                        const delay_ms = @min(diff_s, limit_s) * std.time.ms_per_s;
+
+                        if (diff_s > frame_period)
+                            log.debug("delay #{} | video :{d:.3}s audio: {d:.3}s diff \x1B[33m{d:.1}ms\x1B[39m (sleep: {d:.1}ms)", .{
+                                frame_count,
+                                frame_time,
+                                audio_time,
+                                diff_ms,
+                                delay_ms,
+                            });
+
+                        c.SDL_DelayPrecise(@intFromFloat(delay_ms * std.time.ns_per_ms));
+                    }
+                }
+
                 try render(&view, &stable_buffer, angle_calc, res, camera);
 
-                // Start audio AFTER first frame is rendered (not before)
-                // This ensures audio timing aligns with actual frame display
-                if (is_first_frame) try audio_clock.start(first_frame_pts);
+                // aligns audio clock with frame pts
+                if (is_first_frame) try audio_clock.start(pt_in_seconds);
             } else {
                 // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
                 continue;
