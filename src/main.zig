@@ -202,19 +202,9 @@ pub fn main() !void {
         // ===== PLAYBACK MODE =====
         const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
 
-        if (@import("builtin").mode == .Debug) {
-            const drop_behind_ms = @max(0.025, frame_period * 2.0) * std.time.ms_per_s;
-            const delay_ahead_ms = @max(0.012, frame_period * 1.5) * std.time.ms_per_s;
-            log.info("Frame period: {d:.3}ms ({d:.2} fps)", .{ frame_period * std.time.ms_per_s, 1.0 / frame_period });
-            log.info("Sync thresholds: drop_behind={d:.1}ms (~{d:.1} frames), delay_ahead={d:.1}ms (~{d:.1} frames), max_delay=500ms", .{
-                drop_behind_ms,
-                drop_behind_ms / (frame_period * std.time.ms_per_s),
-                delay_ahead_ms,
-                delay_ahead_ms / (frame_period * std.time.ms_per_s),
-            });
-
-            log.info("audio hw_latency: {d:.2}ms", .{audio_clock.hw_latency_secs * std.time.ms_per_s});
-        }
+        const delay_threshold = @max(0.025, frame_period * 2.0);
+        log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
+        log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
 
         while (!should_quit.load(.monotonic)) {
             var event: c.SDL_Event = undefined;
@@ -273,8 +263,6 @@ pub fn main() !void {
                     return error.ffmpeg_error;
                 }
 
-                const delay_threshold = @max(0.025, frame_period * 2.0);
-
                 stable_buffer.set_display_time(pt_in_seconds);
                 frame_count += 1; // A/V Sync Purposes
 
@@ -289,6 +277,8 @@ pub fn main() !void {
                     if (diff_s > 0.500) { // FIXME: magic value
                         log.warn("wildly ahead: {d:.1}ms - hard syncing", .{diff_s * std.time.ms_per_s});
                         c.SDL_DelayNS(@intFromFloat(diff_s * std.time.ns_per_s));
+
+                        // FIXME: on wake diff_s is going to be incorrect
                     }
 
                     // drop frame

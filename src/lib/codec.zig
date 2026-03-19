@@ -84,8 +84,8 @@ pub const packet = struct {
     pub fn read(decode: *Decoder) !void {
         const log = std.log.scoped(.packet_read);
 
-        log.info("packet read thread start", .{});
-        defer log.info("packet read thread end", .{});
+        log.debug("packet read thread start", .{});
+        defer log.debug("packet read thread end", .{});
 
         var pkt = AvPacket.init();
         defer pkt.deinit();
@@ -154,7 +154,7 @@ pub const audio = struct {
             try errify(c.SDL_GetAudioDeviceFormat(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &actual, &sample_frames));
             const offset = @as(f64, @floatFromInt(sample_frames)) / @as(f64, @floatFromInt(actual.freq));
 
-            log.debug("{d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
+            log.info("hw latency: {d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
 
             return .{
                 .start_time = c.SDL_GetPerformanceCounter(),
@@ -229,14 +229,19 @@ pub const audio = struct {
     pub fn decode(decoder: *Decoder) !void {
         const log = std.log.scoped(.audio_decode);
 
-        log.info("audio decode thread start", .{});
-        defer log.info("audio decode thread end", .{});
+        log.debug("audio decode thread start", .{});
+        defer log.debug("audio decode thread end", .{});
 
         const clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
         const codec_ctx = &decoder.audio_ctx;
         const pkt_queue = &decoder.queue.pkt.audio;
 
-        log.debug("sample_rate: {} channels: {} bytes_per_sample: {}", .{ clock.sample_rate, clock.channels, clock.bytes_per_sample });
+        const max_queue_sec = clock.hw_latency_secs * 1.5;
+        const bytes_per_sec: f64 = @floatFromInt(clock.sample_rate * clock.bytes_per_sample * clock.channels);
+        const max_len: c_int = @intFromFloat(bytes_per_sec * max_queue_sec);
+
+        log.info("rate: {} channels: {} bytes_per_sample: {}", .{ clock.sample_rate, clock.channels, clock.bytes_per_sample });
+        log.info("queue: {d:.2}ms ({d} bytes)", .{ max_queue_sec * std.time.ms_per_s, @floor(max_queue_sec * bytes_per_sec) });
 
         var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
         defer c.av_frame_free(&maybe_src_frame);
@@ -270,24 +275,12 @@ pub const audio = struct {
 
                         frame_count += 1;
 
-                        const bytes_per_sec = clock.sample_rate * clock.bytes_per_sample * clock.channels;
-                        // Reduced from 1 second to 150ms for lower latency
-                        const max_queue_secs = 0.150;
-                        const max_len: c_int = @intFromFloat(@as(f64, @floatFromInt(bytes_per_sec)) * max_queue_secs);
-
                         _ = try libav.err(c.swr_convert_frame(swr, dst_frame, src_frame));
 
                         // Track stalls when audio buffer is full
-                        var stall_count: u32 = 0;
                         while (true) {
                             if (c.SDL_GetAudioStreamQueued(clock.stream) < max_len) break;
-                            defer stall_count += 1;
-
                             std.Thread.sleep(5 * std.time.ns_per_ms);
-                        }
-
-                        if (stall_count > 0) {
-                            log.debug("STALL frame #{} waited {}x5ms", .{ frame_count, stall_count });
                         }
 
                         const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
@@ -320,8 +313,8 @@ pub const video = struct {
     pub fn decode(decoder: *Decoder) !void {
         const log = std.log.scoped(.video_decode);
 
-        log.info("video decode thread start", .{});
-        defer log.info("video decode thread end", .{});
+        log.debug("video decode thread start", .{});
+        defer log.debug("video decode thread end", .{});
 
         const frame_queue = &decoder.queue.frame;
         defer frame_queue.end_of_stream.store(true, .monotonic);

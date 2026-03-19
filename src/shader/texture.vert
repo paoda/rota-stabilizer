@@ -15,7 +15,6 @@ void main() {
     float cosTheta = cos(angle);
     float sinTheta = sin(angle);
 
-    // FIXME: issues passing matrix as texture, so we do this 4x
     mat2 rotation = mat2(cosTheta, -sinTheta, sinTheta, cosTheta); 
 
     vec2 view_pos  = u_view_transform * pos;
