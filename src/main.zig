@@ -812,6 +812,8 @@ pub fn setupSignalHandler() void {
     const windows = std.os.windows;
     const posix = std.posix;
 
+    const log = std.log.scoped(.signal_handler);
+
     const winHandler = struct {
         fn inner(ctrl_type: windows.DWORD) callconv(.winapi) windows.BOOL {
             switch (ctrl_type) {
@@ -831,7 +833,10 @@ pub fn setupSignalHandler() void {
     }.inner;
 
     switch (builtin.os.tag) {
-        .windows => windows.kernel32.SetConsoleCtrlHandler(winHandler, 1),
+        .windows => {
+            const ret = windows.kernel32.SetConsoleCtrlHandler(winHandler, 1);
+            if (ret == windows.FALSE) log.debug("failed to setup ctrl handler: {t}", .{windows.GetLastError()});
+        },
         else => posix.sigaction(posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = posix.sigemptyset(), .flags = 0 }, null),
     }
 }
