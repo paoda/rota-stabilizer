@@ -15,11 +15,11 @@ void main() {
     float cosTheta = cos(angle);
     float sinTheta = sin(angle);
 
-    mat2 rotation = mat2(cosTheta, -sinTheta, sinTheta, cosTheta); 
+    mat2 rotation = mat2(cosTheta, -sinTheta, sinTheta, cosTheta);
 
-    vec2 view_pos  = u_view_transform * pos;
+    vec2 view_pos = u_view_transform * pos;
     vec2 world_pos = rotation * (u_world_transform * view_pos);
-    vec2 clip_pos  = u_clip_transform * world_pos;
+    vec2 clip_pos = u_clip_transform * world_pos;
 
     gl_Position = vec4(clip_pos, 0.0, 1.0);
     uv = _uv;

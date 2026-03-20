@@ -4,45 +4,14 @@ layout(location = 0) out vec4 angle;
 
 uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
-// uniform vec2 u_resolution;
 
-uniform uint u_colour_space;
+uniform mat3 u_colour_space;
 
-const float Y_OFFSET = 16.0 / 255.0 ;
-const float Y_SCALE = 255.0 / ( 235.0 - 16.0 ) ;
-const float UV_SCALE = 255.0 / ( 240.0 - 16.0 ) ;
+const float Y_OFFSET = 16.0 / 255.0;
+const float Y_SCALE = 255.0 / (235.0 - 16.0);
+const float UV_SCALE = 255.0 / (240.0 - 16.0);
 
-mat3 colourSpace() {
-    const uint AVCOL_SPC_BT709 = 1u; // BT.709
-    const uint AVCOL_SPC_BT470BG = 5u; // BT.601 (NTSC)
-    const uint AVCOL_SPC_SMPTE170M = 6u; // BT.601 (PAL)
-
-    const mat3 bt601 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.39465, 2.03211,
-            1.13983, -0.58060, 0.0
-        );
-
-    const mat3 bt709 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.1873, 1.8556,
-            1.5748, -0.4681, 0.0
-        );
-
-     switch (u_colour_space) {
-        case AVCOL_SPC_BT709:
-            return bt709;
-
-        case AVCOL_SPC_BT470BG:
-        case AVCOL_SPC_SMPTE170M :
-            return bt601;
-        default:
-            return bt709; // FIXME: do i need to suport BT.2020?
-    }
-}
-
-
-vec3 nv12ToRgb(float y_norm, vec2 uv_norm) {
+vec3 decode(float y_norm, vec2 uv_norm) {
     float y = (y_norm - Y_OFFSET) * Y_SCALE;
     vec2 uv = (uv_norm - Y_OFFSET) * UV_SCALE;
 
@@ -51,8 +20,7 @@ vec3 nv12ToRgb(float y_norm, vec2 uv_norm) {
 
     vec3 yuv = vec3(y, uv.r - 0.5, uv.g - 0.5);
 
-    // TODO: select colorspace based on AVFrame
-    return clamp(colourSpace() * yuv, 0.0, 1.0);
+    return clamp(u_colour_space * yuv, 0.0, 1.0);
 }
 
 vec3 sampleTexture(int size, ivec2 start_pos) {
@@ -70,7 +38,7 @@ vec3 sampleTexture(int size, ivec2 start_pos) {
     }
 
     float count = float(size * size);
-    return nv12ToRgb(y_sum / count, uv_sum / count);
+    return decode(y_sum / count, uv_sum / count);
 }
 
 void main() {

@@ -4,94 +4,55 @@ out vec4 frag_colour;
 in vec2 uv;
 
 const float weight[5] = float[](
-    0.2041636887,
-    0.1801738229,
-    0.1238315368,
-    0.0662822453,
-    0.0276305506
-);
+        0.2041636887,
+        0.1801738229,
+        0.1238315368,
+        0.0662822453,
+        0.0276305506
+    );
 
-uniform vec2 u_resolution;
-uniform bool u_horizontal;
+uniform vec2 u_texel_size;
+uniform vec2 u_direction;
 uniform bool u_use_nv12;
-uniform uint u_colour_space;
+uniform mat3 u_colour_space;
 
 uniform sampler2D u_screen;
 uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
 
-mat3 colourSpace() {
-    const uint AVCOL_SPC_BT709 = 1u; // BT.709
-    const uint AVCOL_SPC_BT470BG = 5u; // BT.601 (NTSC)
-    const uint AVCOL_SPC_SMPTE170M = 6u; // BT.601 (PAL)
+const float Y_OFFSET = 16.0 / 255.0;
+const float Y_SCALE = 255.0 / (235.0 - 16.0);
+const float UV_SCALE = 255.0 / (240.0 - 16.0);
 
-    const mat3 bt601 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.39465, 2.03211,
-            1.13983, -0.58060, 0.0
-        );
+vec3 sampleTex(vec2 pos) {
+    if (!u_use_nv12) return texture(u_screen, pos).rgb;
 
-    const mat3 bt709 = mat3(
-            1.0, 1.0, 1.0,
-            0.0, -0.1873, 1.8556,
-            1.5748, -0.4681, 0.0
-        );
+    float y = texture(u_y_tex, pos).r;
+    vec2 _uv = texture(u_uv_tex, pos).rg;
 
-     switch (u_colour_space) {
-        case AVCOL_SPC_BT709:
-            return bt709;
-
-        case AVCOL_SPC_BT470BG:
-        case AVCOL_SPC_SMPTE170M :
-            return bt601;
-        default:
-            return bt709; // FIXME: do i need to suport BT.2020?
-    }
+    return vec3(y, _uv);
 }
 
+vec3 process(vec3 colour) {
+    if (!u_use_nv12) return colour;
 
-vec3 nv12ToRgb(float normalized_y, vec2 normalized_uv) {
-    const float offset = 16.0 / 255.0;
-    float y = (normalized_y - offset) * (255.0 / (235.0 - 16.0));
-    vec2 uv = (normalized_uv - offset) * (255.0 / (240.0 - 16.0));
+    float y = (colour.r - Y_OFFSET) * Y_SCALE;
+    vec2 _uv = (colour.gb - Y_OFFSET) * UV_SCALE;
 
     y = clamp(y, 0.0, 1.0);
-    uv = clamp(uv, 0.0, 1.0);
+    _uv = clamp(_uv, 0.0, 1.0);
 
-    float u = uv.r - 0.5;
-    float v = uv.g - 0.5;
-
-    return clamp(colourSpace() * vec3(y, u, v), 0.0, 1.0);
-}
-
-vec3 getTexture(vec2 uv) {
-    if (u_use_nv12) {
-        float y = texture(u_y_tex, uv).r;
-        vec2 uv = texture(u_uv_tex, uv).rg;
-
-        return nv12ToRgb(y, uv);
-    }
-
-    return texture(u_screen, uv).rgb;
+    return clamp(u_colour_space * vec3(y, _uv.r - 0.5, _uv.g - 0.5), 0.0, 1.0);
 }
 
 void main() {
-    // Calculate texel size based on screen dimensions
-    vec2 tex_offset = 1.0 / u_resolution;
+    vec3 result = sampleTex(uv) * weight[0];
 
-    vec3 result = getTexture(uv) * weight[0];
-
-    if (u_horizontal) { // Horizontal pass - sample along X-axis
-        for (int i = 1; i < 5; ++i) {
-            result += getTexture(uv + vec2(tex_offset.x * i, 0.0)) * weight[i];
-            result += getTexture(uv - vec2(tex_offset.x * i, 0.0)) * weight[i];
-        }
-    } else { // Vertical pass - sample along Y-axis
-        for (int i = 1; i < 5; ++i) {
-            result += getTexture(uv + vec2(0.0, tex_offset.y * i)) * weight[i];
-            result += getTexture(uv - vec2(0.0, tex_offset.y * i)) * weight[i];
-        }
+    for (int i = 1; i < 5; ++i) {
+        vec2 offset = u_direction * u_texel_size * float(i);
+        result += sampleTex(uv + offset) * weight[i];
+        result += sampleTex(uv - offset) * weight[i];
     }
 
-    frag_colour = vec4(result, 1.0);
+    frag_colour = vec4(process(result), 1.0);
 }

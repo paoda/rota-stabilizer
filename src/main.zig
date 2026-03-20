@@ -82,11 +82,12 @@ pub fn main() !void {
     defer res.deinit(allocator);
 
     var stable_buffer = DoubleBuffer.init(res);
-    const angle_calc = try AngleCalc.init(res, decoder.colour_space);
 
     const w, const h = try ui.windowSize();
     var camera = Camera.init(decoder.dimensions, w, h, decoder.colour_space);
     var view = Viewport.init(w, h);
+
+    const angle_calc = try AngleCalc.init(res, camera);
     // -- opengl end --
 
     const frame_rate = decoder.framerate();
@@ -413,7 +414,7 @@ fn render(
     angle_calc.execute(view, tex);
 
     {
-        blur(res.blur(), res, view, tex, camera.colour_space, 4);
+        blur(res.blur(), res, view, tex, camera, 4);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
@@ -498,14 +499,15 @@ fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
-        gl.Uniform1ui(gl.GetUniformLocation(prog, "u_colour_space"), camera.colour_space);
+
+        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 }
 
-fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, colour_space: c.AVColorSpace, comptime passes: u32) void {
+fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, camera: Camera, comptime passes: u32) void {
     if (passes == 0) return;
 
     std.debug.assert(passes & 1 == 0);
@@ -537,14 +539,18 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
     gl.ActiveTexture(gl.TEXTURE2);
     gl.BindTexture(gl.TEXTURE_2D, src_tex.uv);
 
-    gl.Uniform2f(gl.GetUniformLocation(program, "u_resolution"), @floatFromInt(width), @floatFromInt(height));
     gl.Uniform1i(gl.GetUniformLocation(program, "u_screen"), 0);
     gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 1);
     gl.Uniform1i(gl.GetUniformLocation(program, "u_uv_tex"), 2);
-    gl.Uniform1ui(gl.GetUniformLocation(program, "u_colour_space"), colour_space);
 
-    const horiz_loc = gl.GetUniformLocation(program, "u_horizontal");
-    const use_nv12_loc = gl.GetUniformLocation(program, "u_use_nv12");
+    const f_width: f32 = @floatFromInt(width);
+    const f_height: f32 = @floatFromInt(height);
+    gl.Uniform2f(gl.GetUniformLocation(program, "u_texel_size"), 1.0 / f_width, 1.0 / f_height);
+
+    gl.UniformMatrix3fv(gl.GetUniformLocation(program, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
+
+    const dir_loc = gl.GetUniformLocation(program, "u_direction");
+    const nv12_loc = gl.GetUniformLocation(program, "u_use_nv12");
 
     gl.ActiveTexture(gl.TEXTURE0);
 
@@ -555,8 +561,8 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
         gl.BindFramebuffer(gl.FRAMEBUFFER, current.fbo);
         gl.BindTexture(gl.TEXTURE_2D, other.tex);
 
-        gl.Uniform1i(horiz_loc, @intFromBool(i % 2 == 0));
-        gl.Uniform1i(use_nv12_loc, @intFromBool(i == 0));
+        gl.Uniform2f(dir_loc, @floatFromInt(i & 1), @floatFromInt((i + 1) & 1));
+        gl.Uniform1i(nv12_loc, @intFromBool(i == 0));
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
@@ -598,12 +604,15 @@ const Nv12Tex = struct { y: c_uint, uv: c_uint };
 
 const AngleCalc = struct {
     res: *const GpuResourceManager,
-    colour_space: c.AVColorSpace,
+    colour_matrix: [*]const [9]f32,
 
     const log = std.log.scoped(.angle_calc);
 
-    pub fn init(res: *const GpuResourceManager, colour_space: c.AVColorSpace) !AngleCalc {
-        return .{ .res = res, .colour_space = colour_space };
+    pub fn init(res: *const GpuResourceManager, camera: Camera) !AngleCalc {
+        return .{
+            .res = res,
+            .colour_matrix = camera.colourSpaceMatrix(),
+        };
     }
 
     pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
@@ -630,7 +639,7 @@ const AngleCalc = struct {
 
         gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(program, "u_uv_tex"), 1);
-        gl.Uniform1ui(gl.GetUniformLocation(program, "u_colour_space"), self.colour_space);
+        gl.UniformMatrix3fv(gl.GetUniformLocation(program, "u_colour_space"), 1, gl.FALSE, self.colour_matrix);
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
@@ -649,6 +658,20 @@ const Camera = struct {
     colour_space: c.AVColorSpace,
 
     zoom: f32 = 1.45, // TODO: revert to 1.0
+
+    // zig fmt: off
+    const bt601 = [9]f32{
+        1.0,      1.0,      1.0,
+        0.0,     -0.39465,  2.03211,
+        1.13983, -0.58060,  0.0
+    };
+
+    const bt709 = [9]f32{
+        1.0,      1.0,      1.0,
+        0.0,     -0.1873,   1.8556,
+        1.5748,  -0.4681,   0.0
+    };
+    // zig fmt: on
 
     pub fn init(dimensions: struct { u32, u32 }, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
         const video_width, const video_height = dimensions;
@@ -679,6 +702,14 @@ const Camera = struct {
             .scale = scale,
             .inv_scale = inv_scale,
         };
+    }
+
+    pub fn colourSpaceMatrix(self: Camera) [*]const [9]f32 {
+        return @ptrCast(switch (self.colour_space) {
+            c.AVCOL_SPC_BT470BG, c.AVCOL_SPC_SMPTE170M => &bt601,
+            c.AVCOL_SPC_BT709 => &bt709,
+            else => &bt709,
+        });
     }
 
     pub fn updateWindow(self: *@This(), width: c_int, height: c_int) void {
