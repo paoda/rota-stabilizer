@@ -27,7 +27,7 @@ For now You can type the following in the terminal:
 - auto crop for tablets 
 - pretty ui (blurred background, ring, device border)
 
-# Previous Work
+# Related Work
 - [Lawrenceeeeeeee/python_rotaeno_stabilizer](https://github.com/Lawrenceeeeeeee/python_rotaeno_stabilizer)
 - [linnaea/rotaeno-stablizer](https://github.com/linnaea/rotaeno-stablizer)
 - [I-love-study/py-rotaeno-stablizer-gui](https://github.com/I-love-study/py-rotaeno-stablizer-gui)
