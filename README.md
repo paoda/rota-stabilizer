@@ -2,6 +2,9 @@
 
 ![a screenshot of the application in question](./asset/example.png)
 
+
+# [See this in action!](https://youtu.be/qs2fVbXWDNI)
+
 ## About
 
 Rotaeno is uniquely disadvantaged in that a screen recording on its own is straight up unusable. Currently, players either try a handcam, or use existing stabilization tools. I want everyone to pass around cool looking rotaeno gameplay and I think the best way to achieve this is by making it as frictionless as possible to produce something good looking.
