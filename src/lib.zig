@@ -237,7 +237,7 @@ pub const GpuResourceManager = struct {
         try manager.setupVertexArrays(allocator, width, height);
         try manager.setupAngleCalc();
 
-        manager.setupBlur(width / 8, height / 8);
+        manager.setupBlur(width, height);
 
         manager.setupVideoTextures(width, height);
         return manager;
@@ -346,7 +346,22 @@ pub const GpuResourceManager = struct {
         gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
     }
 
-    pub fn setupBlur(self: *GpuResourceManager, width: u32, height: u32) void {
+    pub fn setupBlur(self: *GpuResourceManager, full_width: u32, full_height: u32) void {
+        const width, const height = blk: {
+            const limit = 128; // arbitrary
+            var w = full_width;
+            var h = full_height;
+
+            while (true) {
+                const next = .{ w / 2, h / 2 };
+                if (@min(next[0], next[1]) < limit) break :blk .{ w, h };
+
+                w, h = next;
+            }
+        };
+
+        log.debug("blur resolution: {}x{}", .{ width, height });
+
         const tex_front = self.tex.get(.blur_front);
         const tex_back = self.tex.get(.blur_back);
         const fbo_front = self.fbo.get(.blur_front);

@@ -414,7 +414,7 @@ fn render(
     angle_calc.execute(view, tex);
 
     {
-        blur(res.blur(), res, view, tex, camera, 4);
+        blur(res.blur(), res, view, tex, camera, 6);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
