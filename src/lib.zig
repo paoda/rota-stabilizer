@@ -497,7 +497,7 @@ pub fn sleep(ns: u64) void {
     // Perform coarse sleep if the total duration is significantly larger than the threshold
     if (ns > threshold_ns) {
         const ideal_ns = ns - threshold_ns;
-        std.Thread.sleep(ideal_ns);
+        sleep(ideal_ns);
     }
 
     while (c.SDL_GetPerformanceCounter() < target_counter) std.atomic.spinLoopHint();
