@@ -59,5 +59,5 @@ void main() {
         return;
     }
 
-    frag_color = vec4(sampleTex(uv_norm), 1.0); // FIXME: should this be uv_norm?
+    frag_color = vec4(sampleTex(uv), 1.0);
 }
