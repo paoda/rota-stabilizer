@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const gl = @import("gl");
 const clap = @import("clap");
+const ztracy = @import("ztracy");
 
 const c = @import("lib.zig").c;
 const platform = @import("lib/platform.zig");
@@ -28,10 +29,10 @@ var should_quit: std.atomic.Value(bool) = .init(false);
 
 // FIXME: Separate into Decode / Encode?
 const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
-    .linux => c.AV_HWDEVICE_TYPE_VAAPI,
-    .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
+    // .linux => c.AV_HWDEVICE_TYPE_VAAPI,
+    // .windows => c.AV_HWDEVICE_TYPE_CUDA,
     // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, // TODO: get a macbook
-    else => null,
+    else => c.AV_HWDEVICE_TYPE_VULKAN,
 };
 
 pub fn main() !void {
@@ -136,6 +137,9 @@ pub fn main() !void {
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
 
         while (!should_quit.load(.monotonic)) {
+            const zone = ztracy.ZoneN(@src(), "encode loop");
+            defer zone.End();
+
             // Process any pending audio packets (remux to output)
             while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
                 try encoder.writeAudioPacket(audio_stream, audio_pkt);
@@ -146,21 +150,32 @@ pub fn main() !void {
 
             if (decoder.queue.frame.pop()) |frame| {
                 defer decoder.queue.frame.recycle(frame);
-                defer stable_buffer.swap();
+                defer frame_count += 1;
 
-                frame_count += 1;
+                const z = ztracy.ZoneN(@src(), "frame received");
+                defer z.End();
 
                 uploadYTexture(stable_buffer, frame);
                 uploadUvTexture(stable_buffer, frame);
 
                 try render(&view, &stable_buffer, angle_calc, res, camera);
+                stable_buffer.swap();
 
                 {
+                    const pbo_z = ztracy.ZoneN(@src(), "read from OpenGL");
+                    defer pbo_z.End();
+
                     // Start async readback into current PBO
                     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (current_pbo == 1) .rgb_front else .rgb_back));
                     defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
-                    gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
+                    {
+                        const read_z = ztracy.ZoneN(@src(), "gl.ReadPixels");
+                        defer read_z.End();
+
+                        gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
+                    }
+
                     gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
 
                     // encode buffered frame
@@ -177,6 +192,8 @@ pub fn main() !void {
                 // Update progress
                 progress_node.setCompletedItems(frame_count);
             } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
+                const z = ztracy.ZoneN(@src(), "final frame received");
+                defer z.End();
 
                 // encode buffered frame
                 if (pending_frame_pts) |pts| blk: {
@@ -246,7 +263,9 @@ pub fn main() !void {
 
             if (decoder.queue.frame.pop()) |frame| {
                 defer decoder.queue.frame.recycle(frame);
-                defer stable_buffer.swap();
+
+                const z = ztracy.ZoneN(@src(), "video rame received");
+                defer z.End();
 
                 // Calculate PTS early - needed for initial sync
                 const time_base: f64 = c.av_q2d(decoder.stream(.video).time_base);
@@ -276,29 +295,35 @@ pub fn main() !void {
                     const diff_s = frame_time - audio_time;
 
                     if (diff_s > 0.500) { // FIXME: magic value
-                        log.warn("wildly ahead: {d:.1}ms - hard syncing", .{diff_s * std.time.ms_per_s});
-                        c.SDL_DelayNS(@intFromFloat(diff_s * std.time.ns_per_s));
+                        const z_delay = ztracy.ZoneNC(@src(), "hard delay sync", 0x3b3b3b);
+                        defer z_delay.End();
 
-                        // FIXME: on wake diff_s is going to be incorrect
+                        log.warn("wildly ahead: {d:.1}ms - hard syncing", .{diff_s * std.time.ms_per_s});
+                        c.SDL_DelayNS(@intFromFloat(diff_s * std.time.ns_per_s)); // FIXME: on wake diff_s is going to be incorrect
                     }
 
                     // drop frame
                     if (diff_s < -delay_threshold) {
+                        const z_drop = ztracy.ZoneNC(@src(), "drop sync", 0x3b3b3b);
+                        defer z_drop.End();
+
                         const diff_ms = diff_s * std.time.ms_per_s;
 
-                        log.debug("drop #{} | video: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m", .{ frame_count, frame_time, audio_time, diff_ms });
+                        log.debug("video: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m (drop)", .{ frame_time, audio_time, diff_ms });
                         continue;
                     }
 
                     if (diff_s > 0) {
+                        const z_delay = ztracy.ZoneNC(@src(), "delay sync", 0x3b3b3b);
+                        defer z_delay.End();
+
                         const limit_s = frame_period * 1.25; // to allow catchup
 
                         const diff_ms = diff_s * std.time.ms_per_s;
                         const delay_ms = @min(diff_s, limit_s) * std.time.ms_per_s;
 
                         if (diff_s > frame_period)
-                            log.debug("delay #{} | video :{d:.3}s audio: {d:.3}s diff \x1B[33m{d:.1}ms\x1B[39m (sleep: {d:.1}ms)", .{
-                                frame_count,
+                            log.debug("video: {d:.3}s audio: {d:.3}s diff \x1B[33m{d:.1}ms\x1B[39m (sleep: {d:.1}ms)", .{
                                 frame_time,
                                 audio_time,
                                 diff_ms,
@@ -310,9 +335,9 @@ pub fn main() !void {
                 }
 
                 try render(&view, &stable_buffer, angle_calc, res, camera);
+                stable_buffer.swap();
 
-                // aligns audio clock with frame pts
-                if (is_first_frame) try audio_clock.start(pt_in_seconds);
+                if (is_first_frame) try audio_clock.start(pt_in_seconds); // aligns audio clock with frame pts
             } else {
                 // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
                 continue;
@@ -406,6 +431,9 @@ fn render(
     res: *const GpuResourceManager,
     camera: Camera,
 ) !void {
+    const zone = ztracy.Zone(@src());
+    defer zone.End();
+
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
@@ -414,6 +442,9 @@ fn render(
     angle_calc.execute(view, tex);
 
     {
+        const z = ztracy.ZoneN(@src(), "background pass");
+        defer z.End();
+
         blur(res.blur(), res, view, tex, camera, 6);
         const prog = res.prog.get(.bg);
 
@@ -441,6 +472,9 @@ fn render(
     }
 
     {
+        const z = ztracy.ZoneN(@src(), "ui pass");
+        defer z.End();
+
         const circle_prog = res.prog.get(.circle);
         const ring_prog = res.prog.get(.ring);
 
@@ -468,6 +502,9 @@ fn render(
     }
 
     {
+        const z = ztracy.ZoneN(@src(), "video pass");
+        defer z.End();
+
         const prog = res.prog.get(.tex);
 
         gl.UseProgram(prog);
@@ -509,6 +546,9 @@ fn render(
 
 fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, camera: Camera, comptime passes: u32) void {
     if (passes == 0) return;
+
+    const zone = ztracy.Zone(@src());
+    defer zone.End();
 
     std.debug.assert(passes & 1 == 0);
 
@@ -616,6 +656,9 @@ const AngleCalc = struct {
     }
 
     pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
+        const zone = ztracy.ZoneN(@src(), "angle calc pass");
+        defer zone.End();
+
         const program = self.res.prog.get(.angle);
 
         view.set(1, 1);
@@ -778,6 +821,9 @@ const Camera = struct {
 };
 
 pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
+    const zone = ztracy.Zone(@src());
+    defer zone.End();
+
     gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
     defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
 
@@ -787,6 +833,9 @@ pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
     const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
 
     if (pbo) |ptr| {
+        const z = ztracy.ZoneN(@src(), "y plane upload");
+        defer z.End();
+
         const bytes_per_line: usize = @intCast(frame.linesize[0]);
         const height: usize = @intCast(frame.height);
         const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
@@ -804,6 +853,9 @@ pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
 }
 
 pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
+    const zone = ztracy.Zone(@src());
+    defer zone.End();
+
     gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
     defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
 
@@ -813,6 +865,9 @@ pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
     const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
 
     if (pbo) |ptr| {
+        const z = ztracy.ZoneN(@src(), "uv plane upload");
+        defer z.End();
+
         const bytes_per_line: usize = @intCast(frame.linesize[1]);
         const height: usize = @intCast(@divTrunc(frame.height, 2));
         const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
@@ -863,6 +918,9 @@ pub fn setupSignalHandler() void {
 }
 
 pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?[]const u8 {
+    const zone = ztracy.Zone(@src());
+    defer zone.End();
+
     const idx = current_pbo +% 1;
 
     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (idx == 1) .rgb_front else .rgb_back));

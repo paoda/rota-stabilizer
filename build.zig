@@ -68,6 +68,11 @@ pub fn build(b: *std.Build) !void {
     const clap = b.dependency("clap", .{});
     exe_mod.addImport("clap", clap.module("clap"));
 
+    const enable_ztracy = b.option(bool, "ztracy", "Enable Tracy Profiling") orelse false;
+    const ztracy = b.dependency("ztracy", .{ .enable_ztracy = enable_ztracy });
+    exe_mod.addImport("ztracy", ztracy.module("root"));
+    exe_mod.linkLibrary(ztracy.artifact("tracy"));
+
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{

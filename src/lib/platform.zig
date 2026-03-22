@@ -1,4 +1,5 @@
 const gl = @import("gl");
+const ztracy = @import("ztracy");
 const c = @import("../lib.zig").c;
 
 pub var gl_procs: gl.ProcTable = undefined;
@@ -30,6 +31,7 @@ pub const Ui = struct {
     }
 
     pub fn swap(self: @This()) !void {
+        ztracy.FrameMark();
         try errify(c.SDL_GL_SwapWindow(self.window));
     }
 };

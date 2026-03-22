@@ -1,5 +1,6 @@
 //! FFmpeg bindings
 const std = @import("std");
+const ztracy = @import("ztracy");
 const c = @import("../lib.zig").c;
 
 pub const enc = struct {
@@ -419,6 +420,9 @@ pub const AvFrame = struct {
     }
 
     pub fn setup(self: *@This(), width: c_int, height: c_int, fmt: c.AVPixelFormat) !void {
+        const zone = ztracy.ZoneN(@src(), "AVFrame.setup");
+        defer zone.End();
+
         self.inner.?.width = width;
         self.inner.?.height = height;
         self.inner.?.format = fmt;
