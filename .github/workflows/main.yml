@@ -1,0 +1,47 @@
+name: nightly
+
+on:
+  push:
+    paths:
+      - '**.zig'
+      - 'build.zig.zon'
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest] # TODO: Figure out Apple Silicon macOS
+    runs-on: ${{matrix.os}}
+    steps:
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - run: |
+            git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - name: prepare-linux
+        if: runner.os == 'Linux'
+        run: |
+            sudo apt update
+            sudo apt install -y libavcodec-dev libavformat-dev libswscale-dev libswresample-dev libavutil-dev libavfilter-dev
+      - name: build 
+        run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: rota-stabilizer-${{matrix.os}}
+          path: zig-out
+
+  lint:
+    runs-on: ubuntu-latest
+    steps: 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - uses: actions/checkout@v4
+      - run: zig fmt --check src/**/*.zig build.zig build.zig.zon

@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) !void {
 
     switch (target.result.os.tag) {
         .windows => {
-            const ffmpeg = b.lazyDependency("ffmpeg", .{}) orelse return error.ffmpeg_missing;
+            const ffmpeg = b.lazyDependency("ffmpeg", .{}) orelse return;
             exe_mod.addIncludePath(ffmpeg.path("include/"));
             exe_mod.addLibraryPath(ffmpeg.path("lib/"));
 
@@ -54,11 +54,11 @@ pub fn build(b: *std.Build) !void {
             }
         },
         else => {
-            exe_mod.linkSystemLibrary("libavcodec", .{});
-            exe_mod.linkSystemLibrary("libavformat", .{});
-            exe_mod.linkSystemLibrary("libswscale", .{});
-            exe_mod.linkSystemLibrary("libswresample", .{});
-            exe_mod.linkSystemLibrary("libavutil", .{});
+            exe_mod.linkSystemLibrary("avcodec", .{});
+            exe_mod.linkSystemLibrary("avformat", .{});
+            exe_mod.linkSystemLibrary("swscale", .{});
+            exe_mod.linkSystemLibrary("swresample", .{});
+            exe_mod.linkSystemLibrary("avutil", .{});
         },
     }
 
