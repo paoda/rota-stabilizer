@@ -15,22 +15,36 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest] # TODO: Figure out Apple Silicon macOS
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{matrix.os}}
     steps:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - run: |
-            git config --global core.autocrlf false
+
+      - run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v4
+
       - name: prepare-linux
         if: runner.os == 'Linux'
         run: |
             sudo apt update
             sudo apt install -y libavcodec-dev libavformat-dev libswscale-dev libswresample-dev libavutil-dev libavfilter-dev
+
+      - name: prepare-macos
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
       - name: build 
+        if: runner.os != 'macOS'
         run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+
+      # TODO: find a way to pass -Dcpu=baseline
+      - name: build-macos
+        if: runner.os == 'macOS'
+        run: zig build -Doptimize=ReleaseSafe 
+
       - name: upload
         uses: actions/upload-artifact@v4
         with:
@@ -43,5 +57,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+
       - uses: actions/checkout@v4
+
       - run: zig fmt --check src/**/*.zig build.zig build.zig.zon
