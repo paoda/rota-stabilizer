@@ -54,11 +54,11 @@ pub fn build(b: *std.Build) !void {
             }
         },
         else => {
-            exe_mod.linkSystemLibrary("avcodec", .{});
-            exe_mod.linkSystemLibrary("avformat", .{});
-            exe_mod.linkSystemLibrary("swscale", .{});
-            exe_mod.linkSystemLibrary("swresample", .{});
-            exe_mod.linkSystemLibrary("avutil", .{});
+            exe_mod.linkSystemLibrary("avcodec", .{ .preferred_link_mode = .static });
+            exe_mod.linkSystemLibrary("avformat", .{ .preferred_link_mode = .static });
+            exe_mod.linkSystemLibrary("swscale", .{ .preferred_link_mode = .static });
+            exe_mod.linkSystemLibrary("swresample", .{ .preferred_link_mode = .static });
+            exe_mod.linkSystemLibrary("avutil", .{ .preferred_link_mode = .static });
         },
     }
 
