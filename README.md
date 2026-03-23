@@ -11,6 +11,16 @@ Rotaeno is uniquely disadvantaged in that a screen recording on its own is strai
 
 Thus, this stabilizer only requires a screen recording with [Stream Encoding V2](https://rotaeno.com/streaming) enabled. The rest is efficiently handled for you. 
 
+## Download
+
+The most recent successful CI run in the [Actions](<https://github.com/paoda/rota-stabilizer/actions>) tab will have binary artifacts uploaded. 
+
+Alternatively: 
+
+[Windows (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-ubuntu-latest.zip>)
+
+[Linux Binary (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-windows-latest.zip>)
+
 ## How to Use
 
 - TODO: Implement a GUI
