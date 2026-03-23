@@ -890,24 +890,6 @@ pub fn setupSignalHandler() void {
 
     const log = std.log.scoped(.signal_handler);
 
-    const winHandler = struct {
-        fn inner(ctrl_type: windows.DWORD) callconv(.winapi) windows.BOOL {
-            switch (ctrl_type) {
-                windows.CTRL_C_EVENT, windows.CTRL_BREAK_EVENT => {
-                    should_quit.store(true, .monotonic);
-                    return @intFromBool(true);
-                },
-                else => return @intFromBool(false),
-            }
-        }
-    }.inner;
-
-    const posixHandler = struct {
-        fn inner(_: i32) callconv(.c) void {
-            should_quit.store(true, .monotonic);
-        }
-    }.inner;
-
     switch (builtin.os.tag) {
         .windows => {
             const ret = windows.kernel32.SetConsoleCtrlHandler(winHandler, 1);
@@ -915,6 +897,20 @@ pub fn setupSignalHandler() void {
         },
         else => posix.sigaction(posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = posix.sigemptyset(), .flags = 0 }, null),
     }
+}
+
+fn winHandler(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
+    switch (ctrl_type) {
+        std.os.windows.CTRL_C_EVENT, std.os.windows.CTRL_BREAK_EVENT => {
+            should_quit.store(true, .monotonic);
+            return @intFromBool(true);
+        },
+        else => return @intFromBool(false),
+    }
+}
+
+fn posixHandler(_: i32) callconv(.c) void {
+    should_quit.store(true, .monotonic);
 }
 
 pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?[]const u8 {
