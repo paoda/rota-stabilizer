@@ -26,7 +26,7 @@ const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
 pub fn main() !void {
-    const log = std.log.scoped(.ui);
+    const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
     signal.setupHandler();
@@ -89,7 +89,6 @@ pub fn main() !void {
 
     const frame_rate = decoder.framerate();
     const frame_period = 1.0 / c.av_q2d(frame_rate);
-    var frame_count: u64 = 0; // A/V Debug State
 
     const handles = try decoder.spawn(cli.positionals[0]);
     defer handles.deinit();
@@ -131,6 +130,7 @@ pub fn main() !void {
 
         var current_pbo: u1 = 0;
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
+        var frame_count: u64 = 0;
 
         while (!signal.should_quit.load(.monotonic)) {
             const zone = ztracy.ZoneN(@src(), "encode loop");
@@ -146,7 +146,8 @@ pub fn main() !void {
 
             if (decoder.queue.frame.pop()) |frame| {
                 defer decoder.queue.frame.recycle(frame);
-                defer frame_count += 1;
+                defer stable_buffer.swap();
+                defer frame_count += 1; // increment after frame is sent to the GPU
 
                 const z = ztracy.ZoneN(@src(), "frame received");
                 defer z.End();
@@ -155,7 +156,6 @@ pub fn main() !void {
                 uploadUvTexture(stable_buffer, frame);
 
                 try render(&view, &stable_buffer, angle_calc, res, camera);
-                stable_buffer.swap();
 
                 {
                     const pbo_z = ztracy.ZoneN(@src(), "read from OpenGL");
@@ -259,6 +259,7 @@ pub fn main() !void {
 
             if (decoder.queue.frame.pop()) |frame| {
                 defer decoder.queue.frame.recycle(frame);
+                defer stable_buffer.swap();
 
                 const z = ztracy.ZoneN(@src(), "video rame received");
                 defer z.End();
@@ -280,7 +281,6 @@ pub fn main() !void {
                 }
 
                 stable_buffer.set_display_time(pt_in_seconds);
-                frame_count += 1; // A/V Sync Purposes
 
                 uploadYTexture(stable_buffer, frame);
                 uploadUvTexture(stable_buffer, frame);
@@ -331,7 +331,6 @@ pub fn main() !void {
                 }
 
                 try render(&view, &stable_buffer, angle_calc, res, camera);
-                stable_buffer.swap();
 
                 if (is_first_frame) try audio_clock.start(pt_in_seconds); // aligns audio clock with frame pts
             } else {

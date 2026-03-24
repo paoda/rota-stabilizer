@@ -11,6 +11,8 @@ pub const Ui = struct {
     window: *c.SDL_Window,
     gl_ctx: c.SDL_GLContext,
 
+    const log = std.log.scoped(.ui);
+
     pub fn deinit(self: @This()) void {
         gl.makeProcTableCurrent(null);
         _ = c.SDL_GL_MakeCurrent(self.window, null);
