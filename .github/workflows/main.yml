@@ -38,9 +38,9 @@ jobs:
 
       - name: build 
         if: runner.os != 'macOS'
-        run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+        run: zig build -Doptimize=ReleaseSafe -Dcpu=x86_64_v3
 
-      # TODO: find a way to pass -Dcpu=baseline
+      # TODO: find a way to pass the equivalent of -Dcpu=x86_64_v3
       - name: build-macos
         if: runner.os == 'macOS'
         run: zig build -Doptimize=ReleaseSafe 
