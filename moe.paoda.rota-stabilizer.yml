@@ -1,0 +1,38 @@
+id: moe.paoda.rota-stabilizer
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: rota-stabilizer
+
+
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=host
+  - --socket=pulseaudio
+
+modules:
+  - name: zig
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 zig /app/bin/zig
+      - cp -r lib /app/lib
+    sources: 
+      - type: archive
+        url: https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+        sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+    
+  - name: rota-stabilizer
+    buildsystem: simple
+    build-options:
+      build-args: 
+        - --share=network
+      env:
+        ZIG_GLOBAL_CACHE_DIR: .zig-cache
+    build-commands:
+      - zig build -Doptimize=ReleaseSafe -Dcpu=x86_64_v3 install -p /app
+    sources:
+      - type: dir
+        path: .
