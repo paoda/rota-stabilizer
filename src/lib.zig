@@ -23,6 +23,8 @@ pub const RGB24_BPP = 3;
 pub const Y_BPP = 1;
 pub const UV_BPP = 2;
 
+pub const magic_aspect_ratio = 1.7763157895;
+
 pub const BlurManager = struct {
     const Layer = struct { fbo: c_uint, tex: c_uint };
 
@@ -420,7 +422,6 @@ pub const GpuResourceManager = struct {
         const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
 
         // https://github.com/Lawrenceeeeeeee/python_rotaeno_stabilizer/blob/6e6504f5e3867404c66d94c5752daab5936eedc2/python_rotaeno_stabilizer.py#L253-L258
-        const magic_aspect_ratio = 1.7763157895;
         const magic_radius_scale = 1.570;
         const magic_thickness = 0.02;
         const rota_height = if (aspect >= magic_aspect_ratio) ratio[1] else ratio[0] / magic_aspect_ratio;
