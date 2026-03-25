@@ -286,6 +286,8 @@ pub fn main() !void {
                     const diff_s = frame_time - audio_time;
 
                     ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
+                    ztracy.PlotF("Audio Time (s)", audio_time);
+                    ztracy.PlotF("Frame Time (s)", frame_time);
 
                     // video is wildly ahead (wait at most wait_max seconds)
                     if (diff_s > wait_max) {
