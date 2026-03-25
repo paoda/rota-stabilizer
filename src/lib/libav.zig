@@ -308,8 +308,9 @@ pub const dec = struct {
                     hw_pix_fmt = config.?.pix_fmt;
                     log.info("found {s} decoder for {s} ", .{ c.av_hwdevice_get_type_name(device_type), codec_ptr.?.name });
 
-                    // FIXME: does this need to be deallocated????
                     _ = try err(c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0));
+                    defer c.av_buffer_unref(&hw_device_ctx);
+
                     ctx_ptr.?.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
 
                     break;

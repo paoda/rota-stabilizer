@@ -28,6 +28,8 @@ const UV_BPP = @import("lib.zig").UV_BPP;
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 
 pub fn main() !void {
+    defer signal.should_quit.store(true, .monotonic);
+
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
@@ -190,6 +192,9 @@ pub fn main() !void {
                 // Update progress
                 progress_node.setCompletedItems(frame_count);
             } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
+                defer signal.should_quit.store(true, .monotonic); // exit program once flush is done
+                defer std.Progress.setStatus(.success);
+
                 const z = ztracy.ZoneN(@src(), "final frame received");
                 defer z.End();
 
@@ -199,8 +204,6 @@ pub fn main() !void {
                     try encoder.encodeRgbFrame(frame_buf, pts);
                 }
 
-                std.Progress.setStatus(.success);
-
                 // Calculate and display final stats
                 const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
                 const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
@@ -209,11 +212,6 @@ pub fn main() !void {
                 break log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
             }
         }
-
-        // Signal threads to quit (in case they're blocked waiting)
-        signal.should_quit.store(true, .monotonic);
-        decoder.queue.pkt.video.quit();
-        decoder.queue.pkt.audio.quit();
     } else {
         // ===== PLAYBACK MODE =====
         const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
@@ -227,11 +225,7 @@ pub fn main() !void {
 
             while (c.SDL_PollEvent(&event)) {
                 switch (event.type) {
-                    c.SDL_EVENT_QUIT => {
-                        signal.should_quit.store(true, .monotonic);
-                        decoder.queue.pkt.video.quit();
-                        decoder.queue.pkt.audio.quit();
-                    },
+                    c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
                     c.SDL_EVENT_MOUSE_WHEEL => {
                         const wheel_delta = event.wheel.y * 0.1;
                         camera.adjustZoom(wheel_delta);
@@ -693,7 +687,7 @@ const Camera = struct {
 
     colour_space: c.AVColorSpace,
 
-    zoom: f32 = 1.45, // TODO: revert to 1.0
+    zoom: f32 = 1.0,
 
     // zig fmt: off
     const bt601 = [9]f32{
@@ -741,6 +735,8 @@ const Camera = struct {
 
             .scale = scale,
             .inv_scale = inv_scale,
+
+            .zoom = defaultZoom(window_aspect),
         };
     }
 
@@ -750,6 +746,13 @@ const Camera = struct {
             c.AVCOL_SPC_BT709 => &bt709,
             else => &bt709,
         });
+    }
+
+    fn defaultZoom(window_aspect: f32) f32 {
+        if (@abs(window_aspect - 1.0) <= std.math.floatEps(f32)) return 1.0;
+        if (window_aspect > 1.0) return 1.45; // landscape
+
+        return 1.0; // portrait
     }
 
     pub fn updateWindow(self: *@This(), width: c_int, height: c_int) void {

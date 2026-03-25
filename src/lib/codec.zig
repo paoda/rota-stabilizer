@@ -23,12 +23,16 @@ pub const packet = struct {
         cond: std.Thread.Condition = .{},
 
         end_of_stream: std.atomic.Value(bool) = .init(false),
+        should_quit: *const std.atomic.Value(bool),
 
         const log = std.log.scoped(.packet_queue);
 
-        pub fn init(allocator: std.mem.Allocator) Queue {
+        // INVARIANT: this is an SPSC Queue
+
+        pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool)) Queue {
             return .{
                 .list = LinearFifo.init(allocator),
+                .should_quit = should_quit,
             };
         }
 
@@ -45,13 +49,18 @@ pub const packet = struct {
             const zone = ztracy.ZoneN(@src(), "PacketQueue.push");
             defer zone.End();
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            var copy: ?*c.AVPacket = c.av_packet_alloc() orelse return error.out_of_memory;
+            errdefer c.av_packet_free(&copy);
 
-            const copy: ?*c.AVPacket = c.av_packet_alloc();
             _ = try libav.err(c.av_packet_ref(copy, pkt));
 
-            try self.list.writeItem(copy.?);
+            {
+                self.mutex.lock();
+                defer self.mutex.unlock();
+
+                try self.list.writeItem(copy.?);
+            }
+
             self.cond.signal();
         }
 
@@ -68,6 +77,8 @@ pub const packet = struct {
 
                 while (self.list.readableLength() == 0) {
                     if (self.end_of_stream.load(.monotonic)) return null;
+                    if (self.should_quit.load(.monotonic)) return null;
+
                     self.cond.wait(&self.mutex);
                 }
             }
@@ -87,8 +98,16 @@ pub const packet = struct {
             return self.list.readItem();
         }
 
-        /// Signal any threads waiting on this queue to wake up and check their quit flag
-        pub fn quit(self: *@This()) void {
+        pub fn complete(self: *@This()) void {
+            self.end_of_stream.store(true, .monotonic);
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.cond.broadcast();
+        }
+
+        pub fn interrupt(self: *@This()) void {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -125,8 +144,8 @@ pub const packet = struct {
                     }
                 },
                 c.AVERROR_EOF => {
-                    audio_queue.end_of_stream.store(true, .monotonic);
-                    video_queue.end_of_stream.store(true, .monotonic);
+                    audio_queue.complete();
+                    video_queue.complete();
                     return;
                 },
                 else => |e| _ = try libav.err(e),
@@ -410,7 +429,7 @@ pub const video = struct {
                         defer c.av_frame_unref(dst_frame.ptr());
 
                         try convert(decoder.video_ctx, src_frame.ptr(), dst_frame.ptr(), sws);
-                        try frame_queue.push(dst_frame.ptr());
+                        frame_queue.push(dst_frame.ptr()) catch |e| if (e != error.early_exit) return e;
                     },
                     c.AVERROR(c.EAGAIN) => break :recv_loop,
                     c.AVERROR_EOF => return,
@@ -471,16 +490,20 @@ pub const FrameQueue = struct {
     slot: Slot,
     read_idx: usize,
     write_idx: usize,
+
     end_of_stream: std.atomic.Value(bool) = .init(false),
+    should_quit: *const std.atomic.Value(bool),
 
     mutex: std.Thread.Mutex = .{},
     cond: std.Thread.Condition = .{},
 
     const Slot = struct { frame: []c.AVFrame, state: []State };
     const State = enum { empty, in_use, ready_to_reuse };
-    const Error = error{ ffmpeg_error, invalid_size } || std.mem.Allocator.Error;
+    const Error = error{ ffmpeg_error, invalid_size, early_exit } || std.mem.Allocator.Error;
 
-    pub fn init(allocator: std.mem.Allocator, count: usize) Error!FrameQueue {
+    // INVARIANT: This is an SPSC Queue
+
+    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), count: usize) Error!FrameQueue {
         if (!std.math.isPowerOfTwo(count)) return error.invalid_size;
 
         const frames = try allocator.alloc(c.AVFrame, count);
@@ -494,6 +517,7 @@ pub const FrameQueue = struct {
         }
 
         return .{
+            .should_quit = should_quit,
             .slot = .{ .frame = frames, .state = states },
             .read_idx = 0,
             .write_idx = 0,
@@ -511,25 +535,33 @@ pub const FrameQueue = struct {
         const zone = ztracy.ZoneN(@src(), "FrameQueue.push");
         defer zone.End();
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
         const idx = self.mask(self.write_idx);
+        const target_frame = &self.slot.frame[idx];
 
         {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
             const z = ztracy.ZoneNC(@src(), "wait for empty slot", 0x3b3b3b);
             defer z.End();
 
-            while (self.slot.state[idx] != .empty) self.cond.wait(&self.mutex);
+            while (self.slot.state[idx] != .empty) {
+                if (self.should_quit.load(.monotonic)) return error.early_exit;
+                self.cond.wait(&self.mutex);
+            }
         }
 
-        defer self.cond.signal();
-        defer self.write_idx += 1;
+        // don't lock on this
+        _ = try libav.err(c.av_frame_ref(target_frame, new_frame));
 
-        const frame = &self.slot.frame[idx];
-        self.slot.state[idx] = .in_use;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        _ = try libav.err(c.av_frame_ref(frame, new_frame));
+            self.slot.state[idx] = .in_use;
+            self.write_idx += 1;
+            self.cond.signal();
+        }
     }
 
     pub fn pop(self: *@This()) ?*c.AVFrame {
@@ -540,20 +572,21 @@ pub const FrameQueue = struct {
         defer self.mutex.unlock();
 
         const idx = self.mask(self.read_idx);
-
         if (self.slot.state[idx] != .in_use) return null;
-        defer self.cond.broadcast();
-        defer self.read_idx += 1;
 
-        const frame = &self.slot.frame[idx];
         self.slot.state[idx] = .ready_to_reuse;
+        self.read_idx += 1;
+        self.cond.signal();
 
-        return frame;
+        return &self.slot.frame[idx];
     }
 
     pub fn recycle(self: *@This(), used_frame: *c.AVFrame) void {
         const zone = ztracy.ZoneN(@src(), "FrameQueue.recycle");
         defer zone.End();
+
+        // SAFETY: we know the producer won't touch this because this ptr is .ready_to_reuse
+        c.av_frame_unref(used_frame);
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -567,21 +600,11 @@ pub const FrameQueue = struct {
                 std.debug.assert(state.* == .ready_to_reuse);
 
                 state.* = .empty;
-                c.av_frame_unref(frame);
-                self.cond.signal();
-                return;
+                return self.cond.signal();
             }
         }
 
         std.debug.panic("attempted to recycle a frame that was not in the queue", .{});
-    }
-
-    pub fn isEmpty(self: *@This()) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const idx = self.mask(self.read_idx);
-        return self.slot.state[idx] != .in_use;
     }
 
     inline fn mask(self: @This(), idx: usize) usize {
@@ -613,6 +636,9 @@ pub const Decoder = struct {
         pkt: struct { audio: PacketQueue, video: PacketQueue },
 
         fn deinit(self: *Queues, allocator: std.mem.Allocator) void {
+            self.pkt.audio.interrupt();
+            self.pkt.audio.interrupt();
+
             self.pkt.audio.deinit(allocator);
             self.pkt.video.deinit(allocator);
             self.frame.deinit(allocator);
@@ -646,13 +672,13 @@ pub const Decoder = struct {
         var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit(allocator);
 
-        var frame_queue = try FrameQueue.init(allocator, 0x80); // 1s at 120fps?
+        var frame_queue = try FrameQueue.init(allocator, should_quit, 0x80); // 1s at 120fps?
         errdefer frame_queue.deinit(allocator);
 
-        var video_queue = PacketQueue.init(allocator);
+        var video_queue = PacketQueue.init(allocator, should_quit);
         errdefer video_queue.deinit(allocator);
 
-        var audio_queue = PacketQueue.init(allocator);
+        var audio_queue = PacketQueue.init(allocator, should_quit);
         errdefer audio_queue.deinit(allocator);
 
         const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx);
