@@ -217,8 +217,12 @@ pub fn main() !void {
         const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
 
         const delay_threshold = @max(0.025, frame_period * 2.0);
+        const wait_normal = frame_period * 1.05;
+        const wait_max = 0.500;
+
         log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
+        log.debug("wait_max: {d:.2}ms", .{wait_max * std.time.ms_per_s});
 
         while (!signal.should_quit.load(.monotonic)) {
             var event: c.SDL_Event = undefined;
@@ -281,15 +285,20 @@ pub fn main() !void {
                     const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
                     const diff_s = frame_time - audio_time;
 
-                    if (diff_s > 0.500) { // FIXME: magic value
+                    ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
+
+                    // video is wildly ahead (wait at most wait_max seconds)
+                    if (diff_s > wait_max) {
                         const z_delay = ztracy.ZoneNC(@src(), "hard delay sync", 0x3b3b3b);
                         defer z_delay.End();
 
-                        log.warn("wildly ahead: {d:.1}ms - hard syncing", .{diff_s * std.time.ms_per_s});
-                        c.SDL_DelayNS(@intFromFloat(diff_s * std.time.ns_per_s)); // FIXME: on wake diff_s is going to be incorrect
+                        const delay_s = @min(wait_max, diff_s);
+
+                        log.warn("wildly ahead: {d:.1}ms - hard syncing", .{delay_s * std.time.ms_per_s});
+                        sleep(@intFromFloat(delay_s * std.time.ns_per_s));
                     }
 
-                    // drop frame
+                    // video is behind (drop frame)
                     if (diff_s < -delay_threshold) {
                         const z_drop = ztracy.ZoneNC(@src(), "drop sync", 0x3b3b3b);
                         defer z_drop.End();
@@ -304,20 +313,12 @@ pub fn main() !void {
                         const z_delay = ztracy.ZoneNC(@src(), "delay sync", 0x3b3b3b);
                         defer z_delay.End();
 
-                        const limit_s = frame_period * 1.25; // to allow catchup
+                        const delay_s = @min(diff_s, wait_normal);
+                        ztracy.PlotF("A/V Sleep Time (ms)", delay_s * std.time.ms_per_s);
 
-                        const diff_ms = diff_s * std.time.ms_per_s;
-                        const delay_ms = @min(diff_s, limit_s) * std.time.ms_per_s;
+                        if (diff_s > wait_normal) log.debug("ahead: v: {d:.3}s a: {d:.3}s \x1B[33m{d:.1}ms\x1B[39m", .{ frame_time, audio_time, diff_s * std.time.ms_per_s });
 
-                        if (diff_s > frame_period)
-                            log.debug("video: {d:.3}s audio: {d:.3}s diff \x1B[33m{d:.1}ms\x1B[39m (sleep: {d:.1}ms)", .{
-                                frame_time,
-                                audio_time,
-                                diff_ms,
-                                delay_ms,
-                            });
-
-                        c.SDL_DelayPrecise(@intFromFloat(delay_ms * std.time.ns_per_ms));
+                        sleep(@intFromFloat(delay_s * std.time.ns_per_s));
                     }
                 }
 
