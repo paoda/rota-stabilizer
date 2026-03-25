@@ -165,6 +165,9 @@ pub const audio = struct {
 
         hw_latency_secs: f64,
 
+        last_hw_pos: f64 = 0.0,
+        last_hw_update_time_ns: u64 = 0,
+
         /// Offset to align audio time with video stream time (set from first video PTS)
         /// This accounts for videos that don't start at PTS=0
         stream_start_offset: f64 = 0.0,
@@ -231,19 +234,29 @@ pub const audio = struct {
             return c.SDL_AudioStreamDevicePaused(self.stream);
         }
 
-        pub fn seconds_passed(self: @This()) f64 {
+        pub fn seconds_passed(self: *@This()) f64 {
             const zone = ztracy.ZoneN(@src(), "AudioClock.seconds_passed");
             defer zone.End();
 
             const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
-
             const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream));
             const bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
             const hw_latency_bytes = self.hw_latency_secs * bytes_per_sec;
 
-            const pos = bytes_sent - queued - hw_latency_bytes;
-            // Add stream_start_offset to align with video PTS
-            return (pos / bytes_per_sec) + self.stream_start_offset;
+            const hw_pos = bytes_sent - queued - hw_latency_bytes;
+            const hw_secs = (hw_pos / bytes_per_sec) + self.stream_start_offset;
+
+            const now_ns = c.SDL_GetTicksNS();
+
+            if (hw_pos != self.last_hw_pos) {
+                self.last_hw_pos = hw_pos;
+                self.last_hw_update_time_ns = now_ns;
+
+                return hw_secs;
+            }
+
+            const duration_s: f64 = @as(f64, @floatFromInt(now_ns - self.last_hw_update_time_ns)) / std.time.ns_per_s;
+            return hw_secs + duration_s;
         }
 
         /// Debug: Get detailed clock state for A/V sync debugging
