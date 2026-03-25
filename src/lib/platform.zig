@@ -1,3 +1,6 @@
+const std = @import("std");
+const builtin = @import("builtin");
+
 const gl = @import("gl");
 const ztracy = @import("ztracy");
 const c = @import("../lib.zig").c;
@@ -95,3 +98,57 @@ pub inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(
         else => comptime unreachable,
     };
 }
+
+pub fn guessHardware() struct { ?c.AVHWDeviceType, ?c.AVHWDeviceType } {
+    const vendor = std.mem.span(gl.GetString(gl.VENDOR) orelse return .{ null, null });
+
+    const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
+    if (is_apple) return .{ c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
+
+    const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
+    const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null or std.mem.indexOf(u8, vendor, "ATI") != null;
+    const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
+
+    const fallback_decode = switch (builtin.os.tag) {
+        .linux => c.AV_HWDEVICE_TYPE_VAAPI,
+        .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
+        else => unreachable,
+    };
+
+    if (is_nvidia) return .{ c.AV_HWDEVICE_TYPE_CUDA, c.AV_HWDEVICE_TYPE_CUDA };
+    if (is_amd) return .{ fallback_decode, c.AV_HWDEVICE_TYPE_AMF };
+    if (is_intel) return .{ fallback_decode, c.AV_HWDEVICE_TYPE_QSV };
+
+    return .{ null, null };
+}
+
+pub const signal = struct {
+    const AtomicBool = std.atomic.Value(bool);
+    const log = std.log.scoped(.signal_handler);
+
+    pub var should_quit: AtomicBool = .init(false); // should be global
+
+    pub fn setupHandler() void {
+        switch (builtin.os.tag) {
+            .windows => {
+                const ret = std.os.windows.kernel32.SetConsoleCtrlHandler(windows, 1);
+                if (ret == std.os.windows.FALSE) log.debug("failed to setup ctrl handler: {t}", .{std.os.windows.GetLastError()});
+            },
+            else => std.posix.sigaction(std.posix.SIG.INT, &.{ .handler = .{ .handler = posix }, .mask = std.posix.sigemptyset(), .flags = 0 }, null),
+        }
+    }
+
+    fn windows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
+        switch (ctrl_type) {
+            std.os.windows.CTRL_C_EVENT, std.os.windows.CTRL_BREAK_EVENT => {
+                signal.should_quit.store(true, .monotonic);
+                return @intFromBool(true);
+            },
+            else => return @intFromBool(false),
+        }
+    }
+
+    fn posix(_: i32) callconv(.c) void {
+        signal.should_quit.store(true, .monotonic);
+    }
+};

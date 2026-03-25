@@ -1,11 +1,11 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const gl = @import("gl");
 const clap = @import("clap");
 const ztracy = @import("ztracy");
 
 const c = @import("lib.zig").c;
 const platform = @import("lib/platform.zig");
+const signal = @import("lib/platform.zig").signal;
 
 const Encoder = @import("lib/codec.zig").Encoder;
 const Decoder = @import("lib/codec.zig").Decoder;
@@ -25,21 +25,11 @@ const RGB24_BPP = @import("lib.zig").RGB24_BPP;
 const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
-var should_quit: std.atomic.Value(bool) = .init(false);
-
-// FIXME: Separate into Decode / Encode?
-const hw_device: ?c.AVHWDeviceType = switch (builtin.os.tag) {
-    // .linux => c.AV_HWDEVICE_TYPE_VAAPI,
-    // .windows => c.AV_HWDEVICE_TYPE_CUDA,
-    // .macos => c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, // TODO: get a macbook
-    else => c.AV_HWDEVICE_TYPE_VULKAN,
-};
-
 pub fn main() !void {
     const log = std.log.scoped(.ui);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
-    setupSignalHandler();
+    signal.setupHandler();
 
     var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -67,7 +57,13 @@ pub fn main() !void {
 
     const src_path = cli.args.input orelse return error.missing_input_path;
 
-    var decoder = try Decoder.init(allocator, &should_quit, hw_device, src_path, cli.positionals[0] != null);
+    const hw_decode, const hw_encode = platform.guessHardware();
+    log.debug("guessed {s} hw decode and {s} hw encode support", .{
+        if (hw_decode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
+        if (hw_encode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
+    });
+
+    var decoder = try Decoder.init(allocator, &signal.should_quit, hw_decode, src_path, cli.positionals[0] != null);
     defer decoder.deinit(allocator);
 
     // -- opengl --
@@ -104,7 +100,7 @@ pub fn main() !void {
             .width = @intCast(view.width),
             .height = @intCast(view.height),
             .decoder = &decoder,
-        }, hw_device, dst_path);
+        }, hw_encode, dst_path);
         defer encoder.deinit();
 
         const render_start_time = c.SDL_GetPerformanceCounter();
@@ -136,7 +132,7 @@ pub fn main() !void {
         var current_pbo: u1 = 0;
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
 
-        while (!should_quit.load(.monotonic)) {
+        while (!signal.should_quit.load(.monotonic)) {
             const zone = ztracy.ZoneN(@src(), "encode loop");
             defer zone.End();
 
@@ -213,7 +209,7 @@ pub fn main() !void {
         }
 
         // Signal threads to quit (in case they're blocked waiting)
-        should_quit.store(true, .monotonic);
+        signal.should_quit.store(true, .monotonic);
         decoder.queue.pkt.video.quit();
         decoder.queue.pkt.audio.quit();
     } else {
@@ -224,13 +220,13 @@ pub fn main() !void {
         log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
 
-        while (!should_quit.load(.monotonic)) {
+        while (!signal.should_quit.load(.monotonic)) {
             var event: c.SDL_Event = undefined;
 
             while (c.SDL_PollEvent(&event)) {
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => {
-                        should_quit.store(true, .monotonic);
+                        signal.should_quit.store(true, .monotonic);
                         decoder.queue.pkt.video.quit();
                         decoder.queue.pkt.audio.quit();
                     },
@@ -882,35 +878,6 @@ pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
 
     gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
     gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @divTrunc(frame.width, 2), @divTrunc(frame.height, 2), gl.RG, gl.UNSIGNED_BYTE, null);
-}
-
-pub fn setupSignalHandler() void {
-    const windows = std.os.windows;
-    const posix = std.posix;
-
-    const log = std.log.scoped(.signal_handler);
-
-    switch (builtin.os.tag) {
-        .windows => {
-            const ret = windows.kernel32.SetConsoleCtrlHandler(winHandler, 1);
-            if (ret == windows.FALSE) log.debug("failed to setup ctrl handler: {t}", .{windows.GetLastError()});
-        },
-        else => posix.sigaction(posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = posix.sigemptyset(), .flags = 0 }, null),
-    }
-}
-
-fn winHandler(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
-    switch (ctrl_type) {
-        std.os.windows.CTRL_C_EVENT, std.os.windows.CTRL_BREAK_EVENT => {
-            should_quit.store(true, .monotonic);
-            return @intFromBool(true);
-        },
-        else => return @intFromBool(false),
-    }
-}
-
-fn posixHandler(_: i32) callconv(.c) void {
-    should_quit.store(true, .monotonic);
 }
 
 pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?[]const u8 {
