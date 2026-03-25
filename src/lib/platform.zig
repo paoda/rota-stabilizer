@@ -108,18 +108,17 @@ pub fn guessHardware() struct { ?c.AVHWDeviceType, ?c.AVHWDeviceType } {
     if (is_apple) return .{ c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
 
     const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
-    const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null or std.mem.indexOf(u8, vendor, "ATI") != null;
-    const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
+    if (is_nvidia) return .{ c.AV_HWDEVICE_TYPE_CUDA, c.AV_HWDEVICE_TYPE_CUDA };
 
-    const fallback_decode = switch (builtin.os.tag) {
-        .linux => c.AV_HWDEVICE_TYPE_VAAPI,
-        .windows => c.AV_HWDEVICE_TYPE_D3D11VA,
+    const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
+    if (is_intel) return .{ c.AV_HWDEVICE_TYPE_QSV, c.AV_HWDEVICE_TYPE_QSV };
+
+    const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null or std.mem.indexOf(u8, vendor, "ATI") != null;
+    if (is_amd) return switch (builtin.os.tag) {
+        .linux => .{ c.AV_HWDEVICE_TYPE_VAAPI, c.AV_HWDEVICE_TYPE_VAAPI },
+        .windows => .{ c.AV_HWDEVICE_TYPE_D3D11VA, c.AV_HWDEVICE_TYPE_AMF },
         else => unreachable,
     };
-
-    if (is_nvidia) return .{ c.AV_HWDEVICE_TYPE_CUDA, c.AV_HWDEVICE_TYPE_CUDA };
-    if (is_amd) return .{ fallback_decode, c.AV_HWDEVICE_TYPE_AMF };
-    if (is_intel) return .{ fallback_decode, c.AV_HWDEVICE_TYPE_QSV };
 
     return .{ null, null };
 }
