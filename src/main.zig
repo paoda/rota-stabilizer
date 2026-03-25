@@ -247,11 +247,6 @@ pub fn main() !void {
                         c.SDL_SCANCODE_M => {
                             try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
                         },
-                        c.SDL_SCANCODE_L => {
-                            // Debug: print world vs window viewport info
-                            const world_bounds = camera.world_bounds;
-                            log.debug("World bounds: {d:.1}x{d:.1}, Window: {}x{}", .{ world_bounds.x(), world_bounds.y(), camera.window_size[0], camera.window_size[1] });
-                        },
                         c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
                         else => {},
                     },
@@ -686,9 +681,7 @@ const AngleCalc = struct {
 const Camera = struct {
     view_to_clip: Mat2,
 
-    world_bounds: Vec2,
-    window_size: [2]c_int, //  FIXME: delete this?
-
+    world_aspect: f32,
     video_aspect: f32,
     gameplay_aspect: f32,
 
@@ -719,8 +712,7 @@ const Camera = struct {
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
         const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
 
-        const world_bounds = vec2(1.0, 1.0);
-        const world_aspect = world_bounds.x() / world_bounds.y();
+        const world_aspect = 1.0; // assume square world
 
         const viewport_bounds = if (window_aspect > 1.0) vec2(window_aspect, 1.0) else vec2(1.0, 1.0 / window_aspect);
         const viewport_diagonal = std.math.sqrt(viewport_bounds.x() * viewport_bounds.x() + viewport_bounds.y() * viewport_bounds.y());
@@ -736,8 +728,7 @@ const Camera = struct {
 
         return .{
             .view_to_clip = calculateAspectCorrection(world_aspect, window_aspect),
-            .world_bounds = world_bounds,
-            .window_size = .{ window_width, window_height },
+            .world_aspect = world_aspect,
 
             .video_aspect = video_aspect,
             .gameplay_aspect = gameplay_aspect,
@@ -759,7 +750,6 @@ const Camera = struct {
 
     pub fn updateWindow(self: *@This(), width: c_int, height: c_int) void {
         const window_aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
-        const world_aspect = self.world_bounds.x() / self.world_bounds.y();
 
         const viewport_bounds = if (window_aspect > 1.0) vec2(window_aspect, 1.0) else vec2(1.0, 1.0 / window_aspect);
         const viewport_diagonal = std.math.sqrt(viewport_bounds.x() * viewport_bounds.x() + viewport_bounds.y() * viewport_bounds.y());
@@ -767,8 +757,7 @@ const Camera = struct {
         const gameplay_bounds = if (self.gameplay_aspect > 1.0) vec2(1.0, 1.0 / self.gameplay_aspect) else vec2(self.gameplay_aspect, 1.0);
 
         self.inv_scale = viewport_diagonal / @min(gameplay_bounds.x(), gameplay_bounds.y());
-        self.view_to_clip = calculateAspectCorrection(world_aspect, window_aspect);
-        self.window_size = .{ width, height };
+        self.view_to_clip = calculateAspectCorrection(self.world_aspect, window_aspect);
     }
 
     fn calculateAspectCorrection(world_aspect: f32, window_aspect: f32) Mat2 {
