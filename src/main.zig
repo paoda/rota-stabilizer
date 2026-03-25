@@ -529,6 +529,7 @@ fn render(
 
         gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
+        gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution[0], camera.video_resolution[1]);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -681,6 +682,8 @@ const AngleCalc = struct {
 const Camera = struct {
     view_to_clip: Mat2,
 
+    video_resolution: struct { c_int, c_int }, // TODO: consolidate this with Resolution struct in GpuResourceManager
+
     world_aspect: f32,
     video_aspect: f32,
     gameplay_aspect: f32,
@@ -706,8 +709,8 @@ const Camera = struct {
     };
     // zig fmt: on
 
-    pub fn init(dimensions: struct { u32, u32 }, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
-        const video_width, const video_height = dimensions;
+    pub fn init(video_resolution: struct { u32, u32 }, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
+        const video_width, const video_height = video_resolution;
 
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
         const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
@@ -728,8 +731,9 @@ const Camera = struct {
 
         return .{
             .view_to_clip = calculateAspectCorrection(world_aspect, window_aspect),
-            .world_aspect = world_aspect,
+            .video_resolution = .{ @intCast(video_width), @intCast(video_height) },
 
+            .world_aspect = world_aspect,
             .video_aspect = video_aspect,
             .gameplay_aspect = gameplay_aspect,
 

@@ -8,6 +8,7 @@ uniform sampler2D u_uv_tex;
 
 uniform float u_ratio;
 uniform mat3 u_colour_space;
+uniform ivec2 u_resolution;
 
 const float border_radius = 100.0;
 const float border_thickness = 10.0; // px // FIXME: Maybe this should be relative?
@@ -32,9 +33,8 @@ float roundedBoxSDF(vec2 pos, vec2 half_size, float radius) {
 }
 
 void main() {
-    ivec2 resolution = textureSize(u_y_tex, 0);
-    float W = float(resolution.x);
-    float H = float(resolution.y);
+    float W = float(u_resolution.x);
+    float H = float(u_resolution.y);
 
     float gameplay_height = W / u_ratio;
     float height_diff = H - gameplay_height;
