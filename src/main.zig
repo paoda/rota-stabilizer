@@ -215,21 +215,31 @@ pub fn main() !void {
     } else {
         // ===== PLAYBACK MODE =====
         const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
+        const time_base = c.av_q2d(decoder.stream(.video).time_base);
 
-        const delay_threshold = @max(0.025, frame_period * 2.0);
-        const wait_normal = frame_period * 1.05;
-        const wait_max = 0.500;
+        const start_time = @as(f64, @floatFromInt(decoder.stream(.video).start_time)) * time_base;
+        log.debug("video start time: {d}s", .{start_time});
+
+        try audio_clock.start(start_time);
+
+        const delay_threshold = 0.300;
 
         log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
-        log.debug("wait_max: {d:.2}ms", .{wait_max * std.time.ms_per_s});
+
+        var next_frame: ?*c.AVFrame = null;
 
         while (!signal.should_quit.load(.monotonic)) {
+            const start = c.SDL_GetTicksNS();
+
             var event: c.SDL_Event = undefined;
 
             while (c.SDL_PollEvent(&event)) {
                 switch (event.type) {
-                    c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
+                    c.SDL_EVENT_QUIT => {
+                        signal.should_quit.store(true, .monotonic);
+                        break;
+                    },
                     c.SDL_EVENT_MOUSE_WHEEL => {
                         const wheel_delta = event.wheel.y * 0.1;
                         camera.adjustZoom(wheel_delta);
@@ -252,19 +262,11 @@ pub fn main() !void {
                 }
             }
 
-            if (decoder.queue.frame.pop()) |frame| {
-                defer decoder.queue.frame.recycle(frame);
-                defer stable_buffer.swap();
+            if (next_frame == null) next_frame = decoder.queue.frame.pop();
 
-                const z = ztracy.ZoneN(@src(), "video rame received");
+            if (next_frame) |frame| blk: {
+                const z = ztracy.ZoneN(@src(), "video frame received");
                 defer z.End();
-
-                // Calculate PTS early - needed for initial sync
-                const time_base: f64 = c.av_q2d(decoder.stream(.video).time_base);
-                const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
-
-                // Track if this is the first frame (for delayed audio start)
-                const is_first_frame = audio_clock.isPaused();
 
                 if (frame.format != c.AV_PIX_FMT_NV12) {
                     @branchHint(.cold);
@@ -275,64 +277,58 @@ pub fn main() !void {
                     return error.ffmpeg_error;
                 }
 
-                stable_buffer.set_display_time(pt_in_seconds);
+                const audio_time = audio_clock.seconds_passed();
+                const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
-                uploadYTexture(stable_buffer, frame);
-                uploadUvTexture(stable_buffer, frame);
+                // const is_first_frame = audio_clock.isPaused();
+                // if (is_first_frame) try audio_clock.start(next_frame_time);
 
-                if (!is_first_frame) {
-                    const audio_time = audio_clock.seconds_passed();
-                    const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
-                    const diff_s = frame_time - audio_time;
-
-                    ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
-                    ztracy.PlotF("Audio Time (s)", audio_time);
-                    ztracy.PlotF("Frame Time (s)", frame_time);
-
-                    // video is wildly ahead (wait at most wait_max seconds)
-                    if (diff_s > wait_max) {
-                        const z_delay = ztracy.ZoneNC(@src(), "hard delay sync", 0x3b3b3b);
-                        defer z_delay.End();
-
-                        const delay_s = @min(wait_max, diff_s);
-
-                        log.warn("wildly ahead: {d:.1}ms - hard syncing", .{delay_s * std.time.ms_per_s});
-                        sleep(@intFromFloat(delay_s * std.time.ns_per_s));
-                    }
-
-                    // video is behind (drop frame)
-                    if (diff_s < -delay_threshold) {
-                        const z_drop = ztracy.ZoneNC(@src(), "drop sync", 0x3b3b3b);
-                        defer z_drop.End();
-
-                        const diff_ms = diff_s * std.time.ms_per_s;
-
-                        log.debug("video: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m (drop)", .{ frame_time, audio_time, diff_ms });
-                        continue;
-                    }
-
-                    if (diff_s > 0) {
-                        const z_delay = ztracy.ZoneNC(@src(), "delay sync", 0x3b3b3b);
-                        defer z_delay.End();
-
-                        const delay_s = @min(diff_s, wait_normal);
-                        ztracy.PlotF("A/V Sleep Time (ms)", delay_s * std.time.ms_per_s);
-
-                        if (diff_s > wait_normal) log.debug("ahead: v: {d:.3}s a: {d:.3}s \x1B[33m{d:.1}ms\x1B[39m", .{ frame_time, audio_time, diff_s * std.time.ms_per_s });
-
-                        sleep(@intFromFloat(delay_s * std.time.ns_per_s));
-                    }
+                if (next_frame_time - audio_time < -delay_threshold) {
+                    decoder.queue.frame.recycle(frame);
+                    next_frame = null;
+                    break :blk;
                 }
 
-                try render(&view, &stable_buffer, angle_calc, res, camera);
+                const back_buffer = stable_buffer.invert();
+                const already_uploaded = @abs(next_frame_time - back_buffer.display_time()) < std.math.floatEps(f64);
 
-                if (is_first_frame) try audio_clock.start(pt_in_seconds); // aligns audio clock with frame pts
-            } else {
-                // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
-                continue;
+                // if (is_first_frame or !already_uploaded) {
+                if (!already_uploaded) {
+                    // this is a new frame, upload it to the BACK buffer
+                    uploadYTexture(back_buffer, frame);
+                    uploadUvTexture(back_buffer, frame);
+
+                    stable_buffer.display_times[back_buffer.current] = next_frame_time;
+                }
+
+                const diff_s = next_frame_time - audio_time;
+                ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
+                ztracy.PlotF("Audio Time (s)", audio_time);
+                ztracy.PlotF("Next Frame Time (s)", next_frame_time);
+
+                if (diff_s <= 0) { // Time to display the newer frame!
+                    stable_buffer.swap();
+                    ztracy.FrameMarkNamed("video");
+
+                    decoder.queue.frame.recycle(frame);
+                    next_frame = null;
+                }
             }
 
+            try render(&view, &stable_buffer, angle_calc, res, camera);
             try ui.swap();
+
+            const diff = stable_buffer.display_time() - stable_buffer.invert().display_time();
+            const diff_inv = stable_buffer.invert().display_time() - stable_buffer.display_time();
+
+            ztracy.PlotF("Display Time Diff (ms)", diff * std.time.ms_per_s);
+            ztracy.PlotF("Display Time Diff Inverted (ms)", diff_inv * std.time.ms_per_s);
+
+            const frame_time: f64 = @floatFromInt(c.SDL_GetTicksNS() - start);
+            // const target = diff * std.time.ns_per_sl;
+            _ = frame_time;
+
+            // if (frame_time < target) sleep(@intFromFloat(target - frame_time));
         }
     }
 }
@@ -344,31 +340,6 @@ const DoubleBuffer = struct {
     current: u1,
 
     const Channel = enum { y, uv };
-
-    const Inverted = struct {
-        inner: DoubleBuffer,
-
-        fn from(super: DoubleBuffer) Inverted {
-            return .{
-                .inner = .{
-                    .res = super.res,
-                    .display_times = super.display_times,
-                    .current = super.current +% 1,
-                },
-            };
-        }
-
-        fn tex(self: @This()) Nv12Tex {
-            const y = self.inner.res.tex.get(if (self.inner.current == 0) .y_front else .y_back);
-            const uv = self.inner.res.tex.get(if (self.inner.current == 0) .uv_front else .uv_back);
-
-            return .{ .y = y, .uv = uv };
-        }
-
-        fn display_time(self: @This()) f64 {
-            return self.inner.display_times[self.inner.current];
-        }
-    };
 
     pub fn init(res: *const GpuResourceManager) DoubleBuffer {
         return .{
@@ -396,8 +367,16 @@ const DoubleBuffer = struct {
         self.display_times[self.current] = in_seconds;
     }
 
-    fn invert(self: @This()) Inverted {
-        return Inverted.from(self);
+    fn display_time(self: @This()) f64 {
+        return self.display_times[self.current];
+    }
+
+    fn invert(self: @This()) DoubleBuffer {
+        return .{
+            .res = self.res,
+            .display_times = self.display_times,
+            .current = self.current +% 1,
+        };
     }
 
     fn swap(self: *@This()) void {
@@ -426,8 +405,7 @@ fn render(
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
-    const tex = stable_buffer.invert().tex();
-
+    const tex: Nv12Tex = .{ .y = stable_buffer.tex(.y), .uv = stable_buffer.tex(.uv) };
     angle_calc.execute(view, tex);
 
     {
