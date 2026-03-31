@@ -318,17 +318,15 @@ pub fn main() !void {
             try render(&view, &stable_buffer, angle_calc, res, camera);
             try ui.swap();
 
-            const diff = stable_buffer.display_time() - stable_buffer.invert().display_time();
-            const diff_inv = stable_buffer.invert().display_time() - stable_buffer.display_time();
+            _ = start;
 
-            ztracy.PlotF("Display Time Diff (ms)", diff * std.time.ms_per_s);
-            ztracy.PlotF("Display Time Diff Inverted (ms)", diff_inv * std.time.ms_per_s);
+            // const frame_time = c.SDL_GetTicksNS() - start;
+            // const target: u64 = @intFromFloat(frame_period * std.time.ns_per_s);
+            // const remaining = target -| frame_time;
 
-            const frame_time: f64 = @floatFromInt(c.SDL_GetTicksNS() - start);
-            // const target = diff * std.time.ns_per_sl;
-            _ = frame_time;
+            // ztracy.PlotU("remaining", remaining / std.time.ns_per_ms);
 
-            // if (frame_time < target) sleep(@intFromFloat(target - frame_time));
+            // sleep(remaining);
         }
     }
 }
