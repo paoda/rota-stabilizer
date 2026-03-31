@@ -18,6 +18,8 @@ pub const Ui = struct {
         _ = c.SDL_GL_MakeCurrent(self.window, null);
         _ = c.SDL_GL_DestroyContext(self.gl_ctx);
         c.SDL_DestroyWindow(self.window);
+
+        c.SDL_Quit();
     }
 
     pub fn windowSize(self: @This()) ![2]c_int {
@@ -52,6 +54,7 @@ pub fn createHeadless(width: u32, height: u32) !Ui {
 fn createWindowEx(width: u32, height: u32, headless: bool) !Ui {
     c.SDL_SetMainReady();
     try errify(c.SDL_Init(c.SDL_INIT_VIDEO | (if (headless) 0 else c.SDL_INIT_AUDIO)));
+    errdefer c.SDL_Quit();
 
     try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", "0.1.0", "moe.paoda.rota-stabilizer"));
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));
