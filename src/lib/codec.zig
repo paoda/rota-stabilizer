@@ -64,7 +64,7 @@ pub const packet = struct {
             self.cond.signal();
         }
 
-        pub fn pop(self: *@This()) ?*c.AVPacket {
+        pub fn pop(self: *@This()) !*c.AVPacket {
             const zone = ztracy.ZoneN(@src(), "PacketQueue.pop");
             defer zone.End();
 
@@ -76,14 +76,14 @@ pub const packet = struct {
                 defer z.End();
 
                 while (self.list.readableLength() == 0) {
-                    if (self.end_of_stream.load(.monotonic)) return null;
-                    if (self.should_quit.load(.monotonic)) return null;
+                    if (self.end_of_stream.load(.monotonic)) return error.end_of_stream;
+                    if (self.should_quit.load(.monotonic)) return error.should_quit;
 
                     self.cond.wait(&self.mutex);
                 }
             }
 
-            return self.list.readItem();
+            return self.list.readItem() orelse unreachable;
         }
 
         /// Non-blocking pop - returns null immediately if queue is empty
@@ -357,6 +357,9 @@ pub const audio = struct {
         // debug
         var frame_count: u64 = 0;
 
+        var pending: ?*c.AVPacket = null;
+        defer if (pending) |_| c.av_packet_free(&pending);
+
         while (!decoder.should_quit.load(.monotonic)) {
             const zone = ztracy.ZoneN(@src(), "decode loop");
             defer zone.End();
@@ -408,21 +411,35 @@ pub const audio = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
-                const flush_ret = c.avcodec_send_packet(audio_ctx, null);
-                if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
+            var pkt: ?*c.AVPacket = blk: {
+                if (pending) |pkt| {
+                    defer pending = null;
+                    break :blk pkt;
+                }
 
-                continue;
+                break :blk pkt_queue.pop() catch |e| switch (e) {
+                    error.end_of_stream => {
+                        const flush_ret = c.avcodec_send_packet(audio_ctx, null);
+                        if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
+
+                        continue;
+                    },
+                    error.should_quit => break,
+                };
             };
-            defer c.av_packet_free(&pkt);
 
             {
                 const send_z = ztracy.ZoneN(@src(), "avcodec_send_packet");
                 defer send_z.End();
 
                 const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
+                if (send_ret == c.AVERROR(c.EAGAIN)) {
+                    pending = pkt;
+                    continue;
+                }
+
+                c.av_packet_free(&pkt);
                 if (send_ret == c.AVERROR_EOF) return;
-                if (send_ret == c.AVERROR(c.EAGAIN)) continue;
                 if (send_ret < 0) _ = try libav.err(send_ret);
             }
         }
@@ -443,12 +460,7 @@ pub const video = struct {
         var src_frame: AvFrame = try .init();
         defer src_frame.deinit();
 
-        var dst_frame: AvFrame = try .init();
-        defer dst_frame.deinit();
-
         const video_ctx = codec_ctx.*.inner.?;
-
-        try dst_frame.setup(video_ctx.width, video_ctx.height, c.AV_PIX_FMT_NV12);
 
         const maybe_sws = c.sws_getContext(
             video_ctx.width,
@@ -466,6 +478,9 @@ pub const video = struct {
 
         const sws = maybe_sws orelse return error.out_of_memory;
 
+        var pending: ?*c.AVPacket = null;
+        defer if (pending) |_| c.av_packet_free(&pending);
+
         // TODO: using a fn ptr I think we can deduplicate this massive loop
         while (!decoder.should_quit.load(.monotonic)) {
             const z = ztracy.ZoneN(@src(), "decode loop");
@@ -478,10 +493,13 @@ pub const video = struct {
 
                 switch (c.avcodec_receive_frame(video_ctx, src_frame.ptr())) {
                     0 => {
-                        defer c.av_frame_unref(dst_frame.ptr());
+                        defer c.av_frame_unref(src_frame.ptr());
 
-                        try convert(decoder.video_ctx, src_frame.ptr(), dst_frame.ptr(), sws);
-                        frame_queue.push(dst_frame.ptr()) catch |e| if (e != error.early_exit) return e;
+                        const dst_frame = frame_queue.acquire() catch |e| if (e != error.early_exit) return e else break :recv_loop;
+                        defer frame_queue.commit(dst_frame);
+
+                        _ = try libav.err(c.av_frame_copy_props(dst_frame, src_frame.ptr()));
+                        try convert(decoder.video_ctx, src_frame.ptr(), dst_frame, sws);
                     },
                     c.AVERROR(c.EAGAIN) => break :recv_loop,
                     c.AVERROR_EOF => return,
@@ -489,21 +507,36 @@ pub const video = struct {
                 }
             }
 
-            var pkt: ?*c.AVPacket = pkt_queue.pop() orelse {
-                const flush_ret = c.avcodec_send_packet(video_ctx, null);
-                if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
+            var pkt: ?*c.AVPacket = blk: {
+                if (pending) |pkt| {
+                    pending = null;
+                    break :blk pkt;
+                }
 
-                continue;
+                break :blk pkt_queue.pop() catch |e| switch (e) {
+                    error.end_of_stream => {
+                        const flush_ret = c.avcodec_send_packet(video_ctx, null);
+                        if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
+
+                        continue;
+                    },
+                    error.should_quit => break,
+                };
             };
-            defer c.av_packet_free(&pkt);
 
             {
                 const send_z = ztracy.ZoneN(@src(), "avcodec_send_packet");
                 defer send_z.End();
 
                 const send_ret = c.avcodec_send_packet(video_ctx, pkt);
+                if (send_ret == c.AVERROR(c.EAGAIN)) {
+                    pending = pkt;
+                    continue;
+                }
+
+                c.av_packet_free(&pkt);
+
                 if (send_ret == c.AVERROR_EOF) return;
-                if (send_ret == c.AVERROR(c.EAGAIN)) continue;
                 if (send_ret < 0) _ = try libav.err(send_ret);
             }
         }
@@ -550,20 +583,32 @@ pub const FrameQueue = struct {
     cond: std.Thread.Condition = .{},
 
     const Slot = struct { frame: []c.AVFrame, state: []State };
-    const State = enum { empty, in_use, ready_to_reuse };
+    const State = enum { empty, in_use, ready_to_reuse, writing };
     const Error = error{ ffmpeg_error, invalid_size, early_exit } || std.mem.Allocator.Error;
 
     // INVARIANT: This is an SPSC Queue
 
-    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), count: usize) Error!FrameQueue {
+    // FIXME: replace with Resolution or Dimension or whatever
+    const FrameOptions = struct { width: c_int, height: c_int };
+
+    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), count: usize, opt: FrameOptions) Error!FrameQueue {
         if (!std.math.isPowerOfTwo(count)) return error.invalid_size;
 
         const frames = try allocator.alloc(c.AVFrame, count);
+        errdefer allocator.free(frames);
+
         const states = try allocator.alloc(State, count);
+        errdefer allocator.free(states);
 
         for (frames, states) |*frame, *state| {
             frame.* = std.mem.zeroes(c.AVFrame);
-            c.av_frame_unref(frame);
+            c.av_frame_unref(frame); // make the frames valid
+
+            frame.width = opt.width;
+            frame.height = opt.height;
+            frame.format = c.AV_PIX_FMT_NV12;
+
+            _ = try libav.err(c.av_frame_get_buffer(frame, 32));
 
             state.* = .empty;
         }
@@ -583,18 +628,17 @@ pub const FrameQueue = struct {
         allocator.free(self.slot.state);
     }
 
-    pub fn push(self: *@This(), new_frame: *const c.AVFrame) Error!void {
-        const zone = ztracy.ZoneN(@src(), "FrameQueue.push");
+    pub fn acquire(self: *@This()) Error!*c.AVFrame {
+        const zone = ztracy.Zone(@src());
         defer zone.End();
 
         const idx = self.mask(self.write_idx);
-        const target_frame = &self.slot.frame[idx];
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            const z = ztracy.ZoneNC(@src(), "wait for empty slot", 0x3b3b3b);
+            const z = ztracy.ZoneNC(@src(), "wait for available frame", 0x3b3b3b);
             defer z.End();
 
             while (self.slot.state[idx] != .empty) {
@@ -603,21 +647,29 @@ pub const FrameQueue = struct {
             }
         }
 
-        // don't lock on this
-        _ = try libav.err(c.av_frame_ref(target_frame, new_frame));
+        self.slot.state[idx] = .writing;
+        return &self.slot.frame[idx];
+    }
 
-        {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+    pub fn commit(self: *@This(), frame: *c.AVFrame) void {
+        const zone = ztracy.Zone(@src());
+        defer zone.End();
 
-            self.slot.state[idx] = .in_use;
-            self.write_idx += 1;
-            self.cond.signal();
-        }
+        const idx = self.mask(self.write_idx);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        std.debug.assert(&self.slot.frame[idx] == frame);
+        std.debug.assert(self.slot.state[idx] == .writing);
+
+        self.slot.state[idx] = .in_use;
+        self.write_idx += 1;
+        self.cond.signal();
     }
 
     pub fn pop(self: *@This()) ?*c.AVFrame {
-        const zone = ztracy.ZoneN(@src(), "FrameQueue.pop");
+        const zone = ztracy.Zone(@src());
         defer zone.End();
 
         self.mutex.lock();
@@ -634,11 +686,8 @@ pub const FrameQueue = struct {
     }
 
     pub fn recycle(self: *@This(), used_frame: *c.AVFrame) void {
-        const zone = ztracy.ZoneN(@src(), "FrameQueue.recycle");
+        const zone = ztracy.Zone(@src());
         defer zone.End();
-
-        // SAFETY: we know the producer won't touch this because this ptr is .ready_to_reuse
-        c.av_frame_unref(used_frame);
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -724,7 +773,10 @@ pub const Decoder = struct {
         var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit(allocator);
 
-        var frame_queue = try FrameQueue.init(allocator, should_quit, 0x80); // 1s at 120fps?
+        var frame_queue = try FrameQueue.init(allocator, should_quit, 0x20, .{
+            .width = video_ctx.inner.?.width,
+            .height = video_ctx.inner.?.height,
+        });
         errdefer frame_queue.deinit(allocator);
 
         var video_queue = PacketQueue.init(allocator, should_quit);

@@ -333,7 +333,7 @@ pub fn main() !void {
                     const z_wait = ztracy.ZoneNC(@src(), "wait for next frame", 0x3b3b3b);
                     defer z_wait.End();
 
-                    const sleep_s = @min(diff_s, 0.001); // sleep_s
+                    const sleep_s = @min(diff_s, 0.010); // sleep_s
                     sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
                 }
             } else {
