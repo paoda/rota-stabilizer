@@ -222,7 +222,7 @@ pub fn main() !void {
         const start_time = @as(f64, @floatFromInt(decoder.stream(.video).start_time)) * time_base;
         log.debug("video start time: {d}s", .{start_time});
 
-        // try audio_clock.start(start_time);
+        try audio_clock.start(start_time);
 
         const delay_threshold = 0.300;
 
@@ -293,9 +293,6 @@ pub fn main() !void {
 
                 const audio_time = audio_clock.seconds_passed();
                 const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
-
-                const is_first_frame = audio_clock.isPaused();
-                if (is_first_frame) try audio_clock.start(next_frame_time);
 
                 if (next_frame_time - audio_time < -delay_threshold) {
                     decoder.queue.frame.recycle(frame);

@@ -290,7 +290,7 @@ pub const audio = struct {
             const hw_latency_bytes = self.hw_latency_secs * bytes_per_sec;
 
             const hw_pos = bytes_sent - queued - hw_latency_bytes;
-            const hw_secs = (hw_pos / bytes_per_sec) + self.stream_start_offset;
+            const hw_secs = (hw_pos / bytes_per_sec) + self.stream_start_offset - 0.100;
 
             const now_ns = c.SDL_GetTicksNS();
 
