@@ -38,8 +38,11 @@ pub const Ui = struct {
     }
 
     pub fn swap(self: @This()) !void {
-        ztracy.FrameMark();
+        const zone = ztracy.Zone(@src());
+        defer zone.End();
+
         try errify(c.SDL_GL_SwapWindow(self.window));
+        ztracy.FrameMark();
     }
 };
 

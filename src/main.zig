@@ -30,6 +30,8 @@ const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 pub fn main() !void {
     defer signal.should_quit.store(true, .monotonic);
 
+    ___tracy_emit_plot_config("A/V Sync Drift (ms)", 0, 0, 0, 0);
+
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
@@ -231,39 +233,46 @@ pub fn main() !void {
         var should_render: bool = true;
 
         while (!signal.should_quit.load(.monotonic)) {
-            var event: c.SDL_Event = undefined;
+            const zone = ztracy.ZoneN(@src(), "ui loop");
+            defer zone.End();
 
-            while (c.SDL_PollEvent(&event)) {
-                switch (event.type) {
-                    c.SDL_EVENT_QUIT => {
-                        signal.should_quit.store(true, .monotonic);
-                        should_render = true;
-                    },
-                    c.SDL_EVENT_MOUSE_WHEEL => {
-                        const wheel_delta = event.wheel.y * 0.1;
-                        camera.adjustZoom(wheel_delta);
-                        log.debug("Zoom: {d:.2}x", .{camera.zoom});
+            {
+                const z = ztracy.ZoneN(@src(), "query input");
+                defer z.End();
 
-                        should_render = true;
-                    },
-                    c.SDL_EVENT_WINDOW_RESIZED => {
-                        view = Viewport.init(event.window.data1, event.window.data2);
-                        camera.updateWindow(view.width, view.height);
-
-                        should_render = true;
-                    },
-                    c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
-                        c.SDL_SCANCODE_M => {
-                            try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
+                var event: c.SDL_Event = undefined;
+                while (c.SDL_PollEvent(&event)) {
+                    switch (event.type) {
+                        c.SDL_EVENT_QUIT => {
+                            signal.should_quit.store(true, .monotonic);
                             should_render = true;
                         },
-                        c.SDL_SCANCODE_F11 => {
-                            try ui.toggleFullscreen();
+                        c.SDL_EVENT_MOUSE_WHEEL => {
+                            const wheel_delta = event.wheel.y * 0.1;
+                            camera.adjustZoom(wheel_delta);
+                            log.debug("Zoom: {d:.2}x", .{camera.zoom});
+
                             should_render = true;
+                        },
+                        c.SDL_EVENT_WINDOW_RESIZED => {
+                            view = Viewport.init(event.window.data1, event.window.data2);
+                            camera.updateWindow(view.width, view.height);
+
+                            should_render = true;
+                        },
+                        c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
+                            c.SDL_SCANCODE_M => {
+                                try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
+                                should_render = true;
+                            },
+                            c.SDL_SCANCODE_F11 => {
+                                try ui.toggleFullscreen();
+                                should_render = true;
+                            },
+                            else => {},
                         },
                         else => {},
-                    },
-                    else => {},
+                    }
                 }
             }
 
@@ -316,7 +325,6 @@ pub fn main() !void {
 
                 if (diff_s <= 0) { // Time to display the newer frame!
                     stable_buffer.swap();
-                    ztracy.FrameMarkNamed("video");
 
                     decoder.queue.frame.recycle(frame);
                     next_frame = null;
@@ -335,9 +343,6 @@ pub fn main() !void {
             }
 
             if (should_render) {
-                const z = ztracy.ZoneN(@src(), "did render");
-                defer z.End();
-
                 try render(&view, &stable_buffer, angle_calc, res, camera);
                 try ui.swap();
 
@@ -891,3 +896,6 @@ pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo
     const ptr = maybe_ptr orelse return null;
     return ptr[0..@intCast(view.width * view.height * RGB24_BPP)];
 }
+
+// FIXME: why doesn't ztracy support this?
+pub extern fn ___tracy_emit_plot_config(name: [*c]const u8, @"type": i32, step: i32, fill: i32, color: u32) void;
