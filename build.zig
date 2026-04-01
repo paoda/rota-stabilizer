@@ -91,10 +91,12 @@ pub fn build(b: *std.Build) !void {
     const clap = b.dependency("clap", .{});
     exe_mod.addImport("clap", clap.module("clap"));
 
-    const enable_ztracy = b.option(bool, "ztracy", "Enable Tracy Profiling") orelse false;
-    const ztracy = b.dependency("ztracy", .{ .enable_ztracy = enable_ztracy });
-    exe_mod.addImport("ztracy", ztracy.module("root"));
-    exe_mod.linkLibrary(ztracy.artifact("tracy"));
+    const enable_tracy = b.option(bool, "tracy", "Enable Tracy Profiling") orelse false;
+    const tracy = b.dependency("tracy", .{ .target = target, .optimize = .ReleaseFast });
+    const tracy_impl = if (enable_tracy) "tracy_impl_enabled" else "tracy_impl_disabled";
+
+    exe_mod.addImport("tracy", tracy.module("tracy"));
+    exe_mod.addImport("tracy_impl", tracy.module(tracy_impl));
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.

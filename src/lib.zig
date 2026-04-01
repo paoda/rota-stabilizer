@@ -483,7 +483,7 @@ pub const GpuResourceManager = struct {
 pub fn sleep(duration: u64) void {
     const start = c.SDL_GetTicksNS();
     const target = start + duration;
-    const threshold = 2 * std.time.ns_per_s;
+    const threshold = 2 * std.time.ns_per_ms;
 
     while (true) {
         const now = c.SDL_GetTicksNS();

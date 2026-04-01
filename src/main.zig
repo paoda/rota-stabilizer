@@ -1,7 +1,7 @@
 const std = @import("std");
 const gl = @import("gl");
 const clap = @import("clap");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const c = @import("lib.zig").c;
 const platform = @import("lib/platform.zig");
@@ -27,10 +27,11 @@ const UV_BPP = @import("lib.zig").UV_BPP;
 
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 
+pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
+pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
+
 pub fn main() !void {
     defer signal.should_quit.store(true, .monotonic);
-
-    // ___tracy_emit_plot_config("A/V Sync Drift (ms)", 0, 0, 0, 0);
 
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
@@ -40,7 +41,8 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
 
-    const allocator = gpa.allocator();
+    var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
+    const allocator = tracy_alloc.allocator();
 
     const params = comptime clap.parseParamsComptime(
         \\-h, --help            Display this help and exit.
@@ -139,8 +141,8 @@ pub fn main() !void {
         var frame_count: u64 = 0;
 
         while (!signal.should_quit.load(.monotonic)) {
-            const zone = ztracy.ZoneN(@src(), "encode loop");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "encode loop" });
+            defer zone.end();
 
             // Process any pending audio packets (remux to output)
             while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
@@ -155,8 +157,8 @@ pub fn main() !void {
                 defer stable_buffer.swap();
                 defer frame_count += 1; // increment after frame is sent to the GPU
 
-                const z = ztracy.ZoneN(@src(), "frame received");
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
+                defer z.end();
 
                 uploadYTexture(stable_buffer, frame);
                 uploadUvTexture(stable_buffer, frame);
@@ -164,16 +166,16 @@ pub fn main() !void {
                 try render(&view, &stable_buffer, angle_calc, res, camera);
 
                 {
-                    const pbo_z = ztracy.ZoneN(@src(), "read from OpenGL");
-                    defer pbo_z.End();
+                    const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
+                    defer pbo_z.end();
 
                     // Start async readback into current PBO
                     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (current_pbo == 1) .rgb_front else .rgb_back));
                     defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
                     {
-                        const read_z = ztracy.ZoneN(@src(), "gl.ReadPixels");
-                        defer read_z.End();
+                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels" });
+                        defer read_z.end();
 
                         gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
                     }
@@ -197,8 +199,8 @@ pub fn main() !void {
                 defer signal.should_quit.store(true, .monotonic); // exit program once flush is done
                 defer std.Progress.setStatus(.success);
 
-                const z = ztracy.ZoneN(@src(), "final frame received");
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
+                defer z.end();
 
                 // encode buffered frame
                 if (pending_frame_pts) |pts| blk: {
@@ -229,16 +231,18 @@ pub fn main() !void {
         log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
 
+        tracy.plotConfig(.{ .name = "A/V Sync Drift (ms)" });
+
         var next_frame: ?*c.AVFrame = null;
         var should_render: bool = true;
 
         while (!signal.should_quit.load(.monotonic)) {
-            const zone = ztracy.ZoneN(@src(), "ui loop");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
+            defer zone.end();
 
             {
-                const z = ztracy.ZoneN(@src(), "query input");
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "query input" });
+                defer z.end();
 
                 var event: c.SDL_Event = undefined;
                 while (c.SDL_PollEvent(&event)) {
@@ -279,8 +283,8 @@ pub fn main() !void {
             if (next_frame == null) next_frame = decoder.queue.frame.pop();
 
             if (next_frame) |frame| blk: {
-                const z = ztracy.ZoneN(@src(), "have next frame");
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
+                defer z.end();
 
                 if (frame.format != c.AV_PIX_FMT_NV12) {
                     @branchHint(.cold);
@@ -305,10 +309,10 @@ pub fn main() !void {
 
                 // if (is_first_frame or !already_uploaded) {
                 if (!already_uploaded) {
-                    ztracy.PlotU("Buffered Frames", decoder.queue.frame.len());
+                    tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(decoder.queue.frame.len()) } });
 
-                    const z_upload = ztracy.ZoneN(@src(), "upload next frame");
-                    defer z_upload.End();
+                    const upload_z = tracy.Zone.begin(.{ .src = @src(), .name = "upload next frame" });
+                    defer upload_z.end();
 
                     // this is a new frame, upload it to the BACK buffer
                     uploadYTexture(back_buffer, frame);
@@ -322,9 +326,9 @@ pub fn main() !void {
                 const lead_time = 0.00;
 
                 if (diff_s <= lead_time) { // Time to display the newer frame!
-                    ztracy.PlotF("Audio Time (s)", audio_time);
-                    ztracy.PlotF("Next Frame Time (s)", next_frame_time);
-                    ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
+                    tracy.plot(.{ .name = "Audio Time (s)", .value = .{ .f64 = audio_time } });
+                    tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
+                    tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
 
                     stable_buffer.swap();
 
@@ -332,15 +336,19 @@ pub fn main() !void {
                     next_frame = null;
                     should_render = true;
                 } else {
-                    const z_wait = ztracy.ZoneNC(@src(), "wait for next frame", 0x3b3b3b);
-                    defer z_wait.End();
+                    const wait_z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for next frame", .color = .gray25 });
+                    defer wait_z.end();
 
-                    // const sleep_s = @min(diff_s, 0.005); // sleep_s
-                    // sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
+                    const sleep_s = @min(diff_s, 0.010); // sleep_s
+
+                    var buf: [0x20]u8 = undefined;
+                    tracy.message(.{ .text = try std.fmt.bufPrint(&buf, "sleep for {d:.2}ms", .{sleep_s * std.time.ms_per_s}) });
+
+                    sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
                 }
             } else {
                 // no next frame
-                ztracy.Message("FrameQueue starved!");
+                tracy.message(.{ .text = "FrameQueue starved!" });
                 sleep(1 * std.time.ns_per_ms);
             }
 
@@ -420,8 +428,8 @@ fn render(
     res: *const GpuResourceManager,
     camera: Camera,
 ) !void {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
@@ -430,8 +438,8 @@ fn render(
     angle_calc.execute(view, tex);
 
     {
-        const z = ztracy.ZoneN(@src(), "background pass");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "background pass" });
+        defer z.end();
 
         blur(res.blur(), res, view, tex, camera, 6);
         const prog = res.prog.get(.bg);
@@ -460,8 +468,8 @@ fn render(
     }
 
     {
-        const z = ztracy.ZoneN(@src(), "ui pass");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "ui pass" });
+        defer z.end();
 
         const circle_prog = res.prog.get(.circle);
         const ring_prog = res.prog.get(.ring);
@@ -490,8 +498,8 @@ fn render(
     }
 
     {
-        const z = ztracy.ZoneN(@src(), "video pass");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "video pass" });
+        defer z.end();
 
         const prog = res.prog.get(.tex);
 
@@ -534,8 +542,8 @@ fn render(
 fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, camera: Camera, comptime passes: u32) void {
     if (passes == 0) return;
 
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
     std.debug.assert(passes & 1 == 0);
 
@@ -643,8 +651,8 @@ const AngleCalc = struct {
     }
 
     pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
-        const zone = ztracy.ZoneN(@src(), "angle calc pass");
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "angle calc pass" });
+        defer zone.end();
 
         const program = self.res.prog.get(.angle);
 
@@ -820,8 +828,8 @@ const Camera = struct {
 };
 
 pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
     gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
     defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
@@ -832,8 +840,8 @@ pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
     const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
 
     if (pbo) |ptr| {
-        const z = ztracy.ZoneN(@src(), "y plane upload");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "y plane upload" });
+        defer z.end();
 
         const bytes_per_line: usize = @intCast(frame.linesize[0]);
         const height: usize = @intCast(frame.height);
@@ -852,8 +860,8 @@ pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
 }
 
 pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
     gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
     defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
@@ -864,8 +872,8 @@ pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
     const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
 
     if (pbo) |ptr| {
-        const z = ztracy.ZoneN(@src(), "uv plane upload");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "uv plane upload" });
+        defer z.end();
 
         const bytes_per_line: usize = @intCast(frame.linesize[1]);
         const height: usize = @intCast(@divTrunc(frame.height, 2));
@@ -884,8 +892,8 @@ pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
 }
 
 pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?[]const u8 {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
     const idx = current_pbo +% 1;
 

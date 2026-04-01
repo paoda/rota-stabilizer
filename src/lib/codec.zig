@@ -1,6 +1,6 @@
 const std = @import("std");
 const libav = @import("libav.zig");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 const c = @import("../lib.zig").c;
 
 const errify = @import("platform.zig").errify;
@@ -19,7 +19,7 @@ pub const packet = struct {
     pub const Queue = struct { // FIXME: is there any point to rolling my own?
         list: LinearFifo,
 
-        mutex: std.Thread.Mutex = .{},
+        mutex: TracyMutex,
         cond: std.Thread.Condition = .{},
 
         end_of_stream: std.atomic.Value(bool) = .init(false),
@@ -29,8 +29,9 @@ pub const packet = struct {
 
         // INVARIANT: this is an SPSC Queue
 
-        pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool)) Queue {
+        pub fn init(allocator: std.mem.Allocator, name: []const u8, should_quit: *const std.atomic.Value(bool)) Queue {
             return .{
+                .mutex = .init(@src(), name),
                 .list = LinearFifo.init(allocator),
                 .should_quit = should_quit,
             };
@@ -42,12 +43,13 @@ pub const packet = struct {
                 c.av_packet_free(&p);
             }
 
+            self.mutex.deinit();
             self.list.deinit();
         }
 
         pub fn push(self: *@This(), pkt: *c.AVPacket) !void {
-            const zone = ztracy.ZoneN(@src(), "PacketQueue.push");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src() });
+            defer zone.end();
 
             var copy: ?*c.AVPacket = c.av_packet_alloc() orelse return error.out_of_memory;
             errdefer c.av_packet_free(&copy);
@@ -65,21 +67,21 @@ pub const packet = struct {
         }
 
         pub fn pop(self: *@This()) !*c.AVPacket {
-            const zone = ztracy.ZoneN(@src(), "PacketQueue.pop");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src() });
+            defer zone.end();
 
             self.mutex.lock();
             defer self.mutex.unlock();
 
             {
-                const z = ztracy.ZoneNC(@src(), "wait for packet", 0x3b3b3b);
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for packet", .color = .gray25 });
+                defer z.end();
 
                 while (self.list.readableLength() == 0) {
                     if (self.end_of_stream.load(.monotonic)) return error.end_of_stream;
                     if (self.should_quit.load(.monotonic)) return error.should_quit;
 
-                    self.cond.wait(&self.mutex);
+                    self.cond.wait(&self.mutex.inner);
                 }
             }
 
@@ -88,8 +90,8 @@ pub const packet = struct {
 
         /// Non-blocking pop - returns null immediately if queue is empty
         pub fn tryPop(self: *@This()) ?*c.AVPacket {
-            const zone = ztracy.ZoneN(@src(), "PacketQueue.tryPop");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src() });
+            defer zone.end();
 
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -117,7 +119,7 @@ pub const packet = struct {
 
     pub fn read(decode: *Decoder) !void {
         // const log = std.log.scoped(.packet_read);
-        ztracy.SetThreadName("packet read");
+        // tracy.SetThreadName("packet read");
 
         var pkt = AvPacket.init();
         defer pkt.deinit();
@@ -127,15 +129,15 @@ pub const packet = struct {
         const fmt_ctx = &decode.fmt_ctx;
 
         while (!decode.should_quit.load(.monotonic)) {
-            const zone = ztracy.ZoneN(@src(), "read loop");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "read loop" });
+            defer zone.end();
 
             switch (c.av_read_frame(fmt_ctx.ptr(), pkt.ptr())) {
                 0...std.math.maxInt(c_int) => {
                     defer c.av_packet_unref(pkt.ptr());
 
-                    const z = ztracy.ZoneN(@src(), "read frame");
-                    defer z.End();
+                    const z = tracy.Zone.begin(.{ .src = @src(), .name = "read frame" });
+                    defer z.end();
 
                     if (pkt.ptr().stream_index == decode.video_ctx.stream) {
                         try video_queue.push(pkt.ptr());
@@ -207,11 +209,11 @@ pub const audio = struct {
                 const drift = s - sys_advanced;
 
                 if (@abs(offset_s - 0.0) < std.math.floatEps(f64))
-                    ztracy.PlotF("Audio Clock Drift (ms)", drift * std.time.ms_per_s);
+                    tracy.plot(.{ .name = "Audio Clock Drift (ms)", .value = .{ .f64 = drift * std.time.ms_per_s } });
 
                 var smoothed: f64 = 0.0;
                 if (@abs(drift) > desync_threshold) {
-                    ztracy.Message("snap audio clock to reality");
+                    tracy.message(.{ .text = "snap audio clock to reality" });
                     smoothed = s; // snap to reality if drift is too large (e.g. seek)
                 } else {
                     // Gently pull our linear clock towards the audio clock to correct over/under-shoots
@@ -245,6 +247,8 @@ pub const audio = struct {
             const offset = @as(f64, @floatFromInt(sample_frames)) / @as(f64, @floatFromInt(actual.freq));
 
             log.info("hw latency: {d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
+            tracy.plotConfig(.{ .name = "Audio Clock Drift (ms)" });
+            tracy.plotConfig(.{ .name = "Audio Samples Queued" });
 
             return .{
                 .start_time = c.SDL_GetPerformanceCounter(),
@@ -284,8 +288,8 @@ pub const audio = struct {
         }
 
         pub fn seconds_passed(self: *@This()) f64 {
-            const zone = ztracy.ZoneN(@src(), "AudioClock.seconds_passed");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "AudioClock.seconds_passed" });
+            defer zone.end();
 
             const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
             const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream));
@@ -301,7 +305,7 @@ pub const audio = struct {
                 self.last_hw_pos = hw_pos;
                 self.last_hw_update_time_ns = now_ns;
 
-                ztracy.PlotU("Audio Queued", @intFromFloat(queued));
+                tracy.plot(.{ .name = "Audio Samples Queued", .value = .{ .i64 = @as(u32, @intFromFloat(queued)) / self.bytes_per_sample } });
                 return self.sync.push(hw_secs, 0.0);
             } else {
                 const duration_s: f64 = @as(f64, @floatFromInt(now_ns - self.last_hw_update_time_ns)) / std.time.ns_per_s;
@@ -314,7 +318,7 @@ pub const audio = struct {
 
     pub fn decode(decoder: *Decoder) !void {
         const log = std.log.scoped(.audio_decode);
-        ztracy.SetThreadName("audio decode");
+        tracy.setThreadName("audio decode");
 
         const clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
         const codec_ctx = &decoder.audio_ctx;
@@ -354,34 +358,34 @@ pub const audio = struct {
         defer if (pending) |_| c.av_packet_free(&pending);
 
         while (!decoder.should_quit.load(.monotonic)) {
-            const zone = ztracy.ZoneN(@src(), "decode loop");
-            defer zone.End();
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "decode loop" });
+            defer zone.end();
 
             // Try to receive a frame first if we have packets already in the decoder
             recv_loop: while (true) {
-                const recv_z = ztracy.ZoneN(@src(), "avcodec_receive_frame");
-                defer recv_z.End();
+                const recv_z = tracy.Zone.begin(.{ .src = @src(), .name = "avcodec_receive_frame" });
+                defer recv_z.end();
 
                 switch (c.avcodec_receive_frame(audio_ctx, src_frame)) {
                     0 => { // got a frame
                         defer c.av_frame_unref(src_frame);
 
-                        const z = ztracy.ZoneN(@src(), "process frame");
-                        defer z.End();
+                        const z = tracy.Zone.begin(.{ .src = @src(), .name = "process frame" });
+                        defer z.end();
 
                         frame_count += 1;
 
                         {
-                            const swr_z = ztracy.ZoneN(@src(), "swr_convert_frame");
-                            defer swr_z.End();
+                            const swr_z = tracy.Zone.begin(.{ .src = @src(), .name = "swr_convert_frame" });
+                            defer swr_z.end();
 
                             _ = try libav.err(c.swr_convert_frame(swr, dst_frame, src_frame));
                         }
 
                         // Track stalls when audio buffer is full
                         {
-                            const wait_z = ztracy.ZoneNC(@src(), "wait for audio buffer", 0x3b3b3b);
-                            defer wait_z.End();
+                            const wait_z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for audio buffer", .color = .gray25 });
+                            defer wait_z.end();
 
                             while (true) {
                                 if (c.SDL_GetAudioStreamQueued(clock.stream) < max_len) break;
@@ -390,8 +394,8 @@ pub const audio = struct {
                         }
 
                         {
-                            const put_z = ztracy.ZoneN(@src(), "SDL_PutAudioStreamData");
-                            defer put_z.End();
+                            const put_z = tracy.Zone.begin(.{ .src = @src(), .name = "SDL_PutAudioStreamData" });
+                            defer put_z.end();
 
                             const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
                             _ = c.SDL_PutAudioStreamData(clock.stream, dst_frame.data[0], len);
@@ -422,8 +426,8 @@ pub const audio = struct {
             };
 
             {
-                const send_z = ztracy.ZoneN(@src(), "avcodec_send_packet");
-                defer send_z.End();
+                const send_z = tracy.Zone.begin(.{ .src = @src(), .name = "avcodec_send_packet" });
+                defer send_z.end();
 
                 const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
                 if (send_ret == c.AVERROR(c.EAGAIN)) {
@@ -441,8 +445,8 @@ pub const audio = struct {
 
 pub const video = struct {
     pub fn decode(decoder: *Decoder) !void {
-        //  const log = std.log.scoped(.video_decode);
-        ztracy.SetThreadName("video decode");
+        // const log = std.log.scoped(.video_decode);
+        tracy.setThreadName("video decode");
 
         const frame_queue = &decoder.queue.frame;
         defer frame_queue.end_of_stream.store(true, .monotonic);
@@ -476,13 +480,13 @@ pub const video = struct {
 
         // TODO: using a fn ptr I think we can deduplicate this massive loop
         while (!decoder.should_quit.load(.monotonic)) {
-            const z = ztracy.ZoneN(@src(), "decode loop");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "decode loop" });
+            defer z.end();
 
             // Try to receive a frame first if we have packets already in the decoder
             recv_loop: while (true) {
-                const recv_z = ztracy.ZoneN(@src(), "avcodec_receive_frame");
-                defer recv_z.End();
+                const recv_z = tracy.Zone.begin(.{ .src = @src(), .name = "avcodec_receive_frame" });
+                defer recv_z.end();
 
                 switch (c.avcodec_receive_frame(video_ctx, src_frame.ptr())) {
                     0 => {
@@ -518,8 +522,8 @@ pub const video = struct {
             };
 
             {
-                const send_z = ztracy.ZoneN(@src(), "avcodec_send_packet");
-                defer send_z.End();
+                const send_z = tracy.Zone.begin(.{ .src = @src(), .name = "avcodec_send_packet" });
+                defer send_z.end();
 
                 const send_ret = c.avcodec_send_packet(video_ctx, pkt);
                 if (send_ret == c.AVERROR(c.EAGAIN)) {
@@ -537,17 +541,17 @@ pub const video = struct {
 
     fn convert(codec_ctx: *const dec.AvCodecContext, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
         @setRuntimeSafety(false);
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         if (codec_ctx.device) |_| {
-            const z = ztracy.ZoneN(@src(), "hwframe_transfer_data");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "hwframe_transfer_data" });
+            defer z.end();
 
             _ = try libav.err(c.av_hwframe_transfer_data(dst_frame, src_frame, 0));
         } else {
-            const z = ztracy.ZoneN(@src(), "sws_scale_frame");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "sws_scale_frame" });
+            defer z.end();
 
             _ = try libav.err(c.sws_scale_frame(sws, dst_frame, src_frame));
         }
@@ -564,6 +568,43 @@ pub const video = struct {
     }
 };
 
+const TracyMutex = struct {
+    inner: std.Thread.Mutex,
+    _lock: *tracy.Lock,
+
+    pub fn init(comptime src: std.builtin.SourceLocation, name: []const u8) TracyMutex {
+        const _lock: *tracy.Lock = .init(.{ .src = src });
+        _lock.customName(name);
+
+        return .{
+            .inner = .{},
+            ._lock = _lock,
+        };
+    }
+
+    pub fn deinit(self: @This()) void {
+        self._lock.deinit();
+    }
+
+    pub fn lock(self: *@This()) void {
+        _ = self._lock.beforeLock();
+        defer self._lock.afterLock();
+
+        self.inner.lock();
+    }
+
+    pub fn unlock(self: *@This()) void {
+        self.inner.unlock();
+        self._lock.afterUnlock();
+    }
+    pub fn tryLock(self: *@This()) bool {
+        const ret = self.inner.tryLock();
+        self._lock.afterTryUnlock(ret); // NB: is actually afterTrylock
+
+        return ret;
+    }
+};
+
 pub const FrameQueue = struct {
     slot: Slot,
     read_idx: usize,
@@ -572,7 +613,7 @@ pub const FrameQueue = struct {
     end_of_stream: std.atomic.Value(bool) = .init(false),
     should_quit: *const std.atomic.Value(bool),
 
-    mutex: std.Thread.Mutex = .{},
+    mutex: TracyMutex,
     cond: std.Thread.Condition = .{},
 
     const Slot = struct { frame: []c.AVFrame, state: []State };
@@ -607,6 +648,7 @@ pub const FrameQueue = struct {
         }
 
         return .{
+            .mutex = .init(@src(), "FrameQueue"),
             .should_quit = should_quit,
             .slot = .{ .frame = frames, .state = states },
             .read_idx = 0,
@@ -617,13 +659,14 @@ pub const FrameQueue = struct {
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         for (self.slot.frame) |*frame| c.av_frame_unref(frame);
 
+        self.mutex.deinit();
         allocator.free(self.slot.frame);
         allocator.free(self.slot.state);
     }
 
     pub fn acquire(self: *@This()) Error!*c.AVFrame {
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         const idx = self.mask(self.write_idx);
 
@@ -631,12 +674,12 @@ pub const FrameQueue = struct {
         defer self.mutex.unlock();
 
         {
-            const z = ztracy.ZoneNC(@src(), "wait for available frame", 0x3b3b3b);
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for available frame", .color = .gray25 });
+            defer z.end();
 
             while (self.slot.state[idx] != .empty) {
                 if (self.should_quit.load(.monotonic)) return error.early_exit;
-                self.cond.wait(&self.mutex);
+                self.cond.wait(&self.mutex.inner);
             }
         }
 
@@ -645,8 +688,8 @@ pub const FrameQueue = struct {
     }
 
     pub fn commit(self: *@This(), frame: *c.AVFrame) void {
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         const idx = self.mask(self.write_idx);
 
@@ -662,8 +705,8 @@ pub const FrameQueue = struct {
     }
 
     pub fn pop(self: *@This()) ?*c.AVFrame {
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -679,15 +722,15 @@ pub const FrameQueue = struct {
     }
 
     pub fn recycle(self: *@This(), used_frame: *c.AVFrame) void {
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         self.mutex.lock();
         defer self.mutex.unlock();
 
         {
-            const z = ztracy.ZoneNC(@src(), "frame search", 0x3b3b3b);
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame search", .color = .gray25 });
+            defer z.end();
 
             for (self.slot.frame, self.slot.state) |*frame, *state| {
                 if (frame != used_frame) continue;
@@ -776,10 +819,10 @@ pub const Decoder = struct {
         });
         errdefer frame_queue.deinit(allocator);
 
-        var video_queue = PacketQueue.init(allocator, should_quit);
+        var video_queue = PacketQueue.init(allocator, "Video PacketQueue", should_quit);
         errdefer video_queue.deinit(allocator);
 
-        var audio_queue = PacketQueue.init(allocator, should_quit);
+        var audio_queue = PacketQueue.init(allocator, "Audio PacketQueue", should_quit);
         errdefer audio_queue.deinit(allocator);
 
         const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx);
@@ -969,8 +1012,8 @@ pub const Encoder = struct {
     pub fn encodeRgbFrame(self: *Encoder, buf: []const u8, frame_pts: i64) !void {
         @setRuntimeSafety(false);
 
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         const sw_frame = self._frame.ptr();
         _ = try libav.err(c.av_frame_make_writable(sw_frame));
@@ -987,8 +1030,8 @@ pub const Encoder = struct {
         src_frame.linesize[0] = -@as(c_int, @intCast(stride)); // negative to flip vertically
 
         {
-            const z = ztracy.ZoneN(@src(), "sws_scale_frame");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "sws_scale_frame" });
+            defer z.end();
 
             _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, &src_frame));
             sw_frame.pts = frame_pts;
@@ -998,8 +1041,8 @@ pub const Encoder = struct {
             const hw_frame = hw.frame.ptr();
 
             {
-                const z = ztracy.ZoneN(@src(), "hw upload");
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "hw upload" });
+                defer z.end();
 
                 c.av_frame_unref(hw_frame);
                 _ = try libav.err(c.av_hwframe_get_buffer(self.codec_ctx.ptr().hw_frames_ctx, hw_frame, 0));
@@ -1014,8 +1057,8 @@ pub const Encoder = struct {
     }
 
     pub fn writeAudioPacket(self: *Encoder, in: *c.AVStream, pkt: *c.AVPacket) !void {
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         const UNKN_POS = -1;
         const audio_stream = self.audio_stream.ptr();
@@ -1025,16 +1068,16 @@ pub const Encoder = struct {
         pkt.stream_index = audio_stream.index;
 
         {
-            const z = ztracy.ZoneN(@src(), "av_interleaved_write_frame");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "av_interleaved_write_frame" });
+            defer z.end();
 
             _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx.ptr(), pkt));
         }
     }
 
     fn writeVideoFrame(self: *Encoder, frame: ?*c.AVFrame) !void {
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         const codec_ctx = self.codec_ctx.ptr();
         const video_stream = self.video_stream.ptr();
@@ -1042,19 +1085,19 @@ pub const Encoder = struct {
         const pkt = self._pkt.ptr();
 
         {
-            const z = ztracy.ZoneN(@src(), "avcodec_send_frame");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "avcodec_send_frame" });
+            defer z.end();
 
             _ = try libav.err(c.avcodec_send_frame(codec_ctx, frame));
         }
 
         while (true) {
-            const z_loop = ztracy.ZoneN(@src(), "write loop");
-            defer z_loop.End();
+            const z_loop = tracy.Zone.begin(.{ .src = @src(), .name = "write loop" });
+            defer z_loop.end();
 
             {
-                const z = ztracy.ZoneN(@src(), "avcodec_receive_packet");
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "avcodec_receive_packet" });
+                defer z.end();
 
                 const ret = c.avcodec_receive_packet(codec_ctx, pkt);
                 if (ret == c.AVERROR(c.EAGAIN) or ret == c.AVERROR_EOF) break;
@@ -1065,8 +1108,8 @@ pub const Encoder = struct {
             pkt.stream_index = video_stream.index;
 
             {
-                const z = ztracy.ZoneN(@src(), "av_interleaved_write_frame");
-                defer z.End();
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "av_interleaved_write_frame" });
+                defer z.end();
 
                 _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx.ptr(), pkt));
             }

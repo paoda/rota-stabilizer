@@ -1,8 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-
 const gl = @import("gl");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 const c = @import("../lib.zig").c;
 
 pub var gl_procs: gl.ProcTable = undefined;
@@ -38,11 +37,11 @@ pub const Ui = struct {
     }
 
     pub fn swap(self: @This()) !void {
-        const zone = ztracy.Zone(@src());
-        defer zone.End();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
         try errify(c.SDL_GL_SwapWindow(self.window));
-        ztracy.FrameMark();
+        tracy.frameMark(null);
     }
 };
 

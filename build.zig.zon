@@ -53,9 +53,9 @@
             .url = "git+https://github.com/Hejsil/zig-clap#5289e0753cd274d65344bef1c114284c633536ea",
             .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
         },
-        .ztracy = .{
-            .url = "git+https://github.com/zig-gamedev/ztracy#d95d2a193b9f97944a17026c9a42b5d0f9a88c94",
-            .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
+        .tracy = .{
+            .url = "git+https://git.musuka.dev/paoda/tracy_zig#72efa5726086abf58b4850d059aa3299f9729275",
+            .hash = "tracy-0.1.0-R7l8BVRKAQBPCflWulJM1lcmEYBgTqLQAMog5lrgVJhw",
         },
     },
     .paths = .{
