@@ -228,34 +228,39 @@ pub fn main() !void {
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
 
         var next_frame: ?*c.AVFrame = null;
+        var should_render: bool = true;
 
         while (!signal.should_quit.load(.monotonic)) {
-            const start = c.SDL_GetTicksNS();
-
             var event: c.SDL_Event = undefined;
 
             while (c.SDL_PollEvent(&event)) {
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => {
                         signal.should_quit.store(true, .monotonic);
-                        break;
+                        should_render = true;
                     },
                     c.SDL_EVENT_MOUSE_WHEEL => {
                         const wheel_delta = event.wheel.y * 0.1;
                         camera.adjustZoom(wheel_delta);
                         log.debug("Zoom: {d:.2}x", .{camera.zoom});
+
+                        should_render = true;
                     },
                     c.SDL_EVENT_WINDOW_RESIZED => {
                         view = Viewport.init(event.window.data1, event.window.data2);
                         camera.updateWindow(view.width, view.height);
 
-                        log.debug("Window resized to {}x{}", .{ view.width, view.height });
+                        should_render = true;
                     },
                     c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
                         c.SDL_SCANCODE_M => {
                             try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
+                            should_render = true;
                         },
-                        c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
+                        c.SDL_SCANCODE_F11 => {
+                            try ui.toggleFullscreen();
+                            should_render = true;
+                        },
                         else => {},
                     },
                     else => {},
@@ -265,7 +270,7 @@ pub fn main() !void {
             if (next_frame == null) next_frame = decoder.queue.frame.pop();
 
             if (next_frame) |frame| blk: {
-                const z = ztracy.ZoneN(@src(), "video frame received");
+                const z = ztracy.ZoneN(@src(), "have next frame");
                 defer z.End();
 
                 if (frame.format != c.AV_PIX_FMT_NV12) {
@@ -294,6 +299,9 @@ pub fn main() !void {
 
                 // if (is_first_frame or !already_uploaded) {
                 if (!already_uploaded) {
+                    const z_upload = ztracy.ZoneN(@src(), "upload next frame");
+                    defer z_upload.End();
+
                     // this is a new frame, upload it to the BACK buffer
                     uploadYTexture(back_buffer, frame);
                     uploadUvTexture(back_buffer, frame);
@@ -312,21 +320,29 @@ pub fn main() !void {
 
                     decoder.queue.frame.recycle(frame);
                     next_frame = null;
+                    should_render = true;
+                } else {
+                    const z_wait = ztracy.ZoneNC(@src(), "wait for next frame", 0x3b3b3b);
+                    defer z_wait.End();
+
+                    const sleep_s = @min(diff_s, 0.001); // sleep_s
+                    sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
                 }
+            } else {
+                // no next frame
+                ztracy.Message("FrameQueue starved!");
+                sleep(1 * std.time.ns_per_ms);
             }
 
-            try render(&view, &stable_buffer, angle_calc, res, camera);
-            try ui.swap();
+            if (should_render) {
+                const z = ztracy.ZoneN(@src(), "did render");
+                defer z.End();
 
-            _ = start;
+                try render(&view, &stable_buffer, angle_calc, res, camera);
+                try ui.swap();
 
-            // const frame_time = c.SDL_GetTicksNS() - start;
-            // const target: u64 = @intFromFloat(frame_period * std.time.ns_per_s);
-            // const remaining = target -| frame_time;
-
-            // ztracy.PlotU("remaining", remaining / std.time.ns_per_ms);
-
-            // sleep(remaining);
+                should_render = false;
+            }
         }
     }
 }

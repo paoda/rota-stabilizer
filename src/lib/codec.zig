@@ -168,6 +168,8 @@ pub const audio = struct {
         last_hw_pos: f64 = 0.0,
         last_hw_update_time_ns: u64 = 0,
 
+        ema: MonoExpoMovingAvg = .{},
+
         /// Offset to align audio time with video stream time (set from first video PTS)
         /// This accounts for videos that don't start at PTS=0
         stream_start_offset: f64 = 0.0,
@@ -177,6 +179,43 @@ pub const audio = struct {
         stream: *c.SDL_AudioStream,
 
         const log = std.log.scoped(.audio);
+
+        const MonoExpoMovingAvg = struct {
+            last_called: u64 = 0,
+
+            last_returned: f64 = 0.0,
+            smoothed: f64 = 0.0,
+
+            const factor = 25.0; // higher = more accurate
+            const desync_threshold = 0.080; // s
+
+            pub fn push(self: *@This(), s: f64) f64 {
+                const now_ns = c.SDL_GetTicksNS();
+
+                if (self.last_called == 0) { // init
+                    self.last_called = now_ns;
+                    self.smoothed = s;
+                    self.last_returned = s;
+
+                    return s;
+                }
+
+                const delta_time_s = @as(f64, @floatFromInt(now_ns - self.last_called)) / std.time.ns_per_s;
+                self.last_called = now_ns;
+
+                if (@abs(s - self.smoothed) > desync_threshold) {
+                    self.smoothed = s; // snap to reality
+                } else {
+                    const alpha = 1.0 - std.math.exp(-factor * delta_time_s);
+                    self.smoothed += (s - self.smoothed) * alpha;
+                }
+
+                const monotonic = @max(self.smoothed, self.last_returned);
+                self.last_returned = monotonic;
+
+                return monotonic;
+            }
+        };
 
         pub fn init(ctx: *const dec.AvCodecContext) !@This() {
             var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
@@ -252,11 +291,11 @@ pub const audio = struct {
                 self.last_hw_pos = hw_pos;
                 self.last_hw_update_time_ns = now_ns;
 
-                return hw_secs;
+                return self.ema.push(hw_secs);
+            } else {
+                const duration_s: f64 = @as(f64, @floatFromInt(now_ns - self.last_hw_update_time_ns)) / std.time.ns_per_s;
+                return self.ema.push(hw_secs + duration_s);
             }
-
-            const duration_s: f64 = @as(f64, @floatFromInt(now_ns - self.last_hw_update_time_ns)) / std.time.ns_per_s;
-            return hw_secs + duration_s;
         }
 
         /// Debug: Get detailed clock state for A/V sync debugging
