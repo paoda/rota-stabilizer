@@ -342,7 +342,7 @@ pub fn main() !void {
                     const sleep_s = @min(diff_s, 0.010); // sleep_s
 
                     var buf: [0x20]u8 = undefined;
-                    tracy.message(.{ .text = try std.fmt.bufPrint(&buf, "sleep for {d:.2}ms", .{sleep_s * std.time.ms_per_s}) });
+                    wait_z.text(try std.fmt.bufPrint(&buf, "expected to wait {d:.2}ms", .{sleep_s * std.time.ms_per_s}));
 
                     sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
                 }
