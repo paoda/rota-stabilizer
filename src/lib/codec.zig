@@ -187,8 +187,9 @@ pub const audio = struct {
             const factor = 15.0; // smooth factor for drift correction
             const desync_threshold = 0.050; // s
 
-            pub fn push(self: *@This(), s: f64) f64 {
+            pub fn push(self: *@This(), hw_s: f64, offset_s: f64) f64 {
                 const now_ns = c.SDL_GetTicksNS();
+                const s = hw_s - offset_s;
 
                 if (self.last_called == 0) { // init
                     self.last_called = now_ns;
@@ -204,7 +205,9 @@ pub const audio = struct {
 
                 // Compare our linear expected time with the noisy/interpolated audio time
                 const drift = s - sys_advanced;
-                ztracy.PlotF("Audio Clock Drift (ms)", drift * std.time.ms_per_s);
+
+                if (@abs(offset_s - 0.0) < std.math.floatEps(f64))
+                    ztracy.PlotF("Audio Clock Drift (ms)", drift * std.time.ms_per_s);
 
                 var smoothed: f64 = 0.0;
                 if (@abs(drift) > desync_threshold) {
@@ -298,30 +301,12 @@ pub const audio = struct {
                 self.last_hw_pos = hw_pos;
                 self.last_hw_update_time_ns = now_ns;
 
-                ztracy.Message("hw clock update");
-                return self.sync.push(hw_secs);
+                ztracy.PlotU("Audio Queued", @intFromFloat(queued));
+                return self.sync.push(hw_secs, 0.0);
             } else {
                 const duration_s: f64 = @as(f64, @floatFromInt(now_ns - self.last_hw_update_time_ns)) / std.time.ns_per_s;
-                return self.sync.push(hw_secs + duration_s);
+                return self.sync.push(hw_secs, duration_s);
             }
-        }
-
-        /// Debug: Get detailed clock state for A/V sync debugging
-        pub fn debug_state(self: @This()) struct { bytes_sent: f64, queued: f64, hw_latency_bytes: f64, bytes_per_sec: f64, position_secs: f64, stream_start_offset: f64 } {
-            const bytes_per_sec: f64 = @floatFromInt(self.bytes_per_sample * self.sample_rate * self.channels);
-            const queued: f64 = @floatFromInt(c.SDL_GetAudioStreamQueued(self.stream));
-            const bytes_sent: f64 = @floatFromInt(self.bytes_sent.load(.monotonic));
-            const hw_latency_bytes = self.hw_latency_secs * bytes_per_sec;
-            const pos = bytes_sent - queued - hw_latency_bytes;
-
-            return .{
-                .bytes_sent = bytes_sent,
-                .queued = queued,
-                .hw_latency_bytes = hw_latency_bytes,
-                .bytes_per_sec = bytes_per_sec,
-                .position_secs = (pos / bytes_per_sec) + self.stream_start_offset,
-                .stream_start_offset = self.stream_start_offset,
-            };
         }
     };
 
@@ -714,6 +699,10 @@ pub const FrameQueue = struct {
         }
 
         std.debug.panic("attempted to recycle a frame that was not in the queue", .{});
+    }
+
+    pub inline fn len(self: @This()) usize {
+        return self.write_idx - self.read_idx;
     }
 
     inline fn mask(self: @This(), idx: usize) usize {

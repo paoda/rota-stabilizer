@@ -305,6 +305,8 @@ pub fn main() !void {
 
                 // if (is_first_frame or !already_uploaded) {
                 if (!already_uploaded) {
+                    ztracy.PlotU("Buffered Frames", decoder.queue.frame.len());
+
                     const z_upload = ztracy.ZoneN(@src(), "upload next frame");
                     defer z_upload.End();
 
@@ -316,13 +318,14 @@ pub fn main() !void {
                 }
 
                 const diff_s = next_frame_time - audio_time;
-                ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
-                ztracy.PlotF("Audio Time (s)", audio_time);
-                ztracy.PlotF("Next Frame Time (s)", next_frame_time);
 
-                const lead_time = 0.015; // 15ms lead time
+                const lead_time = 0.00;
 
                 if (diff_s <= lead_time) { // Time to display the newer frame!
+                    ztracy.PlotF("Audio Time (s)", audio_time);
+                    ztracy.PlotF("Next Frame Time (s)", next_frame_time);
+                    ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
+
                     stable_buffer.swap();
 
                     decoder.queue.frame.recycle(frame);
@@ -332,8 +335,8 @@ pub fn main() !void {
                     const z_wait = ztracy.ZoneNC(@src(), "wait for next frame", 0x3b3b3b);
                     defer z_wait.End();
 
-                    const sleep_s = @min(diff_s, 0.005); // sleep_s
-                    sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
+                    // const sleep_s = @min(diff_s, 0.005); // sleep_s
+                    // sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
                 }
             } else {
                 // no next frame
