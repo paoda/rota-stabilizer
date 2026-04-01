@@ -30,7 +30,7 @@ const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 pub fn main() !void {
     defer signal.should_quit.store(true, .monotonic);
 
-    ___tracy_emit_plot_config("A/V Sync Drift (ms)", 0, 0, 0, 0);
+    // ___tracy_emit_plot_config("A/V Sync Drift (ms)", 0, 0, 0, 0);
 
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
@@ -222,7 +222,7 @@ pub fn main() !void {
         const start_time = @as(f64, @floatFromInt(decoder.stream(.video).start_time)) * time_base;
         log.debug("video start time: {d}s", .{start_time});
 
-        try audio_clock.start(start_time);
+        // try audio_clock.start(start_time);
 
         const delay_threshold = 0.300;
 
@@ -294,8 +294,8 @@ pub fn main() !void {
                 const audio_time = audio_clock.seconds_passed();
                 const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
-                // const is_first_frame = audio_clock.isPaused();
-                // if (is_first_frame) try audio_clock.start(next_frame_time);
+                const is_first_frame = audio_clock.isPaused();
+                if (is_first_frame) try audio_clock.start(next_frame_time);
 
                 if (next_frame_time - audio_time < -delay_threshold) {
                     decoder.queue.frame.recycle(frame);
@@ -898,4 +898,4 @@ pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo
 }
 
 // FIXME: why doesn't ztracy support this?
-pub extern fn ___tracy_emit_plot_config(name: [*c]const u8, @"type": i32, step: i32, fill: i32, color: u32) void;
+// pub extern fn ___tracy_emit_plot_config(name: [*c]const u8, @"type": i32, step: i32, fill: i32, color: u32) void;
