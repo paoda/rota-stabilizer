@@ -320,7 +320,9 @@ pub fn main() !void {
                 ztracy.PlotF("Audio Time (s)", audio_time);
                 ztracy.PlotF("Next Frame Time (s)", next_frame_time);
 
-                if (diff_s <= 0) { // Time to display the newer frame!
+                const lead_time = 0.015; // 15ms lead time
+
+                if (diff_s <= lead_time) { // Time to display the newer frame!
                     stable_buffer.swap();
 
                     decoder.queue.frame.recycle(frame);
@@ -330,7 +332,7 @@ pub fn main() !void {
                     const z_wait = ztracy.ZoneNC(@src(), "wait for next frame", 0x3b3b3b);
                     defer z_wait.End();
 
-                    const sleep_s = @min(diff_s, 0.010); // sleep_s
+                    const sleep_s = @min(diff_s, 0.005); // sleep_s
                     sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
                 }
             } else {

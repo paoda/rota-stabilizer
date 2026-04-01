@@ -290,7 +290,7 @@ pub const audio = struct {
             const hw_latency_bytes = self.hw_latency_secs * bytes_per_sec;
 
             const hw_pos = bytes_sent - queued - hw_latency_bytes;
-            const hw_secs = (hw_pos / bytes_per_sec) + self.stream_start_offset - 0.100;
+            const hw_secs = (hw_pos / bytes_per_sec) + self.stream_start_offset;
 
             const now_ns = c.SDL_GetTicksNS();
 
@@ -335,7 +335,7 @@ pub const audio = struct {
         const codec_ctx = &decoder.audio_ctx;
         const pkt_queue = &decoder.queue.pkt.audio;
 
-        const max_queue_sec = clock.hw_latency_secs * 1.5;
+        const max_queue_sec = clock.hw_latency_secs * 1.1;
         const bytes_per_sec: f64 = @floatFromInt(clock.sample_rate * clock.bytes_per_sample * clock.channels);
         const max_len: c_int = @intFromFloat(bytes_per_sec * max_queue_sec);
 
