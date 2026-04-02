@@ -119,7 +119,7 @@ pub const packet = struct {
 
     pub fn read(decode: *Decoder) !void {
         // const log = std.log.scoped(.packet_read);
-        // tracy.SetThreadName("packet read");
+        tracy.setThreadName("packet read");
 
         var pkt = AvPacket.init();
         defer pkt.deinit();
