@@ -98,6 +98,9 @@ pub fn main() !void {
     const frame_rate = decoder.framerate();
     const frame_period = 1.0 / c.av_q2d(frame_rate);
 
+    const should_write = try checkFile(cli.positionals[0]);
+    if (!should_write) return error.wont_overwrite;
+
     const handles = try decoder.spawn(cli.positionals[0]);
     defer handles.deinit();
 
@@ -977,4 +980,29 @@ pub fn unmapNv12Frame(res: *const GpuResourceManager, current_pbo: u1) void {
     _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
 
     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+}
+
+fn checkFile(maybe_path: ?[]const u8) !bool {
+    const path = maybe_path orelse return true;
+
+    var buf: [0x40]u8 = undefined;
+
+    var writer = std.fs.File.stdout().writer(buf[0..][0..0x20]);
+    var reader = std.fs.File.stdin().reader(buf[0x20..][0..0x20]);
+
+    var stdout = &writer.interface;
+    var stdin = &reader.interface;
+
+    std.fs.cwd().access(path, .{}) catch |e| switch (e) {
+        error.FileNotFound => return true,
+        else => return e,
+    };
+
+    try stdout.print("File '{s}' already exists. Overwrite (y/n): ", .{path});
+    try stdout.flush();
+
+    const line = try stdin.takeDelimiter('\n') orelse return false;
+    const answer = std.mem.trim(u8, line, "\r\t\n");
+
+    return std.ascii.eqlIgnoreCase(answer, "y");
 }
