@@ -318,31 +318,12 @@ pub fn main() !void {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
                 defer z.end();
 
-                if (frame.format != c.AV_PIX_FMT_NV12) {
-                    @branchHint(.cold);
-
-                    const expected = c.av_get_pix_fmt_name(c.AV_PIX_FMT_NV12);
-                    const actual = c.av_get_pix_fmt_name(frame.format);
-                    log.err("unsupported pixel format: expected {s} got {s}", .{ expected, actual });
-                    return error.ffmpeg_error;
-                }
-
-                const audio_time = audio_clock.seconds_passed();
-                const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
-
-                if (next_frame_time - audio_time < -delay_threshold) {
-                    tracy.message(.{ .text = "dropped frame" });
-                    tracy.frameMarkEnd("video timing");
-
-                    decoder.queue.frame.recycle(frame);
-                    next_frame = null;
-                    break :blk;
-                }
+                std.debug.assert(frame.format == c.AV_PIX_FMT_NV12);
 
                 const back_buffer = stable_buffer.invert();
+                const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
                 const already_uploaded = @abs(next_frame_time - back_buffer.display_time()) < std.math.floatEps(f64);
 
-                // if (is_first_frame or !already_uploaded) {
                 if (!already_uploaded) {
                     tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(decoder.queue.frame.len()) } });
 
@@ -356,7 +337,19 @@ pub fn main() !void {
                     stable_buffer.display_times[back_buffer.current] = next_frame_time;
                 }
 
-                const lead_time = 0.001; // TODO: on my laptop (on windows) render takes about 1ms
+                // after upload, to account for it maybe taking a while
+                const audio_time = audio_clock.seconds_passed();
+
+                if (next_frame_time - audio_time < -delay_threshold) {
+                    tracy.message(.{ .text = "dropped frame" });
+                    tracy.frameMarkEnd("video timing");
+
+                    decoder.queue.frame.recycle(frame);
+                    next_frame = null;
+                    break :blk;
+                }
+
+                const lead_time = 0; // TODO: 1ms for upload and rende
                 const diff_s = next_frame_time - audio_time - lead_time;
 
                 if (diff_s <= 0) { // Time to display the newer frame!
@@ -374,7 +367,7 @@ pub fn main() !void {
                     const wait_z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for next frame", .color = .gray25 });
                     defer wait_z.end();
 
-                    const sleep_s = @min(diff_s, 0.010); // sleep_s
+                    const sleep_s = @min(diff_s, 0.005); // wake up slightly earlier than max theoretical
                     wait_z.text(try std.fmt.bufPrint(&buf, "expected to wait {d:.2}ms", .{sleep_s * std.time.ms_per_s}));
 
                     sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
