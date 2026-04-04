@@ -160,8 +160,8 @@ pub fn main() !void {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
                 defer z.end();
 
-                uploadYTexture(stable_buffer, frame);
-                uploadUvTexture(stable_buffer, frame);
+                uploadPlane(stable_buffer, frame, .y);
+                uploadPlane(stable_buffer, frame, .uv);
 
                 try render(&view, &stable_buffer, angle_calc, res, camera);
 
@@ -323,8 +323,8 @@ pub fn main() !void {
                     defer upload_z.end();
 
                     // this is a new frame, upload it to the BACK buffer
-                    uploadYTexture(back_buffer, frame);
-                    uploadUvTexture(back_buffer, frame);
+                    uploadPlane(back_buffer, frame, .y);
+                    uploadPlane(back_buffer, frame, .uv);
 
                     stable_buffer.display_times[back_buffer.current] = next_frame_time;
                 }
@@ -833,36 +833,42 @@ const Camera = struct {
     }
 };
 
-pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
-    const zone = tracy.Zone.begin(.{ .src = @src() });
+pub fn uploadPlane(stable_buffer: DoubleBuffer, frame: *c.AVFrame, comptime ch: DoubleBuffer.Channel) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "upload" ++ @tagName(ch) ++ " plane" });
     defer zone.end();
 
-    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
+    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(ch));
     defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
 
-    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
+    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(ch));
     defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+    const is_y_plane = ch == .y;
+
+    const width: usize = @intCast(if (is_y_plane) frame.width else @divTrunc(frame.width, 2));
+    const height: usize = @intCast(if (is_y_plane) frame.height else @divTrunc(frame.height, 2));
+    const idx: usize = if (is_y_plane) 0 else 1;
 
     const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
 
     if (pbo) |ptr| {
-        const z = tracy.Zone.begin(.{ .src = @src(), .name = "y plane upload" });
-        defer z.end();
+        defer _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
 
-        const bytes_per_line: usize = @intCast(frame.linesize[0]);
-        const height: usize = @intCast(frame.height);
-        const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
+        const bytes_per_line: usize = @intCast(frame.linesize[idx]);
+        const dst_stride = width * if (is_y_plane) Y_BPP else UV_BPP;
 
-        for (0..height) |y| {
-            const src_offset = y * bytes_per_line;
-            const dst_offset = y * dst_stride;
-            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
+        for (0..height) |row| {
+            const src_offset = row * bytes_per_line;
+            const dst_offset = row * dst_stride;
+
+            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[idx][src_offset..][0..dst_stride]);
         }
-        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
     }
 
-    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, gl.RED, gl.UNSIGNED_BYTE, null);
+    const fmt: c_uint = if (is_y_plane) gl.RED else gl.RG;
+
+    gl.PixelStorei(gl.UNPACK_ALIGNMENT, if (is_y_plane) 1 else 2);
+    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @intCast(width), @intCast(height), fmt, gl.UNSIGNED_BYTE, null);
 }
 
 pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
