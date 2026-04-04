@@ -110,7 +110,7 @@ pub const GpuResourceManager = struct {
     };
 
     const FramebufferPool = struct {
-        const Index = enum(usize) { angle, blur_front, blur_back };
+        const Index = enum(usize) { angle, blur_front, blur_back, y, uv };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -132,7 +132,8 @@ pub const GpuResourceManager = struct {
     };
 
     const PixelBufferPool = struct {
-        const Index = enum(usize) { y_front, y_back, uv_front, uv_back, rgb_front, rgb_back };
+        // dl_front and dl_back are atlases of NV12 data
+        const Index = enum(usize) { y_front, y_back, uv_front, uv_back, dl_front, dl_back };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -162,6 +163,9 @@ pub const GpuResourceManager = struct {
             uv_back,
             blur_front,
             blur_back,
+            out,
+            y_out,
+            uv_out,
         };
         const len = @typeInfo(Index).@"enum".fields.len;
 
@@ -184,7 +188,7 @@ pub const GpuResourceManager = struct {
     };
 
     const ProgramPool = struct {
-        const Index = enum(usize) { tex = 0, bg, blur, ring, circle, angle };
+        const Index = enum(usize) { tex = 0, bg, blur, ring, circle, angle, rgb_to_nv12 };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -200,6 +204,7 @@ pub const GpuResourceManager = struct {
                     .ring => try opengl_impl.program("shader/ring.vert", "shader/ring.frag"),
                     .circle => try opengl_impl.program("shader/ring.vert", "shader/circle.frag"),
                     .angle => try opengl_impl.program("shader/blur.vert", "shader/rotation.frag"),
+                    .rgb_to_nv12 => try opengl_impl.program("shader/blur.vert", "shader/rgb_to_nv12.frag"),
                 };
             }
         }
@@ -240,8 +245,8 @@ pub const GpuResourceManager = struct {
         try manager.setupAngleCalc();
 
         manager.setupBlur(width, height);
-
         manager.setupVideoTextures(width, height);
+
         return manager;
     }
 
@@ -289,16 +294,41 @@ pub const GpuResourceManager = struct {
         if (ret != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
     }
 
-    pub fn setupReadbackBuffers(self: *const GpuResourceManager, width: u32, height: u32) void {
+    pub fn setupEncodingTargets(self: *const GpuResourceManager, width: u32, height: u32) error{setup_error}!void {
         const BufIndex = PixelBufferPool.Index;
 
-        const len = (width * RGB24_BPP) * height;
+        const y_len = width * height * Y_BPP;
+        const uv_len = (width / 2) * (height / 2) * UV_BPP;
+        const len = y_len + uv_len;
 
-        for ([_]BufIndex{ .rgb_front, .rgb_back }) |idx| {
+        for ([_]BufIndex{ .dl_front, .dl_back }) |idx| {
             gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.pbo.get(idx));
-            gl.BufferData(gl.PIXEL_PACK_BUFFER, len, null, gl.STREAM_READ);
+            gl.BufferData(gl.PIXEL_PACK_BUFFER, @intCast(len), null, gl.STREAM_READ);
         }
+
+        // allocate tex (rgb) for copy from display framebuffer
+        gl.BindTexture(gl.TEXTURE_2D, self.tex.get(.out));
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGB8, @intCast(width), @intCast(height), 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+        // setup y fbo + tex
+        gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo.get(.y));
+        gl.BindTexture(gl.TEXTURE_2D, self.tex.get(.y_out));
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.R8, @intCast(width), @intCast(height), 0, gl.RED, gl.UNSIGNED_BYTE, null);
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, self.tex.get(.y_out), 0);
+        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
+
+        // setup uv fbo + tex
+        gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo.get(.uv));
+        gl.BindTexture(gl.TEXTURE_2D, self.tex.get(.uv_out));
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RG8, @intCast(width / 2), @intCast(height / 2), 0, gl.RG, gl.UNSIGNED_BYTE, null);
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, self.tex.get(.uv_out), 0);
+        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
+
         gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+        gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+        gl.BindTexture(gl.TEXTURE_2D, 0);
     }
 
     pub fn setupVideoTextures(self: *const GpuResourceManager, width: u32, height: u32) void {

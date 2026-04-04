@@ -134,7 +134,7 @@ pub fn main() !void {
         });
         defer progress_node.end();
 
-        res.setupReadbackBuffers(@intCast(view.width), @intCast(view.height));
+        try res.setupEncodingTargets(@intCast(view.width), @intCast(view.height));
 
         var current_pbo: u1 = 0;
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
@@ -164,28 +164,50 @@ pub fn main() !void {
                 uploadPlane(stable_buffer, frame, .uv);
 
                 try render(&view, &stable_buffer, angle_calc, res, camera);
+                writeToNv12Tex(res, &view, camera);
 
                 {
                     const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
                     defer pbo_z.end();
 
-                    // Start async readback into current PBO
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (current_pbo == 1) .rgb_front else .rgb_back));
+                    const idx = current_pbo;
+
+                    // read Y and UV into single contiguous PBO
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (idx == 1) .dl_front else .dl_back));
                     defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
                     {
-                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels" });
+                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
                         defer read_z.end();
 
-                        gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
+                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.y));
+                        gl.ReadPixels(0, 0, view.width, view.height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
                     }
 
-                    gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
+                    {
+                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
+                        defer read_z.end();
+
+                        const uv_offset: usize = @intCast(view.width * view.height);
+                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.uv));
+                        gl.ReadPixels(0, 0, @divTrunc(view.width, 2), @divTrunc(view.height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
+                    }
+
+                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
+
+                    {
+                        const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
+                        defer flush_z.end();
+
+                        gl.Flush(); // trigger readback immediately
+                    }
 
                     // encode buffered frame
                     if (pending_frame_pts) |pts| blk: {
-                        const frame_buf = downloadFrame(res, view, current_pbo) orelse break :blk;
-                        try encoder.encodeRgbFrame(frame_buf, pts);
+                        const y, const uv = mapNv12Frame(res, view, current_pbo) orelse break :blk;
+                        defer unmapNv12Frame(res, current_pbo);
+
+                        try encoder.encodeNv12Frame(y, uv, pts);
                     }
                 }
 
@@ -204,8 +226,10 @@ pub fn main() !void {
 
                 // encode buffered frame
                 if (pending_frame_pts) |pts| blk: {
-                    const frame_buf = downloadFrame(res, view, current_pbo) orelse break :blk;
-                    try encoder.encodeRgbFrame(frame_buf, pts);
+                    const y, const uv = mapNv12Frame(res, view, current_pbo) orelse break :blk;
+                    defer unmapNv12Frame(res, current_pbo);
+
+                    try encoder.encodeNv12Frame(y, uv, pts);
                 }
 
                 // Calculate and display final stats
@@ -834,7 +858,7 @@ const Camera = struct {
 };
 
 pub fn uploadPlane(stable_buffer: DoubleBuffer, frame: *c.AVFrame, comptime ch: DoubleBuffer.Channel) void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "upload" ++ @tagName(ch) ++ " plane" });
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "upload " ++ @tagName(ch) ++ " plane" });
     defer zone.end();
 
     gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(ch));
@@ -871,53 +895,86 @@ pub fn uploadPlane(stable_buffer: DoubleBuffer, frame: *c.AVFrame, comptime ch: 
     gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @intCast(width), @intCast(height), fmt, gl.UNSIGNED_BYTE, null);
 }
 
-pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
+pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, camera: Camera) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
-    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+    // TODO: When we implement DearImgui, we will need an Offscreen FBO
 
-    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
+    gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.out));
     defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+    // copy from headless screen to rgb texture
+    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
+    gl.CopyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, view.width, view.height);
 
-    if (pbo) |ptr| {
-        const z = tracy.Zone.begin(.{ .src = @src(), .name = "uv plane upload" });
-        defer z.end();
+    gl.BindVertexArray(res.vao.get(.empty));
+    defer gl.BindVertexArray(0);
 
-        const bytes_per_line: usize = @intCast(frame.linesize[1]);
-        const height: usize = @intCast(@divTrunc(frame.height, 2));
-        const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
+    gl.ActiveTexture(gl.TEXTURE0);
 
-        for (0..height) |y| {
-            const src_offset = y * bytes_per_line;
-            const dst_offset = y * dst_stride;
-            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
-        }
-        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+    gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.out));
+    defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+
+    const program = res.prog.get(.rgb_to_nv12);
+    gl.UseProgram(program);
+    defer gl.UseProgram(0);
+
+    gl.Uniform1i(gl.GetUniformLocation(program, "u_rgb_tex"), 0);
+    gl.UniformMatrix3fv(gl.GetUniformLocation(program, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
+
+    const is_y_loc = gl.GetUniformLocation(program, "u_is_y");
+
+    {
+        view.set(view.width, view.height);
+        defer view.restore();
+
+        // render Y plane
+        gl.BindFramebuffer(gl.FRAMEBUFFER, res.fbo.get(.y));
+        gl.Uniform1i(is_y_loc, 1);
+        gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
 
-    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
-    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @divTrunc(frame.width, 2), @divTrunc(frame.height, 2), gl.RG, gl.UNSIGNED_BYTE, null);
+    {
+        view.set(@divTrunc(view.width, 2), @divTrunc(view.height, 2));
+        defer view.restore();
+
+        // render UV plane
+        gl.BindFramebuffer(gl.FRAMEBUFFER, res.fbo.get(.uv));
+        gl.Uniform1i(is_y_loc, 0);
+        gl.DrawArrays(gl.TRIANGLES, 0, 3);
+    }
 }
 
-pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?[]const u8 {
+pub fn mapNv12Frame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?struct { []const u8, []const u8 } {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
     const idx = current_pbo +% 1;
 
-    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (idx == 1) .rgb_front else .rgb_back));
+    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (idx == 1) .dl_front else .dl_back));
     defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
     const maybe_ptr: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
-    defer _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
 
-    const ptr = maybe_ptr orelse return null;
-    return ptr[0..@intCast(view.width * view.height * RGB24_BPP)];
+    if (maybe_ptr) |ptr| {
+        const y_len: usize = @intCast(view.width * view.height);
+        const uv_len: usize = @intCast(@divTrunc(view.width, 2) * @divTrunc(view.height, 2) * UV_BPP);
+
+        return .{ ptr[0..y_len], ptr[y_len..][0..uv_len] };
+    }
+
+    return null;
 }
 
-// FIXME: why doesn't ztracy support this?
-// pub extern fn ___tracy_emit_plot_config(name: [*c]const u8, @"type": i32, step: i32, fill: i32, color: u32) void;
+pub fn unmapNv12Frame(res: *const GpuResourceManager, current_pbo: u1) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    const idx = current_pbo +% 1;
+
+    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (idx == 1) .dl_front else .dl_back));
+    _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+
+    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+}

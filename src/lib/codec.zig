@@ -911,6 +911,8 @@ pub const Encoder = struct {
     _frame: AvFrame,
     _hw: ?struct { frame: AvFrame } = null,
 
+    sw_pix_fmt: c.AVPixelFormat,
+
     const log = std.log.scoped(.encode);
 
     pub const Options = struct {
@@ -994,7 +996,7 @@ pub const Encoder = struct {
                 const ptr: ?*c.SwsContext = c.sws_getContext(
                     @intCast(opt.width),
                     @intCast(opt.height),
-                    c.AV_PIX_FMT_RGB24,
+                    c.AV_PIX_FMT_NV12,
                     @intCast(opt.width),
                     @intCast(opt.height),
                     sw_pix_fmt,
@@ -1006,6 +1008,7 @@ pub const Encoder = struct {
 
                 break :blk ptr.?;
             },
+            .sw_pix_fmt = sw_pix_fmt,
         };
     }
 
@@ -1019,7 +1022,7 @@ pub const Encoder = struct {
         return initShared(opt, codec, codec.pix_fmt, path);
     }
 
-    pub fn encodeRgbFrame(self: *Encoder, buf: []const u8, frame_pts: i64) !void {
+    pub fn encodeNv12Frame(self: *Encoder, y_buf: []const u8, uv_buf: []const u8, frame_pts: i64) !void {
         @setRuntimeSafety(false);
 
         const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -1028,23 +1031,44 @@ pub const Encoder = struct {
         const sw_frame = self._frame.ptr();
         _ = try libav.err(c.av_frame_make_writable(sw_frame));
 
-        const stride: usize = self.width * 3;
+        const y_stride: usize = self.width;
+        const uv_stride: usize = self.width; // RG is 2 bpp, width/2 pixels => width bytes
 
-        var src_frame: c.AVFrame = .{
-            .format = c.AV_PIX_FMT_RGB24,
-            .width = @intCast(self.width),
-            .height = @intCast(self.height),
-        };
-
-        src_frame.data[0] = @constCast(buf.ptr + @as(usize, self.height - 1) * stride);
-        src_frame.linesize[0] = -@as(c_int, @intCast(stride)); // negative to flip vertically
-
-        {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "sws_scale_frame" });
+        // Hardware path
+        if (self.sw_pix_fmt == c.AV_PIX_FMT_NV12) {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "hw memcpy" });
             defer z.end();
 
-            _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, &src_frame));
             sw_frame.pts = frame_pts;
+
+            for (0..self.height) |h| {
+                @memcpy(sw_frame.data[0][h * @as(usize, @intCast(sw_frame.linesize[0])) ..][0..y_stride], y_buf[h * y_stride ..][0..y_stride]);
+            }
+
+            for (0..self.height / 2) |h| {
+                @memcpy(sw_frame.data[1][h * @as(usize, @intCast(sw_frame.linesize[1])) ..][0..uv_stride], uv_buf[h * uv_stride ..][0..uv_stride]);
+            }
+        } else {
+            // Software path
+            var src_frame: c.AVFrame = .{
+                .format = c.AV_PIX_FMT_NV12,
+                .width = @intCast(self.width),
+                .height = @intCast(self.height),
+            };
+
+            src_frame.data[0] = @constCast(y_buf.ptr);
+            src_frame.linesize[0] = @intCast(y_stride);
+
+            src_frame.data[1] = @constCast(uv_buf.ptr);
+            src_frame.linesize[1] = @intCast(uv_stride);
+
+            {
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "sws_scale_frame" });
+                defer z.end();
+
+                _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, &src_frame));
+                sw_frame.pts = frame_pts;
+            }
         }
 
         if (self._hw) |hw| {
