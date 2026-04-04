@@ -81,7 +81,7 @@ pub const packet = struct {
                     if (self.end_of_stream.load(.monotonic)) return error.end_of_stream;
                     if (self.should_quit.load(.monotonic)) return error.should_quit;
 
-                    self.cond.wait(&self.mutex.inner);
+                    self.mutex.wait(&self.cond);
                 }
             }
 
@@ -597,6 +597,15 @@ const TracyMutex = struct {
         self.inner.unlock();
         self._lock.afterUnlock();
     }
+
+    pub fn wait(self: *@This(), cond: *std.Thread.Condition) void {
+        // INVARIANT: this function is called when the lock is held
+        self._lock.afterUnlock();
+        defer self._lock.afterLock();
+
+        cond.wait(&self.inner);
+    }
+
     pub fn tryLock(self: *@This()) bool {
         const ret = self.inner.tryLock();
         self._lock.afterTryUnlock(ret); // NB: is actually afterTrylock
@@ -679,7 +688,8 @@ pub const FrameQueue = struct {
 
             while (self.slot.state[idx] != .empty) {
                 if (self.should_quit.load(.monotonic)) return error.early_exit;
-                self.cond.wait(&self.mutex.inner);
+
+                self.mutex.wait(&self.cond);
             }
         }
 

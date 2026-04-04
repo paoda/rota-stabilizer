@@ -226,7 +226,7 @@ pub fn main() !void {
 
         try audio_clock.start(start_time);
 
-        const delay_threshold = 0.300;
+        const delay_threshold = 0.020;
 
         log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
