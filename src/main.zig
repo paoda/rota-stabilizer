@@ -280,7 +280,10 @@ pub fn main() !void {
                 }
             }
 
-            if (next_frame == null) next_frame = decoder.queue.frame.pop();
+            if (next_frame == null) {
+                tracy.frameMarkStart("video timing");
+                next_frame = decoder.queue.frame.pop();
+            }
 
             if (next_frame) |frame| blk: {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
@@ -330,6 +333,7 @@ pub fn main() !void {
                     tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
                     tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
 
+                    tracy.frameMarkEnd("video timing");
                     stable_buffer.swap();
 
                     decoder.queue.frame.recycle(frame);
