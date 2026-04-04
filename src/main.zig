@@ -236,6 +236,8 @@ pub fn main() !void {
         var next_frame: ?*c.AVFrame = null;
         var should_render: bool = true;
 
+        var buf: [0x20]u8 = undefined;
+
         while (!signal.should_quit.load(.monotonic)) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
             defer zone.end();
@@ -302,6 +304,9 @@ pub fn main() !void {
                 const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
                 if (next_frame_time - audio_time < -delay_threshold) {
+                    tracy.message(.{ .text = "dropped frame" });
+                    tracy.frameMarkEnd("video timing");
+
                     decoder.queue.frame.recycle(frame);
                     next_frame = null;
                     break :blk;
@@ -324,16 +329,15 @@ pub fn main() !void {
                     stable_buffer.display_times[back_buffer.current] = next_frame_time;
                 }
 
-                const diff_s = next_frame_time - audio_time;
+                const lead_time = 0.001; // TODO: on my laptop (on windows) render takes about 1ms
+                const diff_s = next_frame_time - audio_time - lead_time;
 
-                const lead_time = 0.00;
-
-                if (diff_s <= lead_time) { // Time to display the newer frame!
+                if (diff_s <= 0) { // Time to display the newer frame!
                     tracy.plot(.{ .name = "Audio Time (s)", .value = .{ .f64 = audio_time } });
                     tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
-                    tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
-
+                    tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = (diff_s + lead_time) * std.time.ms_per_s } });
                     tracy.frameMarkEnd("video timing");
+
                     stable_buffer.swap();
 
                     decoder.queue.frame.recycle(frame);
@@ -344,8 +348,6 @@ pub fn main() !void {
                     defer wait_z.end();
 
                     const sleep_s = @min(diff_s, 0.010); // sleep_s
-
-                    var buf: [0x20]u8 = undefined;
                     wait_z.text(try std.fmt.bufPrint(&buf, "expected to wait {d:.2}ms", .{sleep_s * std.time.ms_per_s}));
 
                     sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
