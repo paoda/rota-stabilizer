@@ -414,7 +414,7 @@ pub const audio = struct {
 
             var pkt: ?*c.AVPacket = blk: {
                 if (pending) |pkt| {
-                    defer pending = null;
+                    pending = null;
                     break :blk pkt;
                 }
 
@@ -504,7 +504,7 @@ pub const video = struct {
                         try convert(decoder.video_ctx, src_frame.ptr(), dst_frame, sws);
                     },
                     c.AVERROR(c.EAGAIN) => break :recv_loop,
-                    c.AVERROR_EOF => return,
+                    c.AVERROR_EOF => return frame_queue.end_of_stream.store(true, .monotonic),
                     else => |e| _ = try libav.err(e),
                 }
             }
@@ -538,7 +538,7 @@ pub const video = struct {
 
                 c.av_packet_free(&pkt);
 
-                if (send_ret == c.AVERROR_EOF) return;
+                if (send_ret == c.AVERROR_EOF) return frame_queue.end_of_stream.store(true, .monotonic);
                 if (send_ret < 0) _ = try libav.err(send_ret);
             }
         }
@@ -644,13 +644,14 @@ pub const FrameQueue = struct {
 
         const frames = try allocator.alloc(c.AVFrame, count);
         errdefer allocator.free(frames);
+        errdefer for (frames) |*frame| c.av_frame_unref(frame); // imagine we get through only some av_frame_get_buffers
 
         const states = try allocator.alloc(State, count);
         errdefer allocator.free(states);
 
         for (frames, states) |*frame, *state| {
             frame.* = std.mem.zeroes(c.AVFrame);
-            c.av_frame_unref(frame); // make the frames valid
+            c.av_frame_unref(frame);
 
             frame.width = opt.width;
             frame.height = opt.height;
@@ -693,7 +694,6 @@ pub const FrameQueue = struct {
 
             while (self.slot.state[idx] != .empty) {
                 if (self.should_quit.load(.monotonic)) return error.early_exit;
-
                 self.mutex.wait(&self.cond);
             }
         }
@@ -716,22 +716,49 @@ pub const FrameQueue = struct {
 
         self.slot.state[idx] = .in_use;
         self.write_idx += 1;
-        self.cond.signal();
+        self.cond.signal(); // wake up consumer in pop
     }
 
     pub fn pop(self: *@This()) ?*c.AVFrame {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        const idx = self.mask(self.read_idx);
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for frame", .color = .gray25 });
+            defer z.end();
+
+            while (self.slot.state[idx] != .in_use) {
+                if (self.end_of_stream.load(.monotonic)) return null;
+                if (self.should_quit.load(.monotonic)) return null;
+
+                self.mutex.wait(&self.cond);
+            }
+        }
+
+        self.slot.state[idx] = .ready_to_reuse;
+        self.read_idx += 1;
+
+        return &self.slot.frame[idx];
+    }
+
+    pub fn tryPop(self: *@This()) ?*c.AVFrame {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         const idx = self.mask(self.read_idx);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         if (self.slot.state[idx] != .in_use) return null;
 
         self.slot.state[idx] = .ready_to_reuse;
         self.read_idx += 1;
-        self.cond.signal();
 
         return &self.slot.frame[idx];
     }
@@ -740,23 +767,20 @@ pub const FrameQueue = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        // FIXME: can i do this using slices or something
+        const diff = @intFromPtr(used_frame) - @intFromPtr(self.slot.frame.ptr);
+        const idx = diff / @sizeOf(c.AVFrame);
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame search", .color = .gray25 });
-            defer z.end();
+        std.debug.assert(idx < self.slot.frame.len);
+        std.debug.assert(self.slot.state[idx] == .ready_to_reuse);
 
-            for (self.slot.frame, self.slot.state) |*frame, *state| {
-                if (frame != used_frame) continue;
-                std.debug.assert(state.* == .ready_to_reuse);
+        self.slot.state[idx] = .empty;
 
-                state.* = .empty;
-                return self.cond.signal();
-            }
-        }
-
-        std.debug.panic("attempted to recycle a frame that was not in the queue", .{});
+        // Wake up the producer in acquire()
+        self.cond.signal();
     }
 
     pub fn interrupt(self: *@This()) void {

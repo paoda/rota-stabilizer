@@ -311,7 +311,7 @@ pub fn main() !void {
 
             if (next_frame == null) {
                 tracy.frameMarkStart("video timing");
-                next_frame = decoder.queue.frame.pop();
+                next_frame = decoder.queue.frame.tryPop();
             }
 
             if (next_frame) |frame| blk: {
