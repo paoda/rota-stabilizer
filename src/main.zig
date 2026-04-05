@@ -489,6 +489,7 @@ fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), res.meta.circle_radius * camera.scale * camera.zoom);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -506,21 +507,26 @@ fn render(
 
         // Draw Transparent Puck
         gl.UseProgram(circle_prog);
-        gl.BindVertexArray(res.vao.get(.circle));
+        gl.BindVertexArray(res.vao.get(.tex));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
-        gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(res.meta.circle_len));
+
+        gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_radius"), res.meta.circle_radius);
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Draw Ring (matches ring in gameplay)
         gl.UseProgram(ring_prog);
-        gl.BindVertexArray(res.vao.get(.ring));
+        gl.BindVertexArray(res.vao.get(.tex));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
-        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(res.meta.ring_len));
+
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_radius"), res.meta.ring_radius);
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_thickness"), res.meta.ring_thickness);
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     {

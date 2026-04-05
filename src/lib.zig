@@ -58,15 +58,15 @@ pub const GpuResourceManager = struct {
     const log = std.log.scoped(.gpu);
 
     const Metadata = struct {
-        circle_len: usize,
         circle_radius: f32,
-        ring_len: usize,
+        ring_radius: f32,
+        ring_thickness: f32,
 
         blur_res: Resolution,
     };
 
     const VertexArrayPool = struct {
-        const Index = enum(usize) { tex = 0, blur, ring, circle, empty };
+        const Index = enum(usize) { tex = 0, blur, empty };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -201,8 +201,8 @@ pub const GpuResourceManager = struct {
                     .tex => try opengl_impl.program("shader/texture.vert", "shader/texture.frag"),
                     .bg => try opengl_impl.program("shader/texture.vert", "shader/bg.frag"),
                     .blur => try opengl_impl.program("shader/blur.vert", "shader/blur.frag"),
-                    .ring => try opengl_impl.program("shader/ring.vert", "shader/ring.frag"),
-                    .circle => try opengl_impl.program("shader/ring.vert", "shader/circle.frag"),
+                    .ring => try opengl_impl.program("shader/texture.vert", "shader/ring.frag"),
+                    .circle => try opengl_impl.program("shader/texture.vert", "shader/circle.frag"),
                     .angle => try opengl_impl.program("shader/blur.vert", "shader/rotation.frag"),
                     .rgb_to_nv12 => try opengl_impl.program("shader/blur.vert", "shader/rgb_to_nv12.frag"),
                 };
@@ -241,9 +241,9 @@ pub const GpuResourceManager = struct {
         manager.tex.init();
 
         try manager.prog.compile();
-        try manager.setupVertexArrays(allocator, width, height);
         try manager.setupAngleCalc();
 
+        manager.setupVertexArrays(width, height);
         manager.setupBlur(width, height);
         manager.setupVideoTextures(width, height);
 
@@ -437,7 +437,7 @@ pub const GpuResourceManager = struct {
         self.meta.blur_res = .{ .width = width, .height = height };
     }
 
-    pub fn setupVertexArrays(self: *GpuResourceManager, allocator: std.mem.Allocator, width: u32, height: u32) !void {
+    pub fn setupVertexArrays(self: *GpuResourceManager, width: u32, height: u32) void {
         // zig fmt: off
         const tex_verts: [16]f32 = .{
             // pos      // uv
@@ -452,22 +452,13 @@ pub const GpuResourceManager = struct {
         const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
 
         // https://github.com/Lawrenceeeeeeee/python_rotaeno_stabilizer/blob/6e6504f5e3867404c66d94c5752daab5936eedc2/python_rotaeno_stabilizer.py#L253-L258
-        const magic_radius_scale = 1.570;
-        const magic_thickness = 0.02;
+        const magic_radius_scale = 1.564; // -6
+        const magic_thickness = 0.031; // + 6, trial and error
         const rota_height = if (aspect >= magic_aspect_ratio) ratio[1] else ratio[0] / magic_aspect_ratio;
 
         const radius = magic_radius_scale * rota_height;
         const circle_radius = radius * 1.05;
         const radius_thickness = rota_height * magic_thickness;
-        const inner_radius = @max(radius - radius_thickness, 0.0);
-
-        var ring_verts = try ring(allocator, inner_radius, radius, 0x80);
-        defer ring_verts.deinit(allocator);
-
-        // TODO: by messing with stride I think there's a way to combine the two ArrayLists
-        // TODO: make the radius of the puck a runtime thing (scaling matrix + uniform)
-        var circle_verts = try circle(allocator, circle_radius, 0x80);
-        defer circle_verts.deinit(allocator);
 
         { // Setup for FFMPEG Texture
             gl.BindVertexArray(self.vao.get(.tex));
@@ -482,31 +473,9 @@ pub const GpuResourceManager = struct {
             gl.EnableVertexAttribArray(1);
         }
 
-        { // Setup for Ring
-            gl.BindVertexArray(self.vao.get(.ring));
-
-            gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo.get(.ring));
-
-            gl.BufferData(gl.ARRAY_BUFFER, @intCast(ring_verts.items.len * @sizeOf(f32)), ring_verts.items[0..].ptr, gl.STATIC_DRAW);
-            gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
-            gl.EnableVertexAttribArray(0);
-        }
-
-        { // Setup for Circle
-            gl.BindVertexArray(self.vao.get(.circle));
-            defer gl.BindVertexArray(0);
-
-            gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo.get(.circle));
-            defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-
-            gl.BufferData(gl.ARRAY_BUFFER, @intCast(circle_verts.items.len * @sizeOf(f32)), circle_verts.items[0..].ptr, gl.STATIC_DRAW);
-            gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
-            gl.EnableVertexAttribArray(0);
-        }
-
-        self.meta.circle_len = circle_verts.items.len / 2;
-        self.meta.ring_len = ring_verts.items.len / 2;
         self.meta.circle_radius = circle_radius;
+        self.meta.ring_radius = radius;
+        self.meta.ring_thickness = radius_thickness;
     }
 };
 

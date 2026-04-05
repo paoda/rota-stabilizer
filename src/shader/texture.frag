@@ -11,7 +11,7 @@ uniform mat3 u_colour_space;
 uniform ivec2 u_resolution;
 
 const float border_radius = 100.0;
-const float border_thickness = 10.0; // px // FIXME: Maybe this should be relative?
+const float border_thickness = 10.0; // px
 
 const float Y_OFFSET = 16.0 / 255.0;
 const float Y_SCALE = 255.0 / (235.0 - 16.0);
@@ -40,24 +40,30 @@ void main() {
     float height_diff = H - gameplay_height;
     float threshold = (height_diff / 2.0) / H;
 
-    // clip top and bottom letterbox areas
     if (uv.y < threshold || uv.y > (1.0 - threshold)) discard;
 
     vec2 uv_norm = uv;
-    if (height_diff > 0.0) {
-        uv_norm.y = (uv.y - threshold) / (gameplay_height / H);
-    }
+    if (height_diff > 0.0) uv_norm.y = (uv.y - threshold) / (gameplay_height / H);
 
     vec2 half_size = vec2(W, gameplay_height) / 2.0;
-    vec2 px_pos = (uv_norm * 2.0 - 1.0) * half_size;
+    vec2 pos = (uv_norm * 2.0 - 1.0) * half_size;
 
-    float dist = roundedBoxSDF(px_pos, half_size, border_radius);
-    if (dist > 0.0) discard;
+    float dist = roundedBoxSDF(pos, half_size, border_radius);
 
-    if (dist > -border_thickness) {
-        frag_color = vec4(vec3(1.0), 0.7); // TODO: make alpha channel runtime available?
-        return;
-    }
+    float softness = fwidth(dist);
 
-    frag_color = vec4(sampleTex(uv), 1.0);
+    // clip corners
+    float outer_alpha = 1.0 - smoothstep(-softness, softness, dist);
+    if (outer_alpha <= 0.0) discard;
+
+    // transition to border smoothly
+    float border_mix = smoothstep(-border_thickness - softness, -border_thickness + softness, dist);
+
+    vec4 border_colour = vec4(vec3(1.0), 0.7);
+
+    // Blend the video and border based on distance
+    vec4 final_colour = mix(vec4(sampleTex(uv), 1.0), border_colour, border_mix);
+    final_colour.a *= outer_alpha; // apply rounded corner cutoff
+
+    frag_color = final_colour;
 }

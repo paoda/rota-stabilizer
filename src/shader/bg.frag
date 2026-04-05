@@ -3,16 +3,27 @@
 in vec2 uv;
 out vec4 frag_colour;
 
+uniform mat2 u_world_transform;
+uniform mat2 u_view_transform;
+
 uniform sampler2D u_blur;
 
 uniform float u_darkness = 0.0;
-// uniform vec3 u_tint = vec3(1, 1, 1);
+uniform float u_radius = 0.5;
+
+uniform vec3 u_tint = vec3(0.0, 1.0, 1.0);
 
 void main() {
-    vec3 tinted = mix(texture(u_blur, uv).rgb, vec3(0), u_darkness);
+    vec2 pos = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec2 world_pos = u_world_transform * pos;
+    vec2 view_pos = u_view_transform * world_pos;
 
-    // float luminance = dot(tinted.rgb, vec3(0.2126, 0.7152, 0.0722)); // ITU BT.709
-    // tinted = luminance * u_tint.rgb;
+    float d = length(view_pos);
+    float mask = smoothstep(u_radius - fwidth(d), u_radius, d);
 
-    frag_colour = vec4(tinted, 1);
+    vec3 normal = texture(u_blur, uv).rgb;
+    // vec3 tinted = mix(normal, vec3(0.0), u_darkness) * u_tint;
+    vec3 tinted = normal;
+
+    frag_colour = vec4(mix(normal, tinted, mask), 1.0);
 }
