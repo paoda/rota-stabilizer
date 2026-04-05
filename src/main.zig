@@ -991,7 +991,7 @@ fn checkFile(maybe_path: ?[]const u8) !bool {
         else => return e,
     };
 
-    try stdout.print("File '{s}' already exists. Overwrite (y/n): ", .{path});
+    try stdout.print("File '{s}' already exists. Overwrite? (y/n): ", .{path});
     try stdout.flush();
 
     const line = try stdin.takeDelimiter('\n') orelse return false;
