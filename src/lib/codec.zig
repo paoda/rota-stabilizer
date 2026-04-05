@@ -118,7 +118,9 @@ pub const packet = struct {
     };
 
     pub fn read(decode: *Decoder) !void {
-        // const log = std.log.scoped(.packet_read);
+        const log = std.log.scoped(.packet_read);
+        defer log.debug("thread exit", .{});
+
         tracy.setThreadName("packet read");
 
         var pkt = AvPacket.init();
@@ -318,6 +320,8 @@ pub const audio = struct {
 
     pub fn decode(decoder: *Decoder) !void {
         const log = std.log.scoped(.audio_decode);
+        defer log.debug("thread exit", .{});
+
         tracy.setThreadName("audio decode");
 
         const clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
@@ -445,12 +449,13 @@ pub const audio = struct {
 
 pub const video = struct {
     pub fn decode(decoder: *Decoder) !void {
-        // const log = std.log.scoped(.video_decode);
+        const log = std.log.scoped(.video_decode);
+        defer log.debug("thread exit", .{});
+
         tracy.setThreadName("video decode");
 
+        // FIXME: idiomatic?
         const frame_queue = &decoder.queue.frame;
-        defer frame_queue.end_of_stream.store(true, .monotonic);
-
         const pkt_queue = &decoder.queue.pkt.video;
         const codec_ctx = &decoder.video_ctx;
 
@@ -754,6 +759,13 @@ pub const FrameQueue = struct {
         std.debug.panic("attempted to recycle a frame that was not in the queue", .{});
     }
 
+    pub fn interrupt(self: *@This()) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.cond.broadcast();
+    }
+
     pub inline fn len(self: @This()) usize {
         return self.write_idx - self.read_idx;
     }
@@ -787,8 +799,10 @@ pub const Decoder = struct {
         pkt: struct { audio: PacketQueue, video: PacketQueue },
 
         fn deinit(self: *Queues, allocator: std.mem.Allocator) void {
+            // wake up the mutexes so they can check for should_quit
             self.pkt.audio.interrupt();
-            self.pkt.audio.interrupt();
+            self.pkt.video.interrupt();
+            self.frame.interrupt();
 
             self.pkt.audio.deinit(allocator);
             self.pkt.video.deinit(allocator);
