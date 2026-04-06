@@ -21,6 +21,7 @@ void main() {
     vec2 world_pos = rotation * (u_world_transform * view_pos);
     vec2 clip_pos = u_clip_transform * world_pos;
 
+    // gl_Position = vec4(clip_pos * 0.25, 0.0, 1.0); debug
     gl_Position = vec4(clip_pos, 0.0, 1.0);
     uv = _uv;
 }

@@ -26,6 +26,7 @@ const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
+var zoom: f32 = 1.0;
 
 pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
 pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
@@ -298,6 +299,18 @@ pub fn main() !void {
                                 try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
                                 should_render = true;
                             },
+                            c.SDL_SCANCODE_EQUALS => {
+                                zoom += 0.05;
+                                log.debug("zoom: {d:.2}", .{zoom});
+
+                                should_render = true;
+                            },
+                            c.SDL_SCANCODE_MINUS => {
+                                zoom -= 0.05;
+                                log.debug("zoom: {d:.2}", .{zoom});
+
+                                should_render = true;
+                            },
                             c.SDL_SCANCODE_F11 => {
                                 try ui.toggleFullscreen();
                                 should_render = true;
@@ -479,6 +492,12 @@ fn render(
         gl.ActiveTexture(gl.TEXTURE1);
         gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
 
+        gl.ActiveTexture(gl.TEXTURE2);
+        gl.BindTexture(gl.TEXTURE_2D, tex.y);
+
+        gl.ActiveTexture(gl.TEXTURE3);
+        gl.BindTexture(gl.TEXTURE_2D, tex.uv);
+
         const u_world_transform = camera.getBackgroundWorldTransform();
         const u_view_transform = Mat2.identity; // don't zoom in on background
         const u_clip_transform = camera.getViewClipTransform();
@@ -489,7 +508,12 @@ fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 2);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 3);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), res.meta.circle_radius * camera.scale * camera.zoom);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), zoom);
+
+        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }

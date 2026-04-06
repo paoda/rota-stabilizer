@@ -7,13 +7,33 @@ uniform mat2 u_world_transform;
 uniform mat2 u_view_transform;
 
 uniform sampler2D u_blur;
+uniform sampler2D u_y_tex;
+uniform sampler2D u_uv_tex;
 
+uniform mat3 u_colour_space;
 uniform float u_darkness = 0.0;
-uniform float u_radius = 0.5;
+uniform float u_radius;
+uniform float u_zoom = 1.25;
 
-uniform vec3 u_tint = vec3(0.0, 1.0, 1.0);
+uniform vec3 u_tint = vec3(0.19, 0.35, 0.56); // FIXME: hardcoded vulcanus
+
+const float Y_OFFSET = 16.0 / 255.0;
+const float Y_SCALE = 255.0 / (235.0 - 16.0);
+const float UV_SCALE = 255.0 / (240.0 - 16.0);
+
+vec3 sampleTex(vec2 pos) {
+    float y = (texture(u_y_tex, pos).r - Y_OFFSET) * Y_SCALE;
+    vec2 _uv = (texture(u_uv_tex, pos).rg - Y_OFFSET) * UV_SCALE;
+
+    y = clamp(y, 0.0, 1.0);
+    _uv = clamp(_uv, 0.0, 1.0);
+
+    return clamp(u_colour_space * vec3(y, _uv.r - 0.5, _uv.g - 0.5), 0.0, 1.0);
+}
 
 void main() {
+    vec2 zoom_uv = (uv - 0.5) / u_zoom + 0.5;
+
     vec2 pos = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     vec2 world_pos = u_world_transform * pos;
     vec2 view_pos = u_view_transform * world_pos;
@@ -21,9 +41,8 @@ void main() {
     float d = length(view_pos);
     float mask = smoothstep(u_radius - fwidth(d), u_radius, d);
 
-    vec3 normal = texture(u_blur, uv).rgb;
-    // vec3 tinted = mix(normal, vec3(0.0), u_darkness) * u_tint;
-    vec3 tinted = normal;
+    vec3 outer = texture(u_blur, uv).rgb; // * u_tint;
+    vec3 inner = sampleTex(zoom_uv); // purposefully only applied here
 
-    frag_colour = vec4(mix(normal, tinted, mask), 1.0);
+    frag_colour = vec4(mix(inner, outer, mask), 1.0);
 }
