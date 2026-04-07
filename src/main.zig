@@ -35,8 +35,6 @@ pub fn main() !void {
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
-    signal.setupHandler();
-
     var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
 
@@ -102,6 +100,8 @@ pub fn main() !void {
 
     const handles = try decoder.spawn(cli.positionals[0]);
     defer handles.deinit();
+
+    try signal.setupHandler();
 
     if (cli.positionals[0]) |dst_path| {
         // Initialize encoder

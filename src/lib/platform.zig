@@ -132,27 +132,26 @@ pub const signal = struct {
 
     pub var should_quit: AtomicBool = .init(false); // should be global
 
-    pub fn setupHandler() void {
+    pub fn setupHandler() !void {
         switch (builtin.os.tag) {
-            .windows => {
-                const ret = std.os.windows.kernel32.SetConsoleCtrlHandler(windows, 1);
-                if (ret == std.os.windows.FALSE) log.debug("failed to setup ctrl handler: {t}", .{std.os.windows.GetLastError()});
-            },
-            else => std.posix.sigaction(std.posix.SIG.INT, &.{ .handler = .{ .handler = posix }, .mask = std.posix.sigemptyset(), .flags = 0 }, null),
+            .windows => try std.os.windows.SetConsoleCtrlHandler(windowsHandler, true),
+            else => std.posix.sigaction(std.posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = std.posix.sigemptyset(), .flags = 0 }, null),
         }
+
+        log.debug("setup {s} CTRL-C signal handler", .{@tagName(builtin.os.tag)});
     }
 
-    fn windows(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
+    fn windowsHandler(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
         switch (ctrl_type) {
             std.os.windows.CTRL_C_EVENT, std.os.windows.CTRL_BREAK_EVENT => {
                 signal.should_quit.store(true, .monotonic);
-                return @intFromBool(true);
+                return std.os.windows.TRUE;
             },
-            else => return @intFromBool(false),
+            else => return std.os.windows.FALSE,
         }
     }
 
-    fn posix(_: i32) callconv(.c) void {
+    fn posixHandler(_: i32) callconv(.c) void {
         signal.should_quit.store(true, .monotonic);
     }
 };
