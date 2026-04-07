@@ -240,8 +240,6 @@ pub const audio = struct {
             const stream = try errify(c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired, null, null));
             errdefer c.SDL_DestroyAudioStream(stream);
 
-            try errify(c.SDL_SetAudioStreamGain(stream, 0));
-
             var actual: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             var sample_frames: c_int = undefined;
 
@@ -634,19 +632,21 @@ pub const FrameQueue = struct {
     const State = enum { empty, in_use, ready_to_reuse, writing };
     const Error = error{ ffmpeg_error, invalid_size, early_exit } || std.mem.Allocator.Error;
 
+    pub const capacity = 0x20;
+
     // INVARIANT: This is an SPSC Queue
 
     // FIXME: replace with Resolution or Dimension or whatever
     const FrameOptions = struct { width: c_int, height: c_int };
 
-    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), count: usize, opt: FrameOptions) Error!FrameQueue {
-        if (!std.math.isPowerOfTwo(count)) return error.invalid_size;
+    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), opt: FrameOptions) Error!FrameQueue {
+        comptime std.debug.assert(std.math.isPowerOfTwo(capacity));
 
-        const frames = try allocator.alloc(c.AVFrame, count);
+        const frames = try allocator.alloc(c.AVFrame, capacity);
         errdefer allocator.free(frames);
         errdefer for (frames) |*frame| c.av_frame_unref(frame); // imagine we get through only some av_frame_get_buffers
 
-        const states = try allocator.alloc(State, count);
+        const states = try allocator.alloc(State, capacity);
         errdefer allocator.free(states);
 
         for (frames, states) |*frame, *state| {
@@ -864,7 +864,7 @@ pub const Decoder = struct {
         var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit(allocator);
 
-        var frame_queue = try FrameQueue.init(allocator, should_quit, 0x20, .{
+        var frame_queue = try FrameQueue.init(allocator, should_quit, .{
             .width = video_ctx.inner.?.width,
             .height = video_ctx.inner.?.height,
         });

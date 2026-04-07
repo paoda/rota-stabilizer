@@ -247,8 +247,11 @@ pub fn main() !void {
         const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
         const time_base = c.av_q2d(decoder.stream(.video).time_base);
 
-        const start_time = @as(f64, @floatFromInt(decoder.stream(.video).start_time)) * time_base;
+        const start_time = preload(&decoder, &stable_buffer) catch return;
         log.debug("video start time: {d}s", .{start_time});
+
+        try render(&view, &stable_buffer, angle_calc, res, camera);
+        try ui.swap();
 
         try audio_clock.start(start_time);
 
@@ -1038,4 +1041,42 @@ fn shutdown(queues: *Decoder.Queues) void {
     queues.pkt.video.interrupt();
     queues.pkt.audio.interrupt();
     queues.frame.interrupt();
+}
+
+fn preload(decoder: *Decoder, stable_buffer: *DoubleBuffer) !f64 {
+    const FrameQueue = @import("lib/codec.zig").FrameQueue;
+
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    const frame = decoder.queue.frame.pop() orelse {
+        shutdown(&decoder.queue);
+        return error.early_exit;
+    };
+    defer decoder.queue.frame.recycle(frame);
+
+    const time_base = c.av_q2d(decoder.stream(.video).time_base);
+    const timestamp = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
+
+    uploadPlane(stable_buffer.*, frame, .y);
+    uploadPlane(stable_buffer.*, frame, .uv);
+    stable_buffer.display_times[stable_buffer.current] = timestamp;
+
+    const back_buffer = stable_buffer.invert();
+    uploadPlane(back_buffer, frame, .y);
+    uploadPlane(back_buffer, frame, .uv);
+    stable_buffer.display_times[back_buffer.current] = timestamp;
+
+    // might as well completely fill the queue before we start
+    {
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for queue to fill", .color = .gray25 });
+        defer z.end();
+
+        while (decoder.queue.frame.len() + 1 != FrameQueue.capacity) {
+            if (decoder.queue.frame.end_of_stream.load(.monotonic)) break;
+            sleep(1 * std.time.ns_per_ms);
+        }
+    }
+
+    return timestamp;
 }
