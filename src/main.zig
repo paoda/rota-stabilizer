@@ -32,8 +32,6 @@ pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
 pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
 
 pub fn main() !void {
-    defer signal.should_quit.store(true, .monotonic);
-
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
@@ -222,7 +220,7 @@ pub fn main() !void {
                 // Update progress
                 progress_node.setCompletedItems(frame_count);
             } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
-                defer signal.should_quit.store(true, .monotonic); // exit program once flush is done
+                defer shutdown(&decoder.queue);
                 defer std.Progress.setStatus(.success);
 
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
@@ -278,7 +276,7 @@ pub fn main() !void {
                 while (c.SDL_PollEvent(&event)) {
                     switch (event.type) {
                         c.SDL_EVENT_QUIT => {
-                            signal.should_quit.store(true, .monotonic);
+                            shutdown(&decoder.queue);
                             should_render = true;
                         },
                         c.SDL_EVENT_MOUSE_WHEEL => {
@@ -1028,4 +1026,16 @@ fn checkFile(maybe_path: ?[]const u8) !bool {
     const answer = std.mem.trim(u8, line, "\r\t\n");
 
     return std.ascii.eqlIgnoreCase(answer, "y");
+}
+
+fn shutdown(queues: *Decoder.Queues) void {
+    while (!signal.should_quit.load(.monotonic)) {
+        signal.should_quit.store(true, .monotonic);
+        std.atomic.spinLoopHint();
+    }
+
+    // wake up all the Queues
+    queues.pkt.video.interrupt();
+    queues.pkt.audio.interrupt();
+    queues.frame.interrupt();
 }

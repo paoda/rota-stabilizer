@@ -784,6 +784,9 @@ pub const FrameQueue = struct {
     }
 
     pub fn interrupt(self: *@This()) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -818,7 +821,7 @@ pub const Decoder = struct {
     colour_space: c.AVColorSpace,
     dimensions: struct { u32, u32 },
 
-    const Queues = struct {
+    pub const Queues = struct {
         frame: FrameQueue,
         pkt: struct { audio: PacketQueue, video: PacketQueue },
 
