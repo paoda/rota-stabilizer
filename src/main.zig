@@ -142,6 +142,10 @@ pub fn main() !void {
         var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
         var frame_count: u64 = 0;
 
+        _ = try preload(&decoder, &stable_buffer);
+        try render(&view, &stable_buffer, angle_calc, res, camera);
+        writeToNv12Tex(res, &view, camera);
+
         while (!signal.should_quit.load(.monotonic)) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "encode loop" });
             defer zone.end();
