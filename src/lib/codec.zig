@@ -1078,23 +1078,23 @@ pub const Encoder = struct {
         const sw_frame = self._frame.ptr();
         _ = try libav.err(c.av_frame_make_writable(sw_frame));
 
-        const y_stride: usize = self.width;
-        const uv_stride: usize = self.width; // RG is 2 bpp, width/2 pixels => width bytes
+        const y_stride: usize = @intCast(sw_frame.linesize[0]);
+        const uv_stride: usize = @intCast(sw_frame.linesize[1]);
 
         // Hardware path
         if (self.sw_pix_fmt == c.AV_PIX_FMT_NV12) {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "hw memcpy" });
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "hw memcopy" });
             defer z.end();
 
+            // FIXME: any chance we can not do these two memcpys?
+
+            const y_len = self.height * @as(usize, @intCast(sw_frame.linesize[0]));
+            @memcpy(sw_frame.data[0][0..y_len], y_buf[0..y_len]);
+
+            const uv_len = (self.height / 2) * @as(usize, @intCast(sw_frame.linesize[1]));
+            @memcpy(sw_frame.data[1][0..uv_len], uv_buf[0..uv_len]);
+
             sw_frame.pts = frame_pts;
-
-            for (0..self.height) |h| {
-                @memcpy(sw_frame.data[0][h * @as(usize, @intCast(sw_frame.linesize[0])) ..][0..y_stride], y_buf[h * y_stride ..][0..y_stride]);
-            }
-
-            for (0..self.height / 2) |h| {
-                @memcpy(sw_frame.data[1][h * @as(usize, @intCast(sw_frame.linesize[1])) ..][0..uv_stride], uv_buf[h * uv_stride ..][0..uv_stride]);
-            }
         } else {
             // Software path
             var src_frame: c.AVFrame = .{

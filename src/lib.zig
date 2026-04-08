@@ -2,6 +2,7 @@
 //! you are making an executable, the convention is to delete this file and
 //! start with main.zig instead.
 const std = @import("std");
+const AvFrame = @import("lib/libav.zig").AvFrame;
 const gl = @import("gl");
 
 pub const c = @cImport({
@@ -132,8 +133,8 @@ pub const GpuResourceManager = struct {
     };
 
     const PixelBufferPool = struct {
-        // dl_front and dl_back are atlases of NV12 data
-        const Index = enum(usize) { y_front, y_back, uv_front, uv_back, dl_front, dl_back };
+        // yuv_front and yuv_back are atlases of NV12 data
+        const Index = enum(usize) { yuv_front, yuv_back };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -294,16 +295,16 @@ pub const GpuResourceManager = struct {
         if (ret != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
     }
 
-    pub fn setupEncodingTargets(self: *const GpuResourceManager, width: u32, height: u32) error{setup_error}!void {
+    pub fn setupEncodingTargets(self: *const GpuResourceManager, width: u32, height: u32, frame: AvFrame) error{setup_error}!void {
         const BufIndex = PixelBufferPool.Index;
 
-        const y_len = width * height * Y_BPP;
-        const uv_len = (width / 2) * (height / 2) * UV_BPP;
+        const y_len = frame.ptr().linesize[0] * @as(c_int, @intCast(height));
+        const uv_len = frame.ptr().linesize[1] * @as(c_int, @intCast(height / 2));
         const len = y_len + uv_len;
 
-        for ([_]BufIndex{ .dl_front, .dl_back }) |idx| {
+        for ([_]BufIndex{ .yuv_front, .yuv_back }) |idx| {
             gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.pbo.get(idx));
-            gl.BufferData(gl.PIXEL_PACK_BUFFER, @intCast(len), null, gl.STREAM_READ);
+            gl.BufferData(gl.PIXEL_PACK_BUFFER, len, null, gl.STREAM_READ);
         }
 
         // allocate tex (rgb) for copy from display framebuffer
@@ -333,7 +334,6 @@ pub const GpuResourceManager = struct {
 
     pub fn setupVideoTextures(self: *const GpuResourceManager, width: u32, height: u32) void {
         const TexIndex = TexturePool.Index;
-        const BufIndex = PixelBufferPool.Index;
 
         for ([_]TexIndex{ .y_front, .y_back, .uv_front, .uv_back }) |idx| {
             gl.BindTexture(gl.TEXTURE_2D, self.tex.get(idx));
@@ -362,19 +362,6 @@ pub const GpuResourceManager = struct {
             );
         }
 
-        for ([_]BufIndex{ .y_front, .y_back, .uv_front, .uv_back }) |idx| {
-            gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, self.pbo.get(idx));
-
-            const len: c_int = switch (idx) {
-                .uv_front, .uv_back => @intCast((width / 2) * (height / 2) * UV_BPP),
-                .y_front, .y_back => @intCast(width * height * Y_BPP),
-                else => unreachable,
-            };
-
-            gl.BufferData(gl.PIXEL_UNPACK_BUFFER, len, null, gl.STREAM_DRAW);
-        }
-
-        gl.BindTexture(gl.TEXTURE_2D, 0);
         gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
     }
 
@@ -591,4 +578,34 @@ fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len:
     try list.appendSlice(allocator, list.items[0..4]); // complete the loop
 
     return list;
+}
+
+pub fn Linesize(comptime fmt: c.AVPixelFormat) type {
+    return switch (fmt) {
+        c.AV_PIX_FMT_NV12 => struct {
+            y: c_int,
+            uv: c_int,
+
+            pub fn init(frame: AvFrame) @This() {
+                std.debug.assert(frame.ptr().format == fmt);
+
+                return .{
+                    .y = frame.ptr().linesize[0],
+                    .uv = frame.ptr().linesize[1],
+                };
+            }
+        },
+        c.AV_PIX_FMT_RGB24 => struct {
+            rgb: c_int,
+
+            pub fn init(frame: AvFrame) @This() {
+                std.debug.assert(frame.ptr().format == fmt);
+
+                return .{
+                    .rgb = frame.ptr().linesize[0],
+                };
+            }
+        },
+        else => unreachable,
+    };
 }
