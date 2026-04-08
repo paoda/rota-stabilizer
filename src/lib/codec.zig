@@ -864,6 +864,12 @@ pub const Decoder = struct {
         var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit(allocator);
 
+        const sw_fmt = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar.*.format;
+        switch (sw_fmt) {
+            c.AV_PIX_FMT_YUV420P10LE, c.AV_PIX_FMT_P010LE => return error.unsupported_colour_depth,
+            else => {},
+        }
+
         var frame_queue = try FrameQueue.init(allocator, should_quit, .{
             .width = video_ctx.inner.?.width,
             .height = video_ctx.inner.?.height,
