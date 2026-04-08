@@ -11,6 +11,7 @@ const Encoder = @import("lib/codec.zig").Encoder;
 const Decoder = @import("lib/codec.zig").Decoder;
 
 const UploadBuffer = @import("lib.zig").UploadBuffer;
+const DoubleBuffer = @import("lib.zig").DoubleBuffer;
 const BlurManager = @import("lib.zig").BlurManager;
 const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const PixelBufferPool = GpuResourceManager.PixelBufferPool;
@@ -86,7 +87,13 @@ pub fn main() !void {
     var res = try GpuResourceManager.init(allocator, decoder.dimensions);
     defer res.deinit(allocator);
 
-    var stable_buffer = DoubleBuffer.init(res);
+    const double_buffer = blk: {
+        const ptr = try allocator.create(DoubleBuffer);
+        ptr.* = .{};
+
+        break :blk ptr;
+    };
+    defer allocator.destroy(double_buffer);
 
     const w, const h = try ui.windowSize();
     var camera = Camera.init(decoder.dimensions, w, h, decoder.colour_space);
@@ -148,8 +155,8 @@ pub fn main() !void {
         var upload_buffer: UploadBuffer = .default;
         var frame_count: u64 = 0;
 
-        _ = try preload(&decoder, &stable_buffer);
-        try render(&view, &stable_buffer, angle_calc, res, camera);
+        _ = try preload(res, &decoder, double_buffer);
+        try render(&view, double_buffer.front(), angle_calc, res, camera);
         writeToNv12Tex(res, &view, camera);
 
         const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
@@ -168,16 +175,17 @@ pub fn main() !void {
 
             if (decoder.queue.frame.pop()) |frame| {
                 defer decoder.queue.frame.recycle(frame);
-                defer stable_buffer.swap();
+                defer double_buffer.swap();
                 defer frame_count += 1; // increment after frame is sent to the GPU
 
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
                 defer z.end();
 
-                uploadPlane(stable_buffer, frame, .y);
-                uploadPlane(stable_buffer, frame, .uv);
+                const back = double_buffer.back();
+                uploadPlane(.y, res, back, frame);
+                uploadPlane(.uv, res, back, frame);
 
-                try render(&view, &stable_buffer, angle_calc, res, camera);
+                try render(&view, back.flip(), angle_calc, res, camera);
                 writeToNv12Tex(res, &view, camera);
 
                 {
@@ -261,10 +269,10 @@ pub fn main() !void {
         const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
         const time_base = c.av_q2d(decoder.stream(.video).time_base);
 
-        const start_time = preload(&decoder, &stable_buffer) catch return;
+        const start_time = preload(res, &decoder, double_buffer) catch return;
         log.debug("video start time: {d}s", .{start_time});
 
-        try render(&view, &stable_buffer, angle_calc, res, camera);
+        try render(&view, double_buffer.front(), angle_calc, res, camera);
         try ui.swap();
 
         try audio_clock.start(start_time);
@@ -348,9 +356,9 @@ pub fn main() !void {
 
                 std.debug.assert(frame.format == c.AV_PIX_FMT_NV12);
 
-                const back_buffer = stable_buffer.invert();
+                const back = double_buffer.back();
                 const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
-                const already_uploaded = @abs(next_frame_time - back_buffer.display_time()) < std.math.floatEps(f64);
+                const already_uploaded = @abs(next_frame_time - back.displayTime()) < std.math.floatEps(f64);
 
                 if (!already_uploaded) {
                     tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(decoder.queue.frame.len()) } });
@@ -359,10 +367,9 @@ pub fn main() !void {
                     defer upload_z.end();
 
                     // this is a new frame, upload it to the BACK buffer
-                    uploadPlane(back_buffer, frame, .y);
-                    uploadPlane(back_buffer, frame, .uv);
-
-                    stable_buffer.display_times[back_buffer.current] = next_frame_time;
+                    uploadPlane(.y, res, back, frame);
+                    uploadPlane(.uv, res, back, frame);
+                    back.setDisplayTime(next_frame_time);
                 }
 
                 // after upload, to account for it maybe taking a while
@@ -386,7 +393,7 @@ pub fn main() !void {
                     tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = (diff_s + lead_time) * std.time.ms_per_s } });
                     tracy.frameMarkEnd("video timing");
 
-                    stable_buffer.swap();
+                    double_buffer.swap();
 
                     decoder.queue.frame.recycle(frame);
                     next_frame = null;
@@ -407,7 +414,7 @@ pub fn main() !void {
             }
 
             if (should_render) {
-                try render(&view, &stable_buffer, angle_calc, res, camera);
+                try render(&view, double_buffer.front(), angle_calc, res, camera);
                 try ui.swap();
 
                 should_render = false;
@@ -415,50 +422,6 @@ pub fn main() !void {
         }
     }
 }
-
-const DoubleBuffer = struct {
-    res: *const GpuResourceManager,
-
-    display_times: [2]f64,
-    current: u1,
-
-    const Channel = enum { y, uv };
-
-    pub fn init(res: *const GpuResourceManager) DoubleBuffer {
-        return .{
-            .res = res,
-            .display_times = .{ 0.0, 0.0 },
-            .current = 0,
-        };
-    }
-
-    fn tex(self: @This(), comptime ch: Channel) c_uint {
-        return switch (ch) {
-            .y => self.res.tex.get(if (self.current == 0) .y_front else .y_back),
-            .uv => self.res.tex.get(if (self.current == 0) .uv_front else .uv_back),
-        };
-    }
-
-    fn set_display_time(self: *@This(), in_seconds: f64) void {
-        self.display_times[self.current] = in_seconds;
-    }
-
-    fn display_time(self: @This()) f64 {
-        return self.display_times[self.current];
-    }
-
-    fn invert(self: @This()) DoubleBuffer {
-        return .{
-            .res = self.res,
-            .display_times = self.display_times,
-            .current = self.current +% 1,
-        };
-    }
-
-    fn swap(self: *@This()) void {
-        self.current = self.current +% 1;
-    }
-};
 
 const Id = enum(usize) {
     texture = 0,
@@ -470,7 +433,7 @@ const Id = enum(usize) {
 
 fn render(
     view: *Viewport,
-    stable_buffer: *DoubleBuffer,
+    front: DoubleBuffer.Buffer,
     angle_calc: AngleCalc,
     res: *const GpuResourceManager,
     camera: Camera,
@@ -481,7 +444,7 @@ fn render(
     gl.ClearColor(0, 0, 0, 0);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
-    const tex: Nv12Tex = .{ .y = stable_buffer.tex(.y), .uv = stable_buffer.tex(.uv) };
+    const tex: Nv12Tex = .{ .y = res.tex.get(front.tex(.y)), .uv = res.tex.get(front.tex(.uv)) };
     angle_calc.execute(view, tex);
 
     {
@@ -891,13 +854,13 @@ const Camera = struct {
     }
 };
 
-pub fn uploadPlane(stable_buffer: DoubleBuffer, frame: *c.AVFrame, comptime ch: DoubleBuffer.Channel) void {
+pub fn uploadPlane(comptime ch: DoubleBuffer.Channel, res: *const GpuResourceManager, buffer: DoubleBuffer.Buffer, frame: *c.AVFrame) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "upload " ++ @tagName(ch) ++ " plane" });
     defer zone.end();
 
     gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0); // Disable PBO to read directly from FFMpeg strided memory
 
-    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(ch));
+    gl.BindTexture(gl.TEXTURE_2D, res.tex.get(buffer.tex(ch)));
     defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
     const is_y_plane = ch == .y;
@@ -1036,7 +999,7 @@ fn shutdown(queues: *Decoder.Queues) void {
     queues.frame.interrupt();
 }
 
-fn preload(decoder: *Decoder, stable_buffer: *DoubleBuffer) !f64 {
+fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) !f64 {
     const FrameQueue = @import("lib/codec.zig").FrameQueue;
 
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -1051,14 +1014,15 @@ fn preload(decoder: *Decoder, stable_buffer: *DoubleBuffer) !f64 {
     const time_base = c.av_q2d(decoder.stream(.video).time_base);
     const timestamp = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
 
-    uploadPlane(stable_buffer.*, frame, .y);
-    uploadPlane(stable_buffer.*, frame, .uv);
-    stable_buffer.display_times[stable_buffer.current] = timestamp;
+    const front = double_buffer.front();
+    uploadPlane(.y, res, front, frame);
+    uploadPlane(.uv, res, front, frame);
+    front.setDisplayTime(timestamp);
 
-    const back_buffer = stable_buffer.invert();
-    uploadPlane(back_buffer, frame, .y);
-    uploadPlane(back_buffer, frame, .uv);
-    stable_buffer.display_times[back_buffer.current] = timestamp;
+    const back = double_buffer.back();
+    uploadPlane(.y, res, back, frame);
+    uploadPlane(.uv, res, back, frame);
+    back.setDisplayTime(timestamp);
 
     // might as well completely fill the queue before we start
     {

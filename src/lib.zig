@@ -663,6 +663,72 @@ pub const UploadBuffer = struct {
     }
 };
 
+pub const DoubleBuffer = struct {
+    const TexturePool = GpuResourceManager.TexturePool;
+    pub const default: DoubleBuffer = .{};
+
+    y: [2]TexturePool.Index = .{ .y_front, .y_back },
+    uv: [2]TexturePool.Index = .{ .uv_front, .uv_back },
+
+    display_times: [2]?f64 = .{ null, null },
+    idx: u1 = 0,
+
+    generation: usize = 0,
+
+    pub const Channel = enum { y, uv };
+
+    pub const Buffer = struct {
+        super: *DoubleBuffer,
+        idx: u1,
+
+        generation: usize,
+
+        pub fn tex(self: @This(), comptime ch: Channel) TexturePool.Index {
+            std.debug.assert(self.generation == self.super.generation);
+
+            switch (ch) {
+                .y => return self.super.y[self.idx],
+                .uv => return self.super.uv[self.idx],
+            }
+        }
+
+        pub fn displayTime(self: @This()) f64 {
+            std.debug.assert(self.generation == self.super.generation);
+
+            return self.super.display_times[self.idx].?;
+        }
+
+        pub fn setDisplayTime(self: @This(), timestamp: f64) void {
+            std.debug.assert(self.generation == self.super.generation);
+
+            self.super.display_times[self.idx] = timestamp;
+        }
+
+        pub fn flip(self: @This()) @This() {
+            std.debug.assert(self.generation == self.super.generation);
+
+            return .{
+                .super = self.super,
+                .idx = self.idx +% 1,
+                .generation = self.generation,
+            };
+        }
+    };
+
+    pub fn front(self: *DoubleBuffer) Buffer {
+        return .{ .super = self, .idx = self.idx, .generation = self.generation };
+    }
+
+    pub fn back(self: *DoubleBuffer) Buffer {
+        return .{ .super = self, .idx = self.idx +% 1, .generation = self.generation };
+    }
+
+    pub fn swap(self: *DoubleBuffer) void {
+        self.idx +%= 1;
+        self.generation += 1;
+    }
+};
+
 pub fn trace(comptime fmt: []const u8, args: anytype) void {
     var buf: [0x40]u8 = undefined;
     tracy.message(.{ .text = std.fmt.bufPrint(&buf, fmt, args) catch unreachable });
