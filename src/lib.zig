@@ -2,8 +2,10 @@
 //! you are making an executable, the convention is to delete this file and
 //! start with main.zig instead.
 const std = @import("std");
-const AvFrame = @import("lib/libav.zig").AvFrame;
+const tracy = @import("tracy");
 const gl = @import("gl");
+
+const AvFrame = @import("lib/libav.zig").AvFrame;
 
 pub const c = @cImport({
     @cDefine("SDL_DISABLE_OLD_NAMES", {});
@@ -132,9 +134,8 @@ pub const GpuResourceManager = struct {
         }
     };
 
-    const PixelBufferPool = struct {
-        // yuv_front and yuv_back are atlases of NV12 data
-        const Index = enum(usize) { yuv_front, yuv_back };
+    pub const PixelBufferPool = struct {
+        pub const Index = enum(usize) { yuv_slot0, yuv_slot1, yuv_slot2, yuv_slot3 };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -302,7 +303,7 @@ pub const GpuResourceManager = struct {
         const uv_len = frame.ptr().linesize[1] * @as(c_int, @intCast(height / 2));
         const len = y_len + uv_len;
 
-        for ([_]BufIndex{ .yuv_front, .yuv_back }) |idx| {
+        for ([_]BufIndex{ .yuv_slot0, .yuv_slot1, .yuv_slot2, .yuv_slot3 }) |idx| {
             gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.pbo.get(idx));
             gl.BufferData(gl.PIXEL_PACK_BUFFER, len, null, gl.STREAM_READ);
         }
@@ -608,4 +609,61 @@ pub fn Linesize(comptime fmt: c.AVPixelFormat) type {
         },
         else => unreachable,
     };
+}
+
+pub const UploadBuffer = struct {
+    const PixelBufferPool = GpuResourceManager.PixelBufferPool;
+    const Upload = struct { id: PixelBufferPool.Index, pts: i64 };
+    const len = @typeInfo(PixelBufferPool.Index).@"enum".fields.len;
+
+    pub const default: @This() = .{
+        .id = std.meta.tags(PixelBufferPool.Index).*,
+        .pts = [_]?i64{null} ** len,
+        .idx = 0,
+    };
+
+    id: [len]PixelBufferPool.Index,
+    pts: [len]?i64,
+    idx: usize = 0,
+
+    pub fn current(self: @This()) PixelBufferPool.Index {
+        return self.id[self.idx % len];
+    }
+
+    /// returns the oldest PBO in the Queue
+    pub fn next(self: *@This()) ?Upload {
+        const timestamp = self.pts[(self.idx + 1) % len] orelse return null;
+        self.pts[(self.idx + 1) % len] = null;
+
+        return .{
+            .id = self.id[(self.idx + 1) % len],
+            .pts = timestamp,
+        };
+    }
+
+    /// Writes timestamp to current PBO, prepares next frame to overwrite oldest
+    pub fn advance(self: *@This(), pts: i64) void {
+        self.pts[self.idx % len] = pts;
+        self.idx += 1;
+    }
+
+    pub fn skip(self: *@This()) void {
+        std.debug.assert(self.pts[self.idx % len] == null);
+        self.idx += 1;
+    }
+
+    pub fn flush(self: *@This()) ?Upload {
+        const timestamp = self.pts[self.idx % len] orelse return null;
+        self.pts[self.idx % len] = null;
+
+        const ret: Upload = .{ .id = self.id[self.idx % len], .pts = timestamp };
+        self.idx += 1;
+
+        return ret;
+    }
+};
+
+pub fn trace(comptime fmt: []const u8, args: anytype) void {
+    var buf: [0x40]u8 = undefined;
+    tracy.message(.{ .text = std.fmt.bufPrint(&buf, fmt, args) catch unreachable });
 }
