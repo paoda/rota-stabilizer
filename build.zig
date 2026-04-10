@@ -27,7 +27,26 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
-    const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = .ReleaseFast, .preferred_linkage = .static });
+    const sdl_dep = switch (target.result.os.tag) {
+        .macos => blk: {
+            const result = try std.process.Child.run(.{
+                .allocator = b.allocator,
+                .argv = &.{ "xcrun", "--show-sdk-path" },
+            });
+
+            const sdk_root = std.mem.trim(u8, result.stdout, " \n");
+
+            break :blk b.dependency("sdl", .{
+                .target = target,
+                .optimize = .ReleaseFast,
+                .preferred_linkage = .static,
+                .system_include_path = b.pathJoin(&.{ sdk_root, "usr", "include" }),
+                .system_framework_path = b.pathJoin(&.{ sdk_root, "System", "Library", "Frameworks" }),
+                .library_path = b.pathJoin(&.{ sdk_root, "usr", "lib" }),
+            });
+        },
+        else => b.dependency("sdl", .{ .target = target, .optimize = .ReleaseFast, .preferred_linkage = .static }),
+    };
     exe_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
     switch (target.result.os.tag) {
@@ -62,7 +81,11 @@ pub fn build(b: *std.Build) !void {
         },
     }
 
-    const gl_mod = @import("zigglgen").generateBindingsModule(b, .{ .api = .gl, .version = .@"3.3", .profile = .core });
+    const gl_mod = @import("zigglgen").generateBindingsModule(b, .{
+        .api = .gl,
+        .version = .@"3.3",
+        .profile = .core,
+    });
     exe_mod.addImport("gl", gl_mod);
 
     const clap = b.dependency("clap", .{});
