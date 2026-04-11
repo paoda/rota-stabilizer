@@ -340,7 +340,7 @@ pub const GpuResourceManager = struct {
         // setup uv fbo + tex
         gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo.get(.uv));
         gl.BindTexture(gl.TEXTURE_2D, self.tex.get(.uv_out));
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RG8, @intCast(width / 2), @intCast(height / 2), 0, gl.RG, gl.UNSIGNED_BYTE, null);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RG8, @divTrunc(width, 2), @divTrunc(height, 2), 0, gl.RG, gl.UNSIGNED_BYTE, null);
         gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, self.tex.get(.uv_out), 0);
         if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
 

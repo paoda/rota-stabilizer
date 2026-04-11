@@ -99,7 +99,7 @@ pub fn main() !void {
     defer allocator.destroy(double_buffer);
 
     var ui_view: Viewport = .default;
-    try ui_view.push(ui.windowSize()[0], ui.windowSize()[1]);
+    try ui_view.push((try ui.windowSize())[0], (try ui.windowSize())[1]);
 
     var video_view: Viewport = .default;
     try video_view.push(1920, 1080);

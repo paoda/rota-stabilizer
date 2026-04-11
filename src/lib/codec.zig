@@ -986,9 +986,11 @@ pub const Encoder = struct {
         var fmt_ctx = try enc.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
+        const width, const height = opt.view.get();
+
         var codec_ctx = try enc.AvCodecContext.init(codec, fmt_ctx, .{
-            .width = @intCast(opt.width),
-            .height = @intCast(opt.height),
+            .width = width,
+            .height = height,
             .input = .{
                 .fmt_ctx = opt.decoder.fmt_ctx,
                 .video_ctx = opt.decoder.video_ctx,
@@ -1014,8 +1016,8 @@ pub const Encoder = struct {
         _ = try libav.err(c.avformat_write_header(fmt_ctx.ptr(), null));
 
         return .{
-            .width = opt.width,
-            .height = opt.height,
+            .width = @intCast(width),
+            .height = @intCast(height),
             .codec_ctx = codec_ctx,
             .fmt_ctx = fmt_ctx,
 
@@ -1034,18 +1036,18 @@ pub const Encoder = struct {
                 ptr.color_trc = c.AVCOL_TRC_BT709;
                 ptr.colorspace = c.AVCOL_SPC_BT709;
 
-                try frame.setup(@intCast(opt.width), @intCast(opt.height), sw_pix_fmt);
+                try frame.setup(opt.view, sw_pix_fmt);
 
                 break :blk frame;
             },
             ._hw = if (codec.hw) |_| .{ .frame = try AvFrame.init() } else null,
             .sws_ctx = blk: {
                 const ptr: ?*c.SwsContext = c.sws_getContext(
-                    @intCast(opt.width),
-                    @intCast(opt.height),
+                    width,
+                    height,
                     c.AV_PIX_FMT_NV12,
-                    @intCast(opt.width),
-                    @intCast(opt.height),
+                    width,
+                    height,
                     sw_pix_fmt,
                     c.SWS_POINT,
                     null,

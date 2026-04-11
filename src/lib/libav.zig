@@ -3,6 +3,8 @@ const std = @import("std");
 const tracy = @import("tracy");
 const c = @import("../lib.zig").c;
 
+const Viewport = @import("../lib.zig").Viewport;
+
 pub const enc = struct {
     const log = std.log.scoped(.encode);
 
@@ -420,9 +422,11 @@ pub const AvFrame = struct {
         return .{ .inner = p };
     }
 
-    pub fn setup(self: *@This(), width: c_int, height: c_int, fmt: c.AVPixelFormat) !void {
+    pub fn setup(self: *@This(), view: Viewport, fmt: c.AVPixelFormat) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
+
+        const width, const height = view.get();
 
         self.inner.?.width = width;
         self.inner.?.height = height;
