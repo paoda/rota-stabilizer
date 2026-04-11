@@ -12,6 +12,7 @@ const dec = @import("libav.zig").dec;
 
 const AvPacket = @import("libav.zig").AvPacket;
 const AvFrame = @import("libav.zig").AvFrame;
+const Viewport = @import("../lib.zig").Viewport;
 
 // TODO: some universal thread sync primitive
 
@@ -963,8 +964,7 @@ pub const Encoder = struct {
     const log = std.log.scoped(.encode);
 
     pub const Options = struct {
-        width: u32,
-        height: u32,
+        view: Viewport,
 
         decoder: *const Decoder,
     };

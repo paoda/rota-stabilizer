@@ -2,6 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const gl = @import("gl");
 const tracy = @import("tracy");
+const zgui = @import("zgui");
+
+const Viewport = @import("../lib.zig").Viewport;
+const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
+
 const c = @import("../lib.zig").c;
 
 pub var gl_procs: gl.ProcTable = undefined;
@@ -13,6 +18,9 @@ pub const Ui = struct {
     const log = std.log.scoped(.ui);
 
     pub fn deinit(self: @This()) void {
+        zgui.backend.deinit();
+        zgui.deinit();
+
         gl.makeProcTableCurrent(null);
         _ = c.SDL_GL_MakeCurrent(self.window, null);
         _ = c.SDL_GL_DestroyContext(self.gl_ctx);
@@ -45,16 +53,17 @@ pub const Ui = struct {
     }
 };
 
-pub fn createWindow(width: u32, height: u32) !Ui {
-    return createWindowEx(width, height, false);
+pub fn createWindow(allocator: std.mem.Allocator, width: u32, height: u32) !Ui {
+    return createWindowEx(allocator, width, height, false);
 }
 
-pub fn createHeadless(width: u32, height: u32) !Ui {
-    return createWindowEx(width, height, true);
+pub fn createHeadless(allocator: std.mem.Allocator, width: u32, height: u32) !Ui {
+    return createWindowEx(allocator, width, height, true);
 }
 
-fn createWindowEx(width: u32, height: u32, headless: bool) !Ui {
+fn createWindowEx(allocator: std.mem.Allocator, width: u32, height: u32, headless: bool) !Ui {
     c.SDL_SetMainReady();
+
     try errify(c.SDL_Init(c.SDL_INIT_VIDEO | (if (headless) 0 else c.SDL_INIT_AUDIO)));
     errdefer c.SDL_Quit();
 
@@ -79,6 +88,10 @@ fn createWindowEx(width: u32, height: u32, headless: bool) !Ui {
 
     gl.makeProcTableCurrent(&gl_procs);
     errdefer gl.makeProcTableCurrent(null);
+
+    zgui.init(allocator);
+    zgui.backend.init(window, gl_ctx);
+    zgui.io.setIniFilename(null);
 
     return .{ .window = window, .gl_ctx = gl_ctx };
 }
@@ -153,5 +166,56 @@ pub const signal = struct {
 
     fn posixHandler(_: i32) callconv(.c) void {
         signal.should_quit.store(true, .monotonic);
+    }
+};
+
+pub const gui = struct {
+    pub fn draw(res: *const GpuResourceManager, ui_view: Viewport, video_view: Viewport) !void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
+        const width, const height = ui_view.get();
+        zgui.backend.newFrame(@intCast(width), @intCast(height));
+
+        drawVideoWindow(width, video_view, res.tex.get(.out));
+    }
+
+    fn drawVideoWindow(window_width: c_int, video_view: Viewport, video_tex: c_uint) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
+        const vw, const vh = video_view.get();
+        const video_aspect = @as(f32, @floatFromInt(vw)) / @as(f32, @floatFromInt(vh));
+
+        const half_width: f32 = @floatFromInt(@divTrunc(window_width, 2));
+        const half_height = @ceil(half_width / video_aspect);
+
+        zgui.setNextWindowSize(.{ .w = half_width, .h = half_height, .cond = .first_use_ever });
+
+        const showing = zgui.begin("Video", .{});
+        defer zgui.end();
+
+        if (!showing) return;
+
+        const dw, const dh = zgui.getContentRegionAvail();
+        if (dw <= 0 or dh <= 0) return;
+
+        const window_aspect = dw / dh;
+        const w = if (window_aspect > video_aspect) dh * video_aspect else dw;
+        const h = if (window_aspect > video_aspect) dh else dw / video_aspect;
+
+        // horizontal + vertical center
+        const pos = zgui.getCursorPos();
+        zgui.setCursorPos(.{
+            pos[0] + (dw - w) * 0.5,
+            pos[1] + (dh - h) * 0.5,
+        });
+
+        zgui.image(.{ .tex_data = null, .tex_id = @enumFromInt(video_tex) }, .{
+            .w = w,
+            .h = h,
+            .uv0 = .{ 0.0, 1.0 },
+            .uv1 = .{ 1.0, 0.0 },
+        });
     }
 };

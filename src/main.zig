@@ -2,6 +2,7 @@ const std = @import("std");
 const gl = @import("gl");
 const clap = @import("clap");
 const tracy = @import("tracy");
+const zgui = @import("zgui");
 
 const c = @import("lib.zig").c;
 const platform = @import("lib/platform.zig");
@@ -13,6 +14,8 @@ const Decoder = @import("lib/codec.zig").Decoder;
 const UploadBuffer = @import("lib.zig").UploadBuffer;
 const DoubleBuffer = @import("lib.zig").DoubleBuffer;
 const BlurManager = @import("lib.zig").BlurManager;
+const Viewport = @import("lib.zig").Viewport;
+const FbStack = @import("lib.zig").FbStack;
 const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const PixelBufferPool = GpuResourceManager.PixelBufferPool;
 
@@ -61,7 +64,10 @@ pub fn main() !void {
 
     if (cli.args.help != 0) return clap.helpToFile(.stdout(), clap.Help, &params, .{});
 
-    const ui = if (cli.positionals[0]) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1600, 900);
+    const ui = blk: {
+        if (cli.positionals[0] == null) break :blk try platform.createWindow(allocator, 1280, 720);
+        break :blk try platform.createHeadless(allocator, 1920, 1080);
+    };
     defer ui.deinit();
 
     const src_path = cli.args.input orelse return error.missing_input_path;
@@ -82,10 +88,7 @@ pub fn main() !void {
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.Disable(gl.FRAMEBUFFER_SRGB);
-    _ = c.SDL_GL_SetSwapInterval(0);
-
-    var res = try GpuResourceManager.init(allocator, decoder.dimensions);
-    defer res.deinit(allocator);
+    _ = c.SDL_GL_SetSwapInterval(1);
 
     const double_buffer = blk: {
         const ptr = try allocator.create(DoubleBuffer);
@@ -95,9 +98,17 @@ pub fn main() !void {
     };
     defer allocator.destroy(double_buffer);
 
-    const w, const h = try ui.windowSize();
-    var camera = Camera.init(decoder.dimensions, w, h, decoder.colour_space);
-    var view = Viewport.init(w, h);
+    var ui_view: Viewport = .default;
+    try ui_view.push(ui.windowSize()[0], ui.windowSize()[1]);
+
+    var video_view: Viewport = .default;
+    try video_view.push(1920, 1080);
+
+    var camera = Camera.init(decoder.dimensions, video_view, decoder.colour_space);
+    var fbs: FbStack = .default;
+
+    var res = try GpuResourceManager.init(allocator, video_view, decoder.dimensions);
+    defer res.deinit(allocator);
 
     const angle_calc = try AngleCalc.init(res, camera);
     // -- opengl end --
@@ -116,8 +127,7 @@ pub fn main() !void {
     if (cli.positionals[0]) |dst_path| {
         // Initialize encoder
         var encoder = try Encoder.init(.{
-            .width = @intCast(view.width),
-            .height = @intCast(view.height),
+            .view = video_view,
             .decoder = &decoder,
         }, hw_encode, dst_path);
         defer encoder.deinit();
@@ -146,18 +156,14 @@ pub fn main() !void {
         });
         defer progress_node.end();
 
-        try res.setupEncodingTargets(
-            @intCast(view.width),
-            @intCast(view.height),
-            encoder._frame,
-        );
+        try res.setupEncodingTargets(video_view, encoder._frame);
 
         var upload_buffer: UploadBuffer = .default;
         var frame_count: u64 = 0;
 
         _ = try preload(res, &decoder, double_buffer);
-        try render(&view, double_buffer.front(), angle_calc, res, camera);
-        writeToNv12Tex(res, &view, camera);
+        try render(&video_view, &fbs, double_buffer.front(), angle_calc, res, camera);
+        try writeToNv12Tex(res, &video_view, fbs, camera);
 
         const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
 
@@ -185,8 +191,10 @@ pub fn main() !void {
                 uploadPlane(.y, res, back, frame);
                 uploadPlane(.uv, res, back, frame);
 
-                try render(&view, back.flip(), angle_calc, res, camera);
-                writeToNv12Tex(res, &view, camera);
+                try render(&video_view, &fbs, back.flip(), angle_calc, res, camera);
+                try writeToNv12Tex(res, &video_view, fbs, camera);
+
+                const width, const height = video_view.get();
 
                 {
                     const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
@@ -204,7 +212,7 @@ pub fn main() !void {
 
                         gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
                         gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.y));
-                        gl.ReadPixels(0, 0, view.width, view.height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
+                        gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
                     }
 
                     {
@@ -212,14 +220,14 @@ pub fn main() !void {
                         defer read_z.end();
 
                         // after y plane in memory
-                        const uv_offset: usize = @intCast(linesize.y * view.height);
+                        const uv_offset: usize = @intCast(linesize.y * height);
                         gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
                         gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.uv));
-                        gl.ReadPixels(0, 0, @divTrunc(view.width, 2), @divTrunc(view.height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
+                        gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
                     }
 
                     gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
-                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
+                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, fbs.get());
 
                     {
                         const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
@@ -229,7 +237,7 @@ pub fn main() !void {
                     }
 
                     if (upload_buffer.next()) |upload| blk: {
-                        const y, const uv = mapNv12Frame(res, view, upload.id, linesize) orelse break :blk;
+                        const y, const uv = mapNv12Frame(res, video_view, upload.id, linesize) orelse break :blk;
                         defer unmapNv12Frame(res, upload.id);
 
                         try encoder.encodeNv12Frame(y, uv, upload.pts);
@@ -250,7 +258,7 @@ pub fn main() !void {
                 upload_buffer.skip(); // to access the pending frames
 
                 while (upload_buffer.flush()) |upload| {
-                    const y, const uv = mapNv12Frame(res, view, upload.id, linesize) orelse continue;
+                    const y, const uv = mapNv12Frame(res, video_view, upload.id, linesize) orelse continue;
                     defer unmapNv12Frame(res, upload.id);
 
                     try encoder.encodeNv12Frame(y, uv, upload.pts);
@@ -272,7 +280,7 @@ pub fn main() !void {
         const start_time = preload(res, &decoder, double_buffer) catch return;
         log.debug("video start time: {d}s", .{start_time});
 
-        try render(&view, double_buffer.front(), angle_calc, res, camera);
+        try render(&video_view, &fbs, double_buffer.front(), angle_calc, res, camera);
         try ui.swap();
 
         try audio_clock.start(start_time);
@@ -287,8 +295,6 @@ pub fn main() !void {
         var next_frame: ?*c.AVFrame = null;
         var should_render: bool = true;
 
-        var buf: [0x20]u8 = undefined;
-
         while (!signal.should_quit.load(.monotonic)) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
             defer zone.end();
@@ -299,45 +305,31 @@ pub fn main() !void {
 
                 var event: c.SDL_Event = undefined;
                 while (c.SDL_PollEvent(&event)) {
+                    _ = zgui.backend.processEvent(&event);
+
                     switch (event.type) {
-                        c.SDL_EVENT_QUIT => {
-                            shutdown(&decoder.queue);
-                            should_render = true;
-                        },
+                        c.SDL_EVENT_QUIT => shutdown(&decoder.queue),
                         c.SDL_EVENT_MOUSE_WHEEL => {
                             const wheel_delta = event.wheel.y * 0.1;
                             camera.adjustZoom(wheel_delta);
-                            log.debug("Zoom: {d:.2}x", .{camera.zoom});
 
-                            should_render = true;
+                            log.debug("Zoom: {d:.2}x", .{camera.zoom});
                         },
                         c.SDL_EVENT_WINDOW_RESIZED => {
-                            view = Viewport.init(event.window.data1, event.window.data2);
-                            camera.updateWindow(view.width, view.height);
-
-                            should_render = true;
+                            ui_view = .default;
+                            ui_view.push(event.window.data1, event.window.data2) catch unreachable;
                         },
                         c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
-                            c.SDL_SCANCODE_M => {
-                                try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
-                                should_render = true;
-                            },
+                            c.SDL_SCANCODE_M => try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute(),
                             c.SDL_SCANCODE_EQUALS => {
                                 zoom += 0.05;
                                 log.debug("zoom: {d:.2}", .{zoom});
-
-                                should_render = true;
                             },
                             c.SDL_SCANCODE_MINUS => {
                                 zoom -= 0.05;
                                 log.debug("zoom: {d:.2}", .{zoom});
-
-                                should_render = true;
                             },
-                            c.SDL_SCANCODE_F11 => {
-                                try ui.toggleFullscreen();
-                                should_render = true;
-                            },
+                            c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
                             else => {},
                         },
                         else => {},
@@ -350,7 +342,7 @@ pub fn main() !void {
                 next_frame = decoder.queue.frame.tryPop();
             }
 
-            if (next_frame) |frame| blk: {
+            if (next_frame) |frame| {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
                 defer z.end();
 
@@ -381,10 +373,10 @@ pub fn main() !void {
 
                     decoder.queue.frame.recycle(frame);
                     next_frame = null;
-                    break :blk;
+                    continue;
                 }
 
-                const lead_time = 0; // TODO: 1ms for upload and rende
+                const lead_time = 0; // TODO: configurable?
                 const diff_s = next_frame_time - audio_time - lead_time;
 
                 if (diff_s <= 0) { // Time to display the newer frame!
@@ -398,27 +390,21 @@ pub fn main() !void {
                     decoder.queue.frame.recycle(frame);
                     next_frame = null;
                     should_render = true;
-                } else {
-                    const wait_z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for next frame", .color = .gray25 });
-                    defer wait_z.end();
-
-                    const sleep_s = @min(diff_s, 0.005); // wake up slightly earlier than max theoretical
-                    wait_z.text(try std.fmt.bufPrint(&buf, "expected to wait {d:.2}ms", .{sleep_s * std.time.ms_per_s}));
-
-                    sleep(@intFromFloat(sleep_s * std.time.ns_per_s));
                 }
-            } else {
-                // no next frame
-                tracy.message(.{ .text = "FrameQueue starved!" });
-                sleep(1 * std.time.ns_per_ms);
             }
 
             if (should_render) {
-                try render(&view, double_buffer.front(), angle_calc, res, camera);
-                try ui.swap();
-
+                try render(&video_view, &fbs, double_buffer.front(), angle_calc, res, camera);
                 should_render = false;
             }
+
+            gl.ClearColor(0, 0, 0, 1.0);
+            gl.Clear(gl.COLOR_BUFFER_BIT);
+
+            try platform.gui.draw(res, ui_view, video_view);
+            zgui.backend.draw();
+
+            try ui.swap();
         }
     }
 }
@@ -433,6 +419,7 @@ const Id = enum(usize) {
 
 fn render(
     view: *Viewport,
+    fbs: *FbStack,
     front: DoubleBuffer.Buffer,
     angle_calc: AngleCalc,
     res: *const GpuResourceManager,
@@ -441,17 +428,17 @@ fn render(
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    gl.ClearColor(0, 0, 0, 0);
-    gl.Clear(gl.COLOR_BUFFER_BIT);
+    try fbs.push(res.fbo.get(.out));
+    defer fbs.pop();
 
     const tex: Nv12Tex = .{ .y = res.tex.get(front.tex(.y)), .uv = res.tex.get(front.tex(.uv)) };
-    angle_calc.execute(view, tex);
+    try angle_calc.execute(view, fbs, tex);
 
     {
         const z = tracy.Zone.begin(.{ .src = @src(), .name = "background pass" });
         defer z.end();
 
-        blur(res.blur(), res, view, tex, camera, 6);
+        try blur(res.blur(), res, view, fbs, tex, camera, 6);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
@@ -566,7 +553,15 @@ fn render(
     }
 }
 
-fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, camera: Camera, comptime passes: u32) void {
+fn blur(
+    b: BlurManager,
+    res: *const GpuResourceManager,
+    view: *Viewport,
+    fbs: *FbStack,
+    src_tex: Nv12Tex,
+    camera: Camera,
+    comptime passes: u32,
+) !void {
     if (passes == 0) return;
 
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -578,16 +573,8 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
     const height: c_int = @intCast(b.resolution.height);
     const program = res.prog.get(.blur);
 
-    const cache: c_uint = blk: {
-        var buf: [1]c_int = undefined;
-        gl.GetIntegerv(gl.FRAMEBUFFER_BINDING, &buf);
-
-        break :blk @intCast(buf[0]);
-    };
-    defer gl.BindFramebuffer(gl.FRAMEBUFFER, cache);
-
-    view.set(width, height);
-    defer view.restore();
+    try view.push(width, height);
+    defer view.pop();
 
     gl.BindVertexArray(res.vao.get(.blur));
     defer gl.BindVertexArray(0);
@@ -628,39 +615,9 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
+
+    gl.BindFramebuffer(gl.FRAMEBUFFER, fbs.get());
 }
-
-const Viewport = struct {
-    width: c_int,
-    height: c_int,
-
-    cached: ?[2]c_int = null,
-
-    fn init(width: c_int, height: c_int) Viewport {
-        gl.Viewport(0, 0, width, height);
-
-        return .{ .width = width, .height = height };
-    }
-
-    fn set(self: *@This(), width: c_int, height: c_int) void {
-        gl.Viewport(0, 0, width, height);
-        self.cached = .{ self.width, self.height };
-
-        self.width = width;
-        self.height = height;
-    }
-
-    fn restore(self: *@This()) void {
-        if (self.cached == null) @panic("viewport manager state corrupted");
-
-        const view = self.cached.?;
-        gl.Viewport(0, 0, view[0], view[1]);
-
-        self.width = view[0];
-        self.height = view[1];
-        self.cached = null;
-    }
-};
 
 const Nv12Tex = struct { y: c_uint, uv: c_uint };
 
@@ -677,20 +634,20 @@ const AngleCalc = struct {
         };
     }
 
-    pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
+    pub fn execute(self: @This(), view: *Viewport, fbs: *FbStack, tex: Nv12Tex) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "angle calc pass" });
         defer zone.end();
 
         const program = self.res.prog.get(.angle);
 
-        view.set(1, 1);
-        defer view.restore();
+        try view.push(1, 1);
+        defer view.pop();
 
         gl.BindVertexArray(self.res.vao.get(.empty));
         defer gl.BindVertexArray(0);
 
-        gl.BindFramebuffer(gl.FRAMEBUFFER, self.res.fbo.get(.angle));
-        defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+        try fbs.push(self.res.fbo.get(.angle));
+        defer fbs.pop();
 
         gl.ActiveTexture(gl.TEXTURE0);
         gl.BindTexture(gl.TEXTURE_2D, tex.y);
@@ -740,8 +697,10 @@ const Camera = struct {
     };
     // zig fmt: on
 
-    pub fn init(video_resolution: struct { u32, u32 }, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
+    pub fn init(video_resolution: struct { u32, u32 }, view: Viewport, colour_space: c.AVColorSpace) Camera {
         const video_width, const video_height = video_resolution;
+
+        const window_width, const window_height = view.get();
 
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
         const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
@@ -882,18 +841,11 @@ pub fn uploadPlane(comptime ch: DoubleBuffer.Channel, res: *const GpuResourceMan
     gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @intCast(width), @intCast(height), fmt, gl.UNSIGNED_BYTE, frame.data[idx]);
 }
 
-pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, camera: Camera) void {
+pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, fbs: FbStack, camera: Camera) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    // TODO: When we implement DearImgui, we will need an Offscreen FBO
-
-    gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.out));
-    defer gl.BindTexture(gl.TEXTURE_2D, 0);
-
-    // copy from headless screen to rgb texture
-    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
-    gl.CopyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, view.width, view.height);
+    const width, const height = view.get();
 
     gl.BindVertexArray(res.vao.get(.empty));
     defer gl.BindVertexArray(0);
@@ -901,7 +853,7 @@ pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, camera: C
     gl.ActiveTexture(gl.TEXTURE0);
 
     gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.out));
-    defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+    defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
     const program = res.prog.get(.rgb_to_nv12);
     gl.UseProgram(program);
@@ -913,8 +865,8 @@ pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, camera: C
     const is_y_loc = gl.GetUniformLocation(program, "u_is_y");
 
     {
-        view.set(view.width, view.height);
-        defer view.restore();
+        try view.push(width, height);
+        defer view.pop();
 
         // render Y plane
         gl.BindFramebuffer(gl.FRAMEBUFFER, res.fbo.get(.y));
@@ -923,14 +875,16 @@ pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, camera: C
     }
 
     {
-        view.set(@divTrunc(view.width, 2), @divTrunc(view.height, 2));
-        defer view.restore();
+        try view.push(@divTrunc(width, 2), @divTrunc(height, 2));
+        defer view.pop();
 
         // render UV plane
         gl.BindFramebuffer(gl.FRAMEBUFFER, res.fbo.get(.uv));
         gl.Uniform1i(is_y_loc, 0);
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
+
+    gl.BindFramebuffer(gl.FRAMEBUFFER, fbs.get());
 }
 
 pub fn mapNv12Frame(res: *const GpuResourceManager, view: Viewport, idx: PixelBufferPool.Index, linesize: Linesize(c.AV_PIX_FMT_NV12)) ?struct { []const u8, []const u8 } {
@@ -943,8 +897,9 @@ pub fn mapNv12Frame(res: *const GpuResourceManager, view: Viewport, idx: PixelBu
     const maybe_ptr: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
 
     if (maybe_ptr) |ptr| {
-        const y_len: usize = @intCast(linesize.y * view.height);
-        const uv_len: usize = @intCast(linesize.uv * @divTrunc(view.height, 2));
+        _, const height = view.get();
+        const y_len: usize = @intCast(linesize.y * height);
+        const uv_len: usize = @intCast(linesize.uv * @divTrunc(height, 2));
 
         return .{ ptr[0..y_len], ptr[y_len..][0..uv_len] };
     }

@@ -57,6 +57,10 @@
             .url = "git+https://git.musuka.dev/paoda/tracy_zig#72efa5726086abf58b4850d059aa3299f9729275",
             .hash = "tracy-0.1.0-R7l8BVRKAQBPCflWulJM1lcmEYBgTqLQAMog5lrgVJhw",
         },
+        .zgui = .{
+            .url = "git+https://github.com/zig-gamedev/zgui#d6c4f53c2fbd54673790dc2a5208160a3586ef29",
+            .hash = "zgui-0.6.0-dev--L6sZCJKbgBZGCzVMcwD0bNGmpK6yO-UoIESHX5JiRet",
+        },
     },
     .paths = .{
         "build.zig",
