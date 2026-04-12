@@ -4,6 +4,7 @@ const gl = @import("gl");
 const tracy = @import("tracy");
 const zgui = @import("zgui");
 
+const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
@@ -53,15 +54,18 @@ pub const Ui = struct {
     }
 };
 
-pub fn createWindow(allocator: std.mem.Allocator, width: u32, height: u32) !Ui {
-    return createWindowEx(allocator, width, height, false);
+pub fn createWindow(allocator: std.mem.Allocator, resolution: Resolution) !Ui {
+    return createWindowEx(allocator, resolution, false);
 }
 
-pub fn createHeadless(allocator: std.mem.Allocator, width: u32, height: u32) !Ui {
-    return createWindowEx(allocator, width, height, true);
+pub fn createHeadless(allocator: std.mem.Allocator, resolution: Resolution) !Ui {
+    return createWindowEx(allocator, resolution, true);
 }
 
-fn createWindowEx(allocator: std.mem.Allocator, width: u32, height: u32, headless: bool) !Ui {
+fn createWindowEx(allocator: std.mem.Allocator, resolution: Resolution, headless: bool) !Ui {
+    const width = resolution.width;
+    const height = resolution.height;
+
     c.SDL_SetMainReady();
 
     try errify(c.SDL_Init(c.SDL_INIT_VIDEO | (if (headless) 0 else c.SDL_INIT_AUDIO)));
@@ -75,7 +79,7 @@ fn createWindowEx(allocator: std.mem.Allocator, width: u32, height: u32, headles
     try errify(c.SDL_GL_SetAttribute(c.SDL_GL_ALPHA_SIZE, 8));
 
     const window_flags: c.SDL_WindowFlags = c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE | (if (headless) c.SDL_WINDOW_HIDDEN else 0);
-    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", @intCast(width), @intCast(height), window_flags));
+    const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", width, height, window_flags));
     errdefer c.SDL_DestroyWindow(window);
 
     const gl_ctx = try errify(c.SDL_GL_CreateContext(window));

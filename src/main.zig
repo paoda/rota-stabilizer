@@ -36,6 +36,12 @@ const UV_BPP = @import("lib.zig").UV_BPP;
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 var zoom: f32 = 1.0;
 
+const startup = struct {
+    const preview_window: Resolution = .{ .width = 1280, .height = 720 };
+    const headless_output: Resolution = .{ .width = 1920, .height = 1080 };
+    const render_target: Resolution = .{ .width = 1920, .height = 1080 };
+};
+
 pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
 pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
 
@@ -64,10 +70,11 @@ pub fn main() !void {
     defer cli.deinit();
 
     if (cli.args.help != 0) return clap.helpToFile(.stdout(), clap.Help, &params, .{});
+    const is_encoding = cli.positionals[0] != null;
 
     const ui = blk: {
-        if (cli.positionals[0] == null) break :blk try platform.createWindow(allocator, 1280, 720);
-        break :blk try platform.createHeadless(allocator, 1920, 1080);
+        if (!is_encoding) break :blk try platform.createWindow(allocator, startup.preview_window);
+        break :blk try platform.createHeadless(allocator, startup.headless_output);
     };
     defer ui.deinit();
 
@@ -79,7 +86,7 @@ pub fn main() !void {
         if (hw_encode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
     });
 
-    var decoder = try Decoder.init(allocator, &signal.should_quit, hw_decode, src_path, cli.positionals[0] != null);
+    var decoder = try Decoder.init(allocator, &signal.should_quit, hw_decode, src_path, is_encoding);
     defer decoder.deinit(allocator);
 
     // -- opengl --
@@ -104,14 +111,14 @@ pub fn main() !void {
     try ui_view.push(ui_size[0], ui_size[1]);
 
     var render_view: Viewport = .default;
-    try render_view.push(1600, 900);
+    try render_view.push(startup.render_target.width, startup.render_target.height);
 
     var encode_view: Viewport = .default;
-    if (cli.positionals[0] == null) {
+    if (!is_encoding) {
         const width, const height = render_view.get();
         try encode_view.push(width, height);
     } else {
-        try encode_view.push(ui_size[0], ui_size[1]);
+        try encode_view.push(startup.headless_output.width, startup.headless_output.height);
     }
 
     var camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
@@ -348,8 +355,10 @@ pub fn main() !void {
             }
 
             if (next_frame == null) {
-                tracy.frameMarkStart("video timing");
-                next_frame = decoder.queue.frame.tryPop();
+                if (decoder.queue.frame.tryPop()) |next| {
+                    next_frame = next;
+                    tracy.frameMarkStart("video timing");
+                }
             }
 
             if (next_frame) |frame| {
