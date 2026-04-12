@@ -3,7 +3,7 @@ const std = @import("std");
 const tracy = @import("tracy");
 const c = @import("../lib.zig").c;
 
-const Viewport = @import("../lib.zig").Viewport;
+const Resolution = @import("../lib.zig").Resolution;
 
 pub const enc = struct {
     const log = std.log.scoped(.encode);
@@ -143,9 +143,7 @@ pub const enc = struct {
         hw: ?struct { dev_ctx: AvHwDeviceContext } = null,
 
         const Options = struct {
-            // Viewport of the video that will be encoded
-            width: c_int,
-            height: c_int,
+            resolution: Resolution,
 
             input: Input,
 
@@ -165,8 +163,8 @@ pub const enc = struct {
 
             const inpt_vid = opt.input.fmt_ctx.ptr().streams[@intCast(opt.input.video_ctx.stream)];
 
-            ctx.width = opt.width;
-            ctx.height = opt.height;
+            ctx.width = opt.resolution.width;
+            ctx.height = opt.resolution.height;
             ctx.time_base = inpt_vid.*.time_base;
             ctx.framerate = inpt_vid.*.avg_frame_rate;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
@@ -422,11 +420,12 @@ pub const AvFrame = struct {
         return .{ .inner = p };
     }
 
-    pub fn setup(self: *@This(), view: Viewport, fmt: c.AVPixelFormat) !void {
+    pub fn setup(self: *@This(), resolution: Resolution, fmt: c.AVPixelFormat) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const width, const height = view.get();
+        const width = resolution.width;
+        const height = resolution.height;
 
         self.inner.?.width = width;
         self.inner.?.height = height;

@@ -28,6 +28,8 @@ pub const UV_BPP = 2;
 
 pub const magic_aspect_ratio = 1.7763157895;
 
+pub const Resolution = struct { width: c_int, height: c_int };
+
 pub const BlurManager = struct {
     const Layer = struct { fbo: c_uint, tex: c_uint };
 
@@ -44,8 +46,6 @@ pub const BlurManager = struct {
         return if (i & 1 == 0) self.back else self.front;
     }
 };
-
-const Resolution = struct { width: u32, height: u32 };
 
 pub const GpuResourceManager = struct {
     vao: VertexArrayPool,
@@ -222,18 +222,19 @@ pub const GpuResourceManager = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, view: Viewport, dimensions: struct { u32, u32 }) !*GpuResourceManager {
+    pub fn init(allocator: std.mem.Allocator, render_view: Viewport, dimensions: Resolution) !*GpuResourceManager {
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
 
-        const width, const height = dimensions;
+        const width = dimensions.width;
+        const height = dimensions.height;
 
         {
             const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
-            const gcd = std.math.gcd(width, height);
+            const gcd: c_int = @intCast(std.math.gcd(@as(u32, @intCast(width)), @as(u32, @intCast(height))));
 
             log.debug("Resolution: {}x{}", .{ width, height });
-            log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ width / gcd, height / gcd, aspect });
+            log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ @divTrunc(width, gcd), @divTrunc(height, gcd), aspect });
         }
 
         manager.vao.init();
@@ -245,10 +246,10 @@ pub const GpuResourceManager = struct {
         try manager.prog.compile();
         try manager.setupAngleCalc();
 
-        manager.setupVertexArrays(width, height);
-        manager.setupBlur(width, height);
-        manager.setupVideoTextures(width, height);
-        try manager.setupOffscreenTarget(view);
+        manager.setupVertexArrays(dimensions);
+        manager.setupBlur(dimensions);
+        manager.setupVideoTextures(dimensions);
+        try manager.setupOffscreenTarget(render_view);
 
         return manager;
     }
@@ -263,10 +264,10 @@ pub const GpuResourceManager = struct {
         allocator.destroy(self);
     }
 
-    pub fn setupOffscreenTarget(self: GpuResourceManager, view: Viewport) error{setup_error}!void {
+    pub fn setupOffscreenTarget(self: GpuResourceManager, render_view: Viewport) error{setup_error}!void {
         const out_tex = self.tex.get(.out);
         const out_fbo = self.fbo.get(.out);
-        const width, const height = view.get();
+        const width, const height = render_view.get();
 
         gl.BindTexture(gl.TEXTURE_2D, out_tex);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
@@ -316,10 +317,10 @@ pub const GpuResourceManager = struct {
         if (ret != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
     }
 
-    pub fn setupEncodingTargets(self: *const GpuResourceManager, view: Viewport, frame: AvFrame) error{setup_error}!void {
+    pub fn setupEncodingTargets(self: *const GpuResourceManager, encode_view: Viewport, frame: AvFrame) error{setup_error}!void {
         const BufIndex = PixelBufferPool.Index;
 
-        const width, const height = view.get();
+        const width, const height = encode_view.get();
 
         const y_len = frame.ptr().linesize[0] * height;
         const uv_len = frame.ptr().linesize[1] * @divTrunc(height, 2);
@@ -349,8 +350,11 @@ pub const GpuResourceManager = struct {
         gl.BindTexture(gl.TEXTURE_2D, 0);
     }
 
-    pub fn setupVideoTextures(self: *const GpuResourceManager, width: u32, height: u32) void {
+    pub fn setupVideoTextures(self: *const GpuResourceManager, size: Resolution) void {
         const TexIndex = TexturePool.Index;
+
+        const width = size.width;
+        const height = size.height;
 
         for ([_]TexIndex{ .y_front, .y_back, .uv_front, .uv_back }) |idx| {
             gl.BindTexture(gl.TEXTURE_2D, self.tex.get(idx));
@@ -361,7 +365,7 @@ pub const GpuResourceManager = struct {
             gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
             const internal: c_int, const format: c_uint, const res: Resolution = switch (idx) {
-                .uv_front, .uv_back => .{ gl.RG8, gl.RG, .{ .width = width / 2, .height = height / 2 } },
+                .uv_front, .uv_back => .{ gl.RG8, gl.RG, .{ .width = @divTrunc(width, 2), .height = @divTrunc(height, 2) } },
                 .y_front, .y_back => .{ gl.R8, gl.RED, .{ .width = width, .height = height } },
                 else => unreachable,
             };
@@ -370,8 +374,8 @@ pub const GpuResourceManager = struct {
                 gl.TEXTURE_2D,
                 0,
                 internal,
-                @intCast(res.width),
-                @intCast(res.height),
+                res.width,
+                res.height,
                 0,
                 format,
                 gl.UNSIGNED_BYTE,
@@ -382,14 +386,17 @@ pub const GpuResourceManager = struct {
         gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
     }
 
-    pub fn setupBlur(self: *GpuResourceManager, full_width: u32, full_height: u32) void {
+    pub fn setupBlur(self: *GpuResourceManager, full_size: Resolution) void {
+        const full_width = full_size.width;
+        const full_height = full_size.height;
+
         const width, const height = blk: {
-            const limit = 128; // arbitrary
+            const limit: c_int = 128; // arbitrary
             var w = full_width;
             var h = full_height;
 
             while (true) {
-                const next = .{ w / 2, h / 2 };
+                const next = .{ @divTrunc(w, 2), @divTrunc(h, 2) };
                 if (@min(next[0], next[1]) < limit) break :blk .{ w, h };
 
                 w, h = next;
@@ -441,7 +448,10 @@ pub const GpuResourceManager = struct {
         self.meta.blur_res = .{ .width = width, .height = height };
     }
 
-    pub fn setupVertexArrays(self: *GpuResourceManager, width: u32, height: u32) void {
+    pub fn setupVertexArrays(self: *GpuResourceManager, size: Resolution) void {
+        const width = size.width;
+        const height = size.height;
+
         // zig fmt: off
         const tex_verts: [16]f32 = .{
             // pos      // uv
@@ -809,6 +819,11 @@ pub const Viewport = struct {
 
     pub fn get(self: Viewport) struct { c_int, c_int } {
         return .{ self.width[self.idx - 1], self.height[self.idx - 1] };
+    }
+
+    pub fn resolution(self: Viewport) Resolution {
+        const width, const height = self.get();
+        return .{ .width = width, .height = height };
     }
 
     pub fn pop(self: *Viewport) void {

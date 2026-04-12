@@ -22,6 +22,7 @@ const PixelBufferPool = GpuResourceManager.PixelBufferPool;
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
 const Linesize = @import("lib.zig").Linesize;
+const Resolution = @import("lib.zig").Resolution;
 const mat2 = @import("lib/math.zig").mat2;
 const vec2 = @import("lib/math.zig").vec2;
 
@@ -99,15 +100,24 @@ pub fn main() !void {
     defer allocator.destroy(double_buffer);
 
     var ui_view: Viewport = .default;
-    try ui_view.push((try ui.windowSize())[0], (try ui.windowSize())[1]);
+    const ui_size = try ui.windowSize();
+    try ui_view.push(ui_size[0], ui_size[1]);
 
-    var video_view: Viewport = .default;
-    try video_view.push(1920, 1080);
+    var render_view: Viewport = .default;
+    try render_view.push(1600, 900);
 
-    var camera = Camera.init(decoder.dimensions, video_view, decoder.colour_space);
+    var encode_view: Viewport = .default;
+    if (cli.positionals[0] == null) {
+        const width, const height = render_view.get();
+        try encode_view.push(width, height);
+    } else {
+        try encode_view.push(ui_size[0], ui_size[1]);
+    }
+
+    var camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
     var fbs: FbStack = .default;
 
-    var res = try GpuResourceManager.init(allocator, video_view, decoder.dimensions);
+    var res = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
     defer res.deinit(allocator);
 
     const angle_calc = try AngleCalc.init(res, camera);
@@ -127,7 +137,7 @@ pub fn main() !void {
     if (cli.positionals[0]) |dst_path| {
         // Initialize encoder
         var encoder = try Encoder.init(.{
-            .view = video_view,
+            .encode_view = encode_view,
             .decoder = &decoder,
         }, hw_encode, dst_path);
         defer encoder.deinit();
@@ -156,14 +166,14 @@ pub fn main() !void {
         });
         defer progress_node.end();
 
-        try res.setupEncodingTargets(video_view, encoder._frame);
+        try res.setupEncodingTargets(encode_view, encoder._frame);
 
         var upload_buffer: UploadBuffer = .default;
         var frame_count: u64 = 0;
 
         _ = try preload(res, &decoder, double_buffer);
-        try render(&video_view, &fbs, double_buffer.front(), angle_calc, res, camera);
-        try writeToNv12Tex(res, &video_view, fbs, camera);
+        try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
+        try writeToNv12Tex(res, &encode_view, fbs, camera);
 
         const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
 
@@ -191,10 +201,10 @@ pub fn main() !void {
                 uploadPlane(.y, res, back, frame);
                 uploadPlane(.uv, res, back, frame);
 
-                try render(&video_view, &fbs, back.flip(), angle_calc, res, camera);
-                try writeToNv12Tex(res, &video_view, fbs, camera);
+                try render(&render_view, &fbs, back.flip(), angle_calc, res, camera);
+                try writeToNv12Tex(res, &encode_view, fbs, camera);
 
-                const width, const height = video_view.get();
+                const width, const height = encode_view.get();
 
                 {
                     const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
@@ -237,7 +247,7 @@ pub fn main() !void {
                     }
 
                     if (upload_buffer.next()) |upload| blk: {
-                        const y, const uv = mapNv12Frame(res, video_view, upload.id, linesize) orelse break :blk;
+                        const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse break :blk;
                         defer unmapNv12Frame(res, upload.id);
 
                         try encoder.encodeNv12Frame(y, uv, upload.pts);
@@ -258,7 +268,7 @@ pub fn main() !void {
                 upload_buffer.skip(); // to access the pending frames
 
                 while (upload_buffer.flush()) |upload| {
-                    const y, const uv = mapNv12Frame(res, video_view, upload.id, linesize) orelse continue;
+                    const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse continue;
                     defer unmapNv12Frame(res, upload.id);
 
                     try encoder.encodeNv12Frame(y, uv, upload.pts);
@@ -280,7 +290,7 @@ pub fn main() !void {
         const start_time = preload(res, &decoder, double_buffer) catch return;
         log.debug("video start time: {d}s", .{start_time});
 
-        try render(&video_view, &fbs, double_buffer.front(), angle_calc, res, camera);
+        try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
         try ui.swap();
 
         try audio_clock.start(start_time);
@@ -394,14 +404,14 @@ pub fn main() !void {
             }
 
             if (should_render) {
-                try render(&video_view, &fbs, double_buffer.front(), angle_calc, res, camera);
+                try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
                 should_render = false;
             }
 
             gl.ClearColor(0, 0, 0, 1.0);
             gl.Clear(gl.COLOR_BUFFER_BIT);
 
-            try platform.gui.draw(res, ui_view, video_view);
+            try platform.gui.draw(res, ui_view, render_view);
             zgui.backend.draw();
 
             try ui.swap();
@@ -547,7 +557,7 @@ fn render(
 
         gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
-        gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution[0], camera.video_resolution[1]);
+        gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution.width, camera.video_resolution.height);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -670,7 +680,7 @@ const AngleCalc = struct {
 const Camera = struct {
     view_to_clip: Mat2,
 
-    video_resolution: struct { c_int, c_int }, // TODO: consolidate this with Resolution struct in GpuResourceManager
+    video_resolution: Resolution,
 
     world_aspect: f32,
     video_aspect: f32,
@@ -697,10 +707,12 @@ const Camera = struct {
     };
     // zig fmt: on
 
-    pub fn init(video_resolution: struct { u32, u32 }, view: Viewport, colour_space: c.AVColorSpace) Camera {
-        const video_width, const video_height = video_resolution;
+    pub fn init(render_view: Viewport, input_video_resolution: Resolution, colour_space: c.AVColorSpace) Camera {
+        const video_resolution = input_video_resolution;
+        const video_width = video_resolution.width;
+        const video_height = video_resolution.height;
 
-        const window_width, const window_height = view.get();
+        const window_width, const window_height = render_view.get();
 
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
         const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
@@ -721,7 +733,7 @@ const Camera = struct {
 
         return .{
             .view_to_clip = calculateAspectCorrection(world_aspect, window_aspect),
-            .video_resolution = .{ @intCast(video_width), @intCast(video_height) },
+            .video_resolution = video_resolution,
 
             .world_aspect = world_aspect,
             .video_aspect = video_aspect,

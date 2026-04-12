@@ -13,6 +13,7 @@ const dec = @import("libav.zig").dec;
 const AvPacket = @import("libav.zig").AvPacket;
 const AvFrame = @import("libav.zig").AvFrame;
 const Viewport = @import("../lib.zig").Viewport;
+const Resolution = @import("../lib.zig").Resolution;
 
 // TODO: some universal thread sync primitive
 
@@ -637,10 +638,7 @@ pub const FrameQueue = struct {
 
     // INVARIANT: This is an SPSC Queue
 
-    // FIXME: replace with Resolution or Dimension or whatever
-    const FrameOptions = struct { width: c_int, height: c_int };
-
-    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), opt: FrameOptions) Error!FrameQueue {
+    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), opt: Resolution) Error!FrameQueue {
         comptime std.debug.assert(std.math.isPowerOfTwo(capacity));
 
         const frames = try allocator.alloc(c.AVFrame, capacity);
@@ -820,7 +818,7 @@ pub const Decoder = struct {
 
     // Important Information
     colour_space: c.AVColorSpace,
-    dimensions: struct { u32, u32 },
+    resolution: Resolution,
 
     pub const Queues = struct {
         frame: FrameQueue,
@@ -901,7 +899,7 @@ pub const Decoder = struct {
             },
             .audio_clock = audio_clock,
             .colour_space = video_ctx.inner.?.colorspace,
-            .dimensions = .{ @intCast(video_ctx.inner.?.width), @intCast(video_ctx.inner.?.height) },
+            .resolution = .{ .width = video_ctx.inner.?.width, .height = video_ctx.inner.?.height },
         };
     }
 
@@ -944,8 +942,7 @@ pub const Decoder = struct {
 };
 
 pub const Encoder = struct {
-    width: u32,
-    height: u32,
+    resolution: Resolution,
 
     codec_ctx: enc.AvCodecContext,
     fmt_ctx: enc.AvFormatContext,
@@ -964,7 +961,7 @@ pub const Encoder = struct {
     const log = std.log.scoped(.encode);
 
     pub const Options = struct {
-        view: Viewport,
+        encode_view: Viewport,
 
         decoder: *const Decoder,
     };
@@ -986,11 +983,12 @@ pub const Encoder = struct {
         var fmt_ctx = try enc.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
-        const width, const height = opt.view.get();
+        const encode_resolution = opt.encode_view.resolution();
+        const width = encode_resolution.width;
+        const height = encode_resolution.height;
 
         var codec_ctx = try enc.AvCodecContext.init(codec, fmt_ctx, .{
-            .width = width,
-            .height = height,
+            .resolution = encode_resolution,
             .input = .{
                 .fmt_ctx = opt.decoder.fmt_ctx,
                 .video_ctx = opt.decoder.video_ctx,
@@ -1016,8 +1014,7 @@ pub const Encoder = struct {
         _ = try libav.err(c.avformat_write_header(fmt_ctx.ptr(), null));
 
         return .{
-            .width = @intCast(width),
-            .height = @intCast(height),
+            .resolution = encode_resolution,
             .codec_ctx = codec_ctx,
             .fmt_ctx = fmt_ctx,
 
@@ -1036,7 +1033,7 @@ pub const Encoder = struct {
                 ptr.color_trc = c.AVCOL_TRC_BT709;
                 ptr.colorspace = c.AVCOL_SPC_BT709;
 
-                try frame.setup(opt.view, sw_pix_fmt);
+                try frame.setup(encode_resolution, sw_pix_fmt);
 
                 break :blk frame;
             },
@@ -1090,10 +1087,10 @@ pub const Encoder = struct {
 
             // FIXME: any chance we can not do these two memcpys?
 
-            const y_len = self.height * @as(usize, @intCast(sw_frame.linesize[0]));
+            const y_len = @as(usize, @intCast(self.resolution.height)) * @as(usize, @intCast(sw_frame.linesize[0]));
             @memcpy(sw_frame.data[0][0..y_len], y_buf[0..y_len]);
 
-            const uv_len = (self.height / 2) * @as(usize, @intCast(sw_frame.linesize[1]));
+            const uv_len = @as(usize, @intCast(@divTrunc(self.resolution.height, 2))) * @as(usize, @intCast(sw_frame.linesize[1]));
             @memcpy(sw_frame.data[1][0..uv_len], uv_buf[0..uv_len]);
 
             sw_frame.pts = frame_pts;
@@ -1101,8 +1098,8 @@ pub const Encoder = struct {
             // Software path
             var src_frame: c.AVFrame = .{
                 .format = c.AV_PIX_FMT_NV12,
-                .width = @intCast(self.width),
-                .height = @intCast(self.height),
+                .width = self.resolution.width,
+                .height = self.resolution.height,
             };
 
             src_frame.data[0] = @constCast(y_buf.ptr);
