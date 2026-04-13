@@ -81,6 +81,7 @@ pub fn main() !void {
     const src_path = cli.args.input orelse return error.missing_input_path;
 
     const hw_decode, const hw_encode = platform.guessHardware();
+    // const hw_decode, const hw_encode = @as(struct { ?c_uint, ?c_uint }, .{ null, null });
     log.debug("guessed {s} hw decode and {s} hw encode support", .{
         if (hw_decode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
         if (hw_encode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",

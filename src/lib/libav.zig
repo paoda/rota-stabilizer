@@ -172,6 +172,9 @@ pub const enc = struct {
             ctx.bit_rate = 30_000 * KBPS_TO_BPS; // FIXME: configurable?
             ctx.gop_size = @intFromFloat(c.av_q2d(ctx.framerate) / 2);
 
+            ctx.thread_count = 0;
+            ctx.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
+
             ctx.color_range = c.AVCOL_RANGE_MPEG;
             ctx.color_primaries = c.AVCOL_PRI_BT709;
             ctx.color_trc = c.AVCOL_TRC_BT709;
@@ -420,26 +423,46 @@ pub const AvFrame = struct {
         return .{ .inner = p };
     }
 
-    pub fn setup(self: *@This(), resolution: Resolution, fmt: c.AVPixelFormat) !void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
-        defer zone.end();
-
-        const width = resolution.width;
-        const height = resolution.height;
-
-        self.inner.?.width = width;
-        self.inner.?.height = height;
-        self.inner.?.format = fmt;
-
-        _ = try err(c.av_frame_get_buffer(self.inner, 32));
-    }
-
     pub fn deinit(self: *@This()) void {
         c.av_frame_free(&self.inner);
     }
 
+    pub fn setYData(self: *AvFrame, buf: []const u8) !void {
+        const frame = self.ptr();
+
+        const stride = alignUp(frame.width, 32);
+        const len: usize = @intCast(stride * frame.height);
+        std.debug.assert(buf.len == len);
+
+        frame.linesize[0] = stride;
+        frame.data[0] = @ptrCast(@constCast(buf));
+        frame.buf[0] = c.av_buffer_create(frame.data[0], len, &bufferDummyFree, null, 0);
+
+        if (frame.buf[0] == null) return error.ffmpeg_error;
+    }
+
+    pub fn setUvData(self: *AvFrame, buf: []const u8) !void {
+        const frame = self.ptr();
+
+        const stride = alignUp(frame.width, 32);
+        const len: usize = @intCast(stride * @divTrunc(frame.height, 2));
+        std.debug.assert(buf.len == len);
+
+        frame.linesize[1] = stride;
+        frame.data[1] = @ptrCast(@constCast(buf));
+        frame.buf[1] = c.av_buffer_create(frame.data[0], len, &bufferDummyFree, null, 0);
+
+        if (frame.buf[1] == null) return error.ffmpeg_error;
+    }
+
+    fn bufferDummyFree(_: ?*anyopaque, _: [*c]u8) callconv(.c) void {}
+
     pub fn ptr(self: @This()) *c.AVFrame {
         return self.inner.?;
+    }
+
+    pub fn alignUp(value: c_int, alignment: c_int) c_int {
+        return (value + alignment - 1) & ~(alignment - 1);
     }
 };
 

@@ -953,7 +953,11 @@ pub const Encoder = struct {
     video_stream: enc.AvStream,
 
     _pkt: AvPacket,
-    _frame: AvFrame,
+    _frame: AvFrame, // points to NV12 Data from OpenGL
+
+    // TODO: dont' always allocate this?
+    _sw_frame: AvFrame, // for use in software encoding only
+
     _hw: ?struct { frame: AvFrame } = null,
 
     sw_pix_fmt: c.AVPixelFormat,
@@ -977,6 +981,22 @@ pub const Encoder = struct {
         }
 
         return initSoftware(opt, codec_id, path);
+    }
+
+    pub fn deinit(self: *Encoder) void {
+        self.writeVideoFrame(null) catch @panic("failed to flush encoder");
+        _ = c.av_write_trailer(self.fmt_ctx.ptr());
+
+        self._frame.deinit();
+        self._sw_frame.deinit();
+
+        if (self._hw) |*hw| hw.frame.deinit();
+        self._pkt.deinit();
+
+        self.codec_ctx.deinit();
+        self.fmt_ctx.deinit();
+
+        self.* = undefined;
     }
 
     fn initShared(opt: Options, codec: enc.AvCodec, sw_pix_fmt: c.AVPixelFormat, path: []const u8) !Encoder {
@@ -1026,15 +1046,31 @@ pub const Encoder = struct {
                 var frame = try AvFrame.init();
                 errdefer frame.deinit();
 
-                // additional setup
                 const ptr = frame.ptr();
+                ptr.width = encode_resolution.width;
+                ptr.height = encode_resolution.height;
+                ptr.format = c.AV_PIX_FMT_NV12;
+
+                ptr.linesize[0] = AvFrame.alignUp(encode_resolution.width, 32);
+                ptr.linesize[1] = ptr.linesize[0];
+
                 ptr.color_range = c.AVCOL_RANGE_MPEG;
                 ptr.color_primaries = c.AVCOL_PRI_BT709;
                 ptr.color_trc = c.AVCOL_TRC_BT709;
                 ptr.colorspace = c.AVCOL_SPC_BT709;
 
-                try frame.setup(encode_resolution, sw_pix_fmt);
+                break :blk frame;
+            },
+            ._sw_frame = blk: {
+                var frame = try AvFrame.init();
+                errdefer frame.deinit();
 
+                const ptr = frame.ptr();
+                ptr.width = encode_resolution.width;
+                ptr.height = encode_resolution.height;
+                ptr.format = sw_pix_fmt;
+
+                _ = try libav.err(c.av_frame_get_buffer(ptr, 32));
                 break :blk frame;
             },
             ._hw = if (codec.hw) |_| .{ .frame = try AvFrame.init() } else null,
@@ -1069,69 +1105,52 @@ pub const Encoder = struct {
     }
 
     pub fn encodeNv12Frame(self: *Encoder, y_buf: []const u8, uv_buf: []const u8, frame_pts: i64) !void {
-        @setRuntimeSafety(false);
-
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const sw_frame = self._frame.ptr();
-        _ = try libav.err(c.av_frame_make_writable(sw_frame));
+        const src_frame = self._frame.ptr();
+        _ = c.av_frame_unref(self._frame.ptr());
 
-        const y_stride: usize = @intCast(sw_frame.linesize[0]);
-        const uv_stride: usize = @intCast(sw_frame.linesize[1]);
+        src_frame.width = self.resolution.width;
+        src_frame.height = self.resolution.height;
+        src_frame.format = self.sw_pix_fmt;
+        src_frame.pts = frame_pts;
 
-        // Hardware path
-        if (self.sw_pix_fmt == c.AV_PIX_FMT_NV12) {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "hw memcopy" });
-            defer z.end();
+        try self._frame.setYData(y_buf);
+        try self._frame.setUvData(uv_buf);
 
-            // FIXME: any chance we can not do these two memcpys?
+        if (self._hw) |hw| {
+            const hw_frame = hw.frame.ptr();
+            c.av_frame_unref(hw_frame);
 
-            const y_len = @as(usize, @intCast(self.resolution.height)) * @as(usize, @intCast(sw_frame.linesize[0]));
-            @memcpy(sw_frame.data[0][0..y_len], y_buf[0..y_len]);
+            {
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "av_hwframe_get_buffer" });
+                defer z.end();
 
-            const uv_len = @as(usize, @intCast(@divTrunc(self.resolution.height, 2))) * @as(usize, @intCast(sw_frame.linesize[1]));
-            @memcpy(sw_frame.data[1][0..uv_len], uv_buf[0..uv_len]);
+                _ = try libav.err(c.av_hwframe_get_buffer(self.codec_ctx.ptr().hw_frames_ctx, hw_frame, 0));
+            }
+            {
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "av_hwframe_transfer_data" });
+                defer z.end();
 
-            sw_frame.pts = frame_pts;
+                _ = try libav.err(c.av_hwframe_transfer_data(hw_frame, src_frame, 0));
+            }
+
+            _ = try libav.err(c.av_frame_copy_props(hw_frame, src_frame));
+
+            try self.writeVideoFrame(hw_frame);
         } else {
-            // Software path
-            var src_frame: c.AVFrame = .{
-                .format = c.AV_PIX_FMT_NV12,
-                .width = self.resolution.width,
-                .height = self.resolution.height,
-            };
-
-            src_frame.data[0] = @constCast(y_buf.ptr);
-            src_frame.linesize[0] = @intCast(y_stride);
-
-            src_frame.data[1] = @constCast(uv_buf.ptr);
-            src_frame.linesize[1] = @intCast(uv_stride);
+            const sw_frame = self._sw_frame.ptr();
+            _ = try libav.err(c.av_frame_make_writable(sw_frame));
 
             {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "sws_scale_frame" });
                 defer z.end();
 
-                _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, &src_frame));
-                sw_frame.pts = frame_pts;
-            }
-        }
-
-        if (self._hw) |hw| {
-            const hw_frame = hw.frame.ptr();
-
-            {
-                const z = tracy.Zone.begin(.{ .src = @src(), .name = "hw upload" });
-                defer z.end();
-
-                c.av_frame_unref(hw_frame);
-                _ = try libav.err(c.av_hwframe_get_buffer(self.codec_ctx.ptr().hw_frames_ctx, hw_frame, 0));
-                _ = try libav.err(c.av_hwframe_transfer_data(hw_frame, sw_frame, 0));
-                _ = try libav.err(c.av_frame_copy_props(hw_frame, sw_frame));
+                _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, src_frame));
+                sw_frame.pts = src_frame.pts;
             }
 
-            try self.writeVideoFrame(hw_frame);
-        } else {
             try self.writeVideoFrame(sw_frame);
         }
     }
@@ -1194,19 +1213,5 @@ pub const Encoder = struct {
                 _ = try libav.err(c.av_interleaved_write_frame(self.fmt_ctx.ptr(), pkt));
             }
         }
-    }
-
-    pub fn deinit(self: *Encoder) void {
-        self.writeVideoFrame(null) catch @panic("failed to flush encoder");
-        _ = c.av_write_trailer(self.fmt_ctx.ptr());
-
-        self._frame.deinit();
-        if (self._hw) |*hw| hw.frame.deinit();
-        self._pkt.deinit();
-
-        self.codec_ctx.deinit();
-        self.fmt_ctx.deinit();
-
-        self.* = undefined;
     }
 };
