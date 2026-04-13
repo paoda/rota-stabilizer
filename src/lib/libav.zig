@@ -274,6 +274,9 @@ pub const dec = struct {
             var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
             errdefer c.avcodec_free_context(&ctx_ptr);
 
+            ctx_ptr.?.thread_count = 0;
+            ctx_ptr.?.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
+
             _ = try err(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
             _ = try err(c.avcodec_open2(ctx_ptr, codec_ptr, null));
 
@@ -286,6 +289,9 @@ pub const dec = struct {
 
             var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
             errdefer c.avcodec_free_context(&ctx_ptr);
+
+            ctx_ptr.?.thread_count = 0;
+            ctx_ptr.?.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
 
             _ = try err(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
 
