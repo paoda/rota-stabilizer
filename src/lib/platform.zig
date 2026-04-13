@@ -37,6 +37,13 @@ pub const Ui = struct {
         return .{ w, h };
     }
 
+    pub fn refreshRate(self: @This()) !f32 {
+        const id = try errify(c.SDL_GetDisplayForWindow(self.window));
+        const mode = try errify(c.SDL_GetCurrentDisplayMode(id));
+
+        return mode.*.refresh_rate;
+    }
+
     pub fn toggleFullscreen(self: @This()) !void {
         if (c.SDL_GetWindowFlags(self.window) & c.SDL_WINDOW_FULLSCREEN != 0) {
             try errify(c.SDL_SetWindowFullscreen(self.window, false));

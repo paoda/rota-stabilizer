@@ -303,9 +303,13 @@ pub fn main() !void {
 
         try audio_clock.start(start_time);
 
+        const refresh_rate = ui.refreshRate() catch 60.0;
+
+        const lookahead = (1.0 / refresh_rate) / 2.0;
         const delay_threshold = @max(0.010, frame_period * 1.25);
 
         log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
+        log.debug("display refresh rate: {d:.2}Hz (lookahead: {d:.2}ms)", .{ refresh_rate, lookahead * std.time.ms_per_s });
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
 
         tracy.plotConfig(.{ .name = "A/V Sync Drift (ms)" });
@@ -357,68 +361,73 @@ pub fn main() !void {
                 }
             }
 
-            if (next_frame == null) {
-                if (decoder.queue.frame.tryPop()) |next| {
-                    next_frame = next;
-                    tracy.frameMarkStart("video timing");
-                }
-            }
-
-            if (next_frame) |frame| {
-                const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
-                defer z.end();
-
-                std.debug.assert(frame.format == c.AV_PIX_FMT_NV12);
-
-                const back = double_buffer.back();
-                const next_frame_time = @as(f64, @floatFromInt(frame.pts)) * time_base;
-                const drop_diff_s = next_frame_time - audio_clock.seconds_passed();
-
-                if (drop_diff_s < -delay_threshold) {
-                    const msg = try std.fmt.bufPrint(
-                        &buf,
-                        "dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}",
-                        .{ drop_diff_s, -(drop_diff_s - next_frame_time), next_frame_time },
-                    );
-
-                    tracy.message(.{ .text = msg });
-                    tracy.frameMarkEnd("video timing");
-
-                    decoder.queue.frame.recycle(frame);
-                    next_frame = null;
-                    continue;
+            while (true) { // necessary for when Display Hz !== Video FPS
+                if (next_frame == null) {
+                    if (decoder.queue.frame.tryPop()) |next| {
+                        next_frame = next;
+                        tracy.frameMarkStart("video timing");
+                    }
                 }
 
-                const already_uploaded = @abs(next_frame_time - back.displayTime()) < std.math.floatEps(f64);
+                if (next_frame) |frame| {
+                    const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
+                    defer z.end();
 
-                if (!already_uploaded) {
-                    tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(decoder.queue.frame.len()) } });
+                    std.debug.assert(frame.format == c.AV_PIX_FMT_NV12);
 
-                    const upload_z = tracy.Zone.begin(.{ .src = @src(), .name = "upload next frame" });
-                    defer upload_z.end();
+                    const back = double_buffer.back();
+                    const next_frame_time = @as(f64, @floatFromInt(frame.pts)) * time_base;
+                    const drop_diff_s = next_frame_time - audio_clock.seconds_passed();
 
-                    // this is a new frame, upload it to the BACK buffer
-                    uploadPlane(.y, res, back, frame);
-                    uploadPlane(.uv, res, back, frame);
-                    back.setDisplayTime(next_frame_time);
+                    if (drop_diff_s < -delay_threshold) {
+                        const msg = try std.fmt.bufPrint(
+                            &buf,
+                            "dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}",
+                            .{ drop_diff_s, -(drop_diff_s - next_frame_time), next_frame_time },
+                        );
+
+                        tracy.message(.{ .text = msg });
+                        tracy.frameMarkEnd("video timing");
+
+                        decoder.queue.frame.recycle(frame);
+                        next_frame = null;
+                        continue;
+                    }
+
+                    const already_uploaded = @abs(next_frame_time - back.displayTime()) < std.math.floatEps(f64);
+
+                    if (!already_uploaded) {
+                        tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(decoder.queue.frame.len()) } });
+
+                        const upload_z = tracy.Zone.begin(.{ .src = @src(), .name = "upload next frame" });
+                        defer upload_z.end();
+
+                        // this is a new frame, upload it to the BACK buffer
+                        uploadPlane(.y, res, back, frame);
+                        uploadPlane(.uv, res, back, frame);
+                        back.setDisplayTime(next_frame_time);
+                    }
+
+                    // after upload, recalculate to check if it's time to swap
+                    const audio_time = audio_clock.seconds_passed();
+                    const diff_s = next_frame_time - audio_time;
+
+                    if (diff_s - lookahead <= 0) { // Time to display the newer frame!
+                        tracy.plot(.{ .name = "Audio Time (s)", .value = .{ .f64 = audio_time } });
+                        tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
+                        tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
+                        tracy.frameMarkEnd("video timing");
+
+                        double_buffer.swap();
+
+                        decoder.queue.frame.recycle(frame);
+                        next_frame = null;
+                        should_render = true;
+                        continue;
+                    }
                 }
 
-                // after upload, recalculate to check if it's time to swap
-                const audio_time = audio_clock.seconds_passed();
-                const diff_s = next_frame_time - audio_time;
-
-                if (diff_s <= 0) { // Time to display the newer frame!
-                    tracy.plot(.{ .name = "Audio Time (s)", .value = .{ .f64 = audio_time } });
-                    tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
-                    tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
-                    tracy.frameMarkEnd("video timing");
-
-                    double_buffer.swap();
-
-                    decoder.queue.frame.recycle(frame);
-                    next_frame = null;
-                    should_render = true;
-                }
+                break;
             }
 
             if (should_render) {
