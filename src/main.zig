@@ -262,7 +262,7 @@ pub fn main() !void {
                     }
                 }
 
-                upload_buffer.advance(frame.best_effort_timestamp);
+                upload_buffer.advance(frame.pts);
 
                 // Update progress
                 progress_node.setCompletedItems(frame_count);
@@ -303,7 +303,7 @@ pub fn main() !void {
 
         try audio_clock.start(start_time);
 
-        const delay_threshold = 0.020;
+        const delay_threshold = @max(0.010, frame_period * 1.25);
 
         log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
         log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
@@ -312,6 +312,8 @@ pub fn main() !void {
 
         var next_frame: ?*c.AVFrame = null;
         var should_render: bool = true;
+
+        var buf: [0x100]u8 = undefined;
 
         while (!signal.should_quit.load(.monotonic)) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
@@ -369,7 +371,24 @@ pub fn main() !void {
                 std.debug.assert(frame.format == c.AV_PIX_FMT_NV12);
 
                 const back = double_buffer.back();
-                const next_frame_time = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
+                const next_frame_time = @as(f64, @floatFromInt(frame.pts)) * time_base;
+                const drop_diff_s = next_frame_time - audio_clock.seconds_passed();
+
+                if (drop_diff_s < -delay_threshold) {
+                    const msg = try std.fmt.bufPrint(
+                        &buf,
+                        "dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}",
+                        .{ drop_diff_s, -(drop_diff_s - next_frame_time), next_frame_time },
+                    );
+
+                    tracy.message(.{ .text = msg });
+                    tracy.frameMarkEnd("video timing");
+
+                    decoder.queue.frame.recycle(frame);
+                    next_frame = null;
+                    continue;
+                }
+
                 const already_uploaded = @abs(next_frame_time - back.displayTime()) < std.math.floatEps(f64);
 
                 if (!already_uploaded) {
@@ -384,25 +403,14 @@ pub fn main() !void {
                     back.setDisplayTime(next_frame_time);
                 }
 
-                // after upload, to account for it maybe taking a while
+                // after upload, recalculate to check if it's time to swap
                 const audio_time = audio_clock.seconds_passed();
-
-                if (next_frame_time - audio_time < -delay_threshold) {
-                    tracy.message(.{ .text = "dropped frame" });
-                    tracy.frameMarkEnd("video timing");
-
-                    decoder.queue.frame.recycle(frame);
-                    next_frame = null;
-                    continue;
-                }
-
-                const lead_time = 0; // TODO: configurable?
-                const diff_s = next_frame_time - audio_time - lead_time;
+                const diff_s = next_frame_time - audio_time;
 
                 if (diff_s <= 0) { // Time to display the newer frame!
                     tracy.plot(.{ .name = "Audio Time (s)", .value = .{ .f64 = audio_time } });
                     tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
-                    tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = (diff_s + lead_time) * std.time.ms_per_s } });
+                    tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
                     tracy.frameMarkEnd("video timing");
 
                     double_buffer.swap();
@@ -989,7 +997,7 @@ fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *Do
     defer decoder.queue.frame.recycle(frame);
 
     const time_base = c.av_q2d(decoder.stream(.video).time_base);
-    const timestamp = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
+    const timestamp = @as(f64, @floatFromInt(frame.pts)) * time_base;
 
     const front = double_buffer.front();
     uploadPlane(.y, res, front, frame);

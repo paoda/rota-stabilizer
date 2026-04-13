@@ -563,8 +563,6 @@ pub const video = struct {
 
         // timing
         dst_frame.pts = src_frame.pts;
-        dst_frame.pkt_dts = src_frame.pkt_dts;
-        dst_frame.best_effort_timestamp = src_frame.best_effort_timestamp;
 
         dst_frame.colorspace = src_frame.colorspace;
         dst_frame.color_range = src_frame.color_range;
