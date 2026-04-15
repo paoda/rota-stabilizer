@@ -11,7 +11,6 @@ uniform mat3 u_colour_space;
 uniform ivec2 u_resolution;
 
 const float border_radius = 100.0;
-const float border_thickness = 10.0; // px
 
 const float Y_OFFSET = 16.0 / 255.0;
 const float Y_SCALE = 255.0 / (235.0 - 16.0);
@@ -35,6 +34,8 @@ float roundedBoxSDF(vec2 pos, vec2 half_size, float radius) {
 void main() {
     float W = float(u_resolution.x);
     float H = float(u_resolution.y);
+
+    float border_thickness = W * 0.005;
 
     float gameplay_height = W / u_ratio;
     float height_diff = H - gameplay_height;
