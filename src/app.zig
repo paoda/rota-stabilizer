@@ -19,7 +19,6 @@ const render = @import("main.zig").render;
 const uploadPlane = @import("main.zig").uploadPlane;
 
 const startup = @import("main.zig").startup;
-const shutdown = @import("main.zig").shutdown;
 const platform = @import("lib/platform.zig");
 const signal = platform.signal;
 
@@ -71,9 +70,30 @@ const PlaybackSession = struct {
     // tracy output buffer
     buf: [0x100]u8 = undefined,
 
+    fn stop(self: *const @This()) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
+        // TODO: session unique atomic
+        while (!signal.should_quit.load(.monotonic)) {
+            signal.should_quit.store(true, .monotonic);
+            std.atomic.spinLoopHint();
+        }
+
+        self.decoder.queue.pkt.video.interrupt();
+        self.decoder.queue.pkt.audio.interrupt();
+        self.decoder.queue.frame.interrupt();
+    }
+
     pub fn init(allocator: std.mem.Allocator, ui: Ui, path: []const u8) !PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
+
+        // NB: see session.deinit();
+        while (signal.should_quit.load(.monotonic)) {
+            signal.should_quit.store(false, .monotonic);
+            std.atomic.spinLoopHint();
+        }
 
         const hwdec, _ = platform.guessHardware();
         log.debug("guessed {s} hw decode", .{if (hwdec) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no"});
@@ -151,7 +171,7 @@ const PlaybackSession = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.deinit" });
         defer zone.end();
 
-        shutdown(&self.decoder.queue);
+        self.stop();
 
         self.handles.deinit();
         self.manager.deinit(allocator);
@@ -282,9 +302,6 @@ pub const App = struct {
         self.session = .idle;
 
         state.request = null;
-
-        // we don't actually want to exit the program, but we did set should_quit in self.session.deinit
-        while (signal.should_quit.load(.monotonic)) signal.should_quit.store(false, .monotonic);
 
         switch (request) {
             .idle => self.session = .idle,
