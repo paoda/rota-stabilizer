@@ -205,12 +205,12 @@ pub const gui = struct {
         const width, const height = ui_view.get();
         zgui.backend.newFrame(@intCast(width), @intCast(height));
 
-        zgui.showDemoWindow(null);
+        if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
         try drawSetupWindow(state);
 
         if (maybe_video) |vid| {
-            drawVideoWindow(width, vid.render_view, vid.tex_id);
+            drawVideoWindow(@floatFromInt(width), vid.render_view, vid.tex_id);
         }
     }
 
@@ -284,19 +284,28 @@ pub const gui = struct {
         }
     }
 
-    fn drawVideoWindow(window_width: c_int, render_view: Viewport, tex_id: c_uint) void {
+    fn drawVideoWindow(window_width: f32, render_view: Viewport, tex_id: c_uint) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
         const vw, const vh = render_view.get();
         const video_aspect = @as(f32, @floatFromInt(vw)) / @as(f32, @floatFromInt(vh));
 
-        const half_width: f32 = @floatFromInt(@divTrunc(window_width, 2));
-        const half_height = @ceil(half_width / video_aspect);
+        const scale = 0.80;
+        const width = window_width * scale;
+        const height = @ceil(width / video_aspect);
 
-        zgui.setNextWindowSize(.{ .w = half_width, .h = half_height, .cond = .first_use_ever });
+        zgui.setNextWindowSize(.{
+            .w = width,
+            .h = height + zgui.getFrameHeight(),
+            .cond = .first_use_ever,
+        });
+
+        zgui.pushStyleVar2f(.{ .idx = .window_padding, .v = .{ 0.0, 0.0 } });
+        defer zgui.popStyleVar(.{ .count = 1 });
 
         const showing = zgui.begin("Video", .{});
+
         defer zgui.end();
 
         if (!showing) return;
