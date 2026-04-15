@@ -7,6 +7,8 @@ const errify = @import("platform.zig").errify;
 
 const LinearFifo = @import("fifo.zig").LinearFifo(*c.AVPacket, .dynamic);
 
+const signal = @import("platform.zig").signal;
+
 const enc = @import("libav.zig").enc;
 const dec = @import("libav.zig").dec;
 
@@ -25,17 +27,15 @@ pub const packet = struct {
         cond: std.Thread.Condition = .{},
 
         end_of_stream: std.atomic.Value(bool) = .init(false),
-        should_quit: *const std.atomic.Value(bool),
 
         const log = std.log.scoped(.packet_queue);
 
         // INVARIANT: this is an SPSC Queue
 
-        pub fn init(allocator: std.mem.Allocator, name: []const u8, should_quit: *const std.atomic.Value(bool)) Queue {
+        pub fn init(allocator: std.mem.Allocator, name: []const u8) Queue {
             return .{
                 .mutex = .init(@src(), name),
                 .list = LinearFifo.init(allocator),
-                .should_quit = should_quit,
             };
         }
 
@@ -81,7 +81,7 @@ pub const packet = struct {
 
                 while (self.list.readableLength() == 0) {
                     if (self.end_of_stream.load(.monotonic)) return error.end_of_stream;
-                    if (self.should_quit.load(.monotonic)) return error.should_quit;
+                    if (signal.should_quit.load(.monotonic)) return error.should_quit;
 
                     self.mutex.wait(&self.cond);
                 }
@@ -132,7 +132,7 @@ pub const packet = struct {
         const video_queue = &decode.queue.pkt.video;
         const fmt_ctx = &decode.fmt_ctx;
 
-        while (!decode.should_quit.load(.monotonic)) {
+        while (!signal.should_quit.load(.monotonic)) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "read loop" });
             defer zone.end();
 
@@ -361,7 +361,7 @@ pub const audio = struct {
         var pending: ?*c.AVPacket = null;
         defer if (pending) |_| c.av_packet_free(&pending);
 
-        while (!decoder.should_quit.load(.monotonic)) {
+        while (!signal.should_quit.load(.monotonic)) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "decode loop" });
             defer zone.end();
 
@@ -484,7 +484,7 @@ pub const video = struct {
         defer if (pending) |_| c.av_packet_free(&pending);
 
         // TODO: using a fn ptr I think we can deduplicate this massive loop
-        while (!decoder.should_quit.load(.monotonic)) {
+        while (!signal.should_quit.load(.monotonic)) {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "decode loop" });
             defer z.end();
 
@@ -623,7 +623,6 @@ pub const FrameQueue = struct {
     write_idx: usize,
 
     end_of_stream: std.atomic.Value(bool) = .init(false),
-    should_quit: *const std.atomic.Value(bool),
 
     mutex: TracyMutex,
     cond: std.Thread.Condition = .{},
@@ -636,7 +635,7 @@ pub const FrameQueue = struct {
 
     // INVARIANT: This is an SPSC Queue
 
-    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), opt: Resolution) Error!FrameQueue {
+    pub fn init(allocator: std.mem.Allocator, opt: Resolution) Error!FrameQueue {
         comptime std.debug.assert(std.math.isPowerOfTwo(capacity));
 
         const frames = try allocator.alloc(c.AVFrame, capacity);
@@ -661,7 +660,6 @@ pub const FrameQueue = struct {
 
         return .{
             .mutex = .init(@src(), "FrameQueue"),
-            .should_quit = should_quit,
             .slot = .{ .frame = frames, .state = states },
             .read_idx = 0,
             .write_idx = 0,
@@ -690,7 +688,7 @@ pub const FrameQueue = struct {
             defer z.end();
 
             while (self.slot.state[idx] != .empty) {
-                if (self.should_quit.load(.monotonic)) return error.early_exit;
+                if (signal.should_quit.load(.monotonic)) return error.early_exit;
                 self.mutex.wait(&self.cond);
             }
         }
@@ -731,7 +729,7 @@ pub const FrameQueue = struct {
 
             while (self.slot.state[idx] != .in_use) {
                 if (self.end_of_stream.load(.monotonic)) return null;
-                if (self.should_quit.load(.monotonic)) return null;
+                if (signal.should_quit.load(.monotonic)) return null;
 
                 self.mutex.wait(&self.cond);
             }
@@ -812,8 +810,6 @@ pub const Decoder = struct {
 
     audio_clock: ?AudioClock,
 
-    should_quit: *const std.atomic.Value(bool),
-
     // Important Information
     colour_space: c.AVColorSpace,
     resolution: Resolution,
@@ -834,12 +830,15 @@ pub const Decoder = struct {
         }
     };
 
-    const Handles = struct {
+    pub const Handles = struct {
         pkt: std.Thread,
         audio: ?std.Thread,
         video: std.Thread,
 
         pub fn deinit(self: Handles) void {
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Handles.deinit" });
+            defer zone.end();
+
             self.pkt.join();
             self.video.join();
 
@@ -849,7 +848,7 @@ pub const Decoder = struct {
 
     const log = std.log.scoped(.decode);
 
-    pub fn init(allocator: std.mem.Allocator, should_quit: *const std.atomic.Value(bool), hw_device: ?c.AVHWDeviceType, path: []const u8, headless: bool) !Decoder {
+    pub fn init(allocator: std.mem.Allocator, hw_device: ?c.AVHWDeviceType, path: []const u8, headless: bool) !Decoder {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
@@ -867,24 +866,22 @@ pub const Decoder = struct {
             else => {},
         }
 
-        var frame_queue = try FrameQueue.init(allocator, should_quit, .{
+        var frame_queue = try FrameQueue.init(allocator, .{
             .width = video_ctx.inner.?.width,
             .height = video_ctx.inner.?.height,
         });
         errdefer frame_queue.deinit(allocator);
 
-        var video_queue = PacketQueue.init(allocator, "Video PacketQueue", should_quit);
+        var video_queue = PacketQueue.init(allocator, "Video PacketQueue");
         errdefer video_queue.deinit(allocator);
 
-        var audio_queue = PacketQueue.init(allocator, "Audio PacketQueue", should_quit);
+        var audio_queue = PacketQueue.init(allocator, "Audio PacketQueue");
         errdefer audio_queue.deinit(allocator);
 
         const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx);
         errdefer if (audio_clock) |clock| clock.deinit();
 
         return .{
-            .should_quit = should_quit,
-
             .fmt_ctx = fmt_ctx,
             .video_ctx = video_ctx,
             .audio_ctx = audio_ctx,
@@ -917,6 +914,9 @@ pub const Decoder = struct {
     }
 
     pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Decoder.deinit" });
+        defer zone.end();
+
         if (self.audio_clock) |clock| clock.deinit();
         self.queue.deinit(allocator);
 

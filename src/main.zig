@@ -1,6 +1,5 @@
 const std = @import("std");
 const gl = @import("gl");
-const clap = @import("clap");
 const tracy = @import("tracy");
 const zgui = @import("zgui");
 
@@ -18,6 +17,8 @@ const Viewport = @import("lib.zig").Viewport;
 const FbStack = @import("lib.zig").FbStack;
 const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const PixelBufferPool = GpuResourceManager.PixelBufferPool;
+const Ui = @import("lib/platform.zig").Ui;
+const App = @import("app.zig").App;
 
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
@@ -36,10 +37,10 @@ const UV_BPP = @import("lib.zig").UV_BPP;
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 var zoom: f32 = 1.0;
 
-const startup = struct {
-    const preview_window: Resolution = .{ .width = 1280, .height = 720 };
-    const headless_output: Resolution = .{ .width = 1920, .height = 1080 };
-    const render_target: Resolution = .{ .width = 1920, .height = 1080 };
+pub const startup = struct {
+    pub const ui_window: Resolution = .{ .width = 1600, .height = 900 };
+    pub const encode_target: Resolution = .{ .width = 1920, .height = 1080 };
+    pub const render_target: Resolution = .{ .width = 1920, .height = 1080 };
 };
 
 pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
@@ -55,394 +56,205 @@ pub fn main() !void {
     var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
     const allocator = tracy_alloc.allocator();
 
-    const params = comptime clap.parseParamsComptime(
-        \\-h, --help            Display this help and exit.
-        \\-i, --input <str>     Path to input file.
-        \\<str>                 Path to output file.
-        \\
-    );
-
-    var diag: clap.Diagnostic = .{};
-    var cli = clap.parse(clap.Help, &params, clap.parsers.default, .{
-        .diagnostic = &diag,
-        .allocator = allocator,
-    }) catch |err| return diag.reportToFile(.stderr(), err);
-    defer cli.deinit();
-
-    if (cli.args.help != 0) return clap.helpToFile(.stdout(), clap.Help, &params, .{});
-    const is_encoding = cli.positionals[0] != null;
-
-    const ui = blk: {
-        if (!is_encoding) break :blk try platform.createWindow(allocator, startup.preview_window);
-        break :blk try platform.createHeadless(allocator, startup.headless_output);
-    };
+    const ui = try Ui.init(allocator, startup.ui_window);
     defer ui.deinit();
-
-    const src_path = cli.args.input orelse return error.missing_input_path;
-
-    const hw_decode, const hw_encode = platform.guessHardware();
-    // const hw_decode, const hw_encode = @as(struct { ?c_uint, ?c_uint }, .{ null, null });
-    log.debug("guessed {s} hw decode and {s} hw encode support", .{
-        if (hw_decode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
-        if (hw_encode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
-    });
-
-    var decoder = try Decoder.init(allocator, &signal.should_quit, hw_decode, src_path, is_encoding);
-    defer decoder.deinit(allocator);
-
-    // -- opengl --
-    log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
-    log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
-
-    gl.Enable(gl.BLEND);
-    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.Disable(gl.FRAMEBUFFER_SRGB);
-    _ = c.SDL_GL_SetSwapInterval(1);
-
-    const double_buffer = blk: {
-        const ptr = try allocator.create(DoubleBuffer);
-        ptr.* = .{};
-
-        break :blk ptr;
-    };
-    defer allocator.destroy(double_buffer);
 
     var ui_view: Viewport = .default;
     const ui_size = try ui.windowSize();
     try ui_view.push(ui_size[0], ui_size[1]);
 
-    var render_view: Viewport = .default;
-    try render_view.push(startup.render_target.width, startup.render_target.height);
-
-    var encode_view: Viewport = .default;
-    if (!is_encoding) {
-        const width, const height = render_view.get();
-        try encode_view.push(width, height);
-    } else {
-        try encode_view.push(startup.headless_output.width, startup.headless_output.height);
-    }
-
-    var camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
-    var fbs: FbStack = .default;
-
-    var res = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
-    defer res.deinit(allocator);
-
-    const angle_calc = try AngleCalc.init(res, camera);
-    // -- opengl end --
-
-    const frame_rate = decoder.framerate();
-    const frame_period = 1.0 / c.av_q2d(frame_rate);
-
-    const should_write = try checkFile(cli.positionals[0]);
-    if (!should_write) return error.wont_overwrite;
-
-    const handles = try decoder.spawn(cli.positionals[0]);
-    defer handles.deinit();
+    // const should_write = try checkFile(cli.positionals[0]);
+    // if (!should_write) return error.wont_overwrite;
 
     try signal.setupHandler();
 
-    if (cli.positionals[0]) |dst_path| {
-        // Initialize encoder
-        var encoder = try Encoder.init(.{
-            .encode_view = encode_view,
-            .decoder = &decoder,
-        }, hw_encode, dst_path);
-        defer encoder.deinit();
+    // if (cli.positionals[0]) |dst_path| {
+    //     // Initialize encoder
+    //     var encoder = try Encoder.init(.{
+    //         .encode_view = encode_view,
+    //         .decoder = &decoder,
+    //     }, hw_encode, dst_path);
+    //     defer encoder.deinit();
 
-        const render_start_time = c.SDL_GetPerformanceCounter();
-        const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
+    //     const render_start_time = c.SDL_GetPerformanceCounter();
+    //     const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
 
-        const video_stream = decoder.stream(.video);
-        const audio_stream = decoder.stream(.audio);
+    //     const video_stream = decoder.stream(.video);
+    //     const audio_stream = decoder.stream(.audio);
 
-        const estimated_frames: usize = blk: {
-            if (video_stream.nb_frames > 0) break :blk @intCast(video_stream.nb_frames);
-            if (decoder.fmt_ctx.ptr().duration <= 0) break :blk 0;
+    //     const estimated_frames: usize = blk: {
+    //         if (video_stream.nb_frames > 0) break :blk @intCast(video_stream.nb_frames);
+    //         if (decoder.fmt_ctx.ptr().duration <= 0) break :blk 0;
 
-            // estimate from duration
-            const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
-            break :blk @intFromFloat(duration_secs * c.av_q2d(frame_rate));
-        };
+    //         // estimate from duration
+    //         const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
+    //         break :blk @intFromFloat(duration_secs * c.av_q2d(frame_rate));
+    //     };
 
-        // Initialize progress
-        var progress_buffer: [256]u8 = undefined;
-        const progress_node = std.Progress.start(.{
-            .root_name = "Encoding",
-            .estimated_total_items = estimated_frames,
-            .draw_buffer = &progress_buffer,
-        });
-        defer progress_node.end();
+    //     // Initialize progress
+    //     var progress_buffer: [256]u8 = undefined;
+    //     const progress_node = std.Progress.start(.{
+    //         .root_name = "Encoding",
+    //         .estimated_total_items = estimated_frames,
+    //         .draw_buffer = &progress_buffer,
+    //     });
+    //     defer progress_node.end();
 
-        try res.setupEncodingTargets(encode_view, encoder._frame);
+    //     try res.setupEncodingTargets(encode_view, encoder._frame);
 
-        var upload_buffer: UploadBuffer = .default;
-        var frame_count: u64 = 0;
+    //     var upload_buffer: UploadBuffer = .default;
+    //     var frame_count: u64 = 0;
 
-        _ = try preload(res, &decoder, double_buffer);
-        try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
-        try writeToNv12Tex(res, &encode_view, fbs, camera);
+    //     _ = try preload(res, &decoder, double_buffer);
+    //     try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
+    //     try writeToNv12Tex(res, &encode_view, fbs, camera);
 
-        const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
+    //     const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
 
-        while (!signal.should_quit.load(.monotonic)) {
-            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "encode loop" });
-            defer zone.end();
+    //     while (!signal.should_quit.load(.monotonic)) {
+    //         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "encode loop" });
+    //         defer zone.end();
 
-            // Process any pending audio packets (remux to output)
-            while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
-                try encoder.writeAudioPacket(audio_stream, audio_pkt);
+    //         // Process any pending audio packets (remux to output)
+    //         while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
+    //             try encoder.writeAudioPacket(audio_stream, audio_pkt);
 
-                var pkt: ?*c.AVPacket = audio_pkt;
-                c.av_packet_free(&pkt);
-            }
+    //             var pkt: ?*c.AVPacket = audio_pkt;
+    //             c.av_packet_free(&pkt);
+    //         }
 
-            if (decoder.queue.frame.pop()) |frame| {
-                defer decoder.queue.frame.recycle(frame);
-                defer double_buffer.swap();
-                defer frame_count += 1; // increment after frame is sent to the GPU
+    //         if (decoder.queue.frame.pop()) |frame| {
+    //             defer decoder.queue.frame.recycle(frame);
+    //             defer double_buffer.swap();
+    //             defer frame_count += 1; // increment after frame is sent to the GPU
 
-                const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
-                defer z.end();
+    //             const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
+    //             defer z.end();
 
-                const back = double_buffer.back();
-                uploadPlane(.y, res, back, frame);
-                uploadPlane(.uv, res, back, frame);
+    //             const back = double_buffer.back();
+    //             uploadPlane(.y, res, back, frame);
+    //             uploadPlane(.uv, res, back, frame);
 
-                try render(&render_view, &fbs, back.flip(), angle_calc, res, camera);
-                try writeToNv12Tex(res, &encode_view, fbs, camera);
+    //             try render(&render_view, &fbs, back.flip(), angle_calc, res, camera);
+    //             try writeToNv12Tex(res, &encode_view, fbs, camera);
 
-                const width, const height = encode_view.get();
+    //             const width, const height = encode_view.get();
 
-                {
-                    const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
-                    defer pbo_z.end();
+    //             {
+    //                 const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
+    //                 defer pbo_z.end();
 
-                    const idx = upload_buffer.current();
+    //                 const idx = upload_buffer.current();
 
-                    // read Y and UV into single contiguous PBO with linesize padding
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(idx));
-                    defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+    //                 // read Y and UV into single contiguous PBO with linesize padding
+    //                 gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(idx));
+    //                 defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
-                    {
-                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
-                        defer read_z.end();
+    //                 {
+    //                     const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
+    //                     defer read_z.end();
 
-                        gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
-                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.y));
-                        gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
-                    }
+    //                     gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
+    //                     gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.y));
+    //                     gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
+    //                 }
 
-                    {
-                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
-                        defer read_z.end();
+    //                 {
+    //                     const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
+    //                     defer read_z.end();
 
-                        // after y plane in memory
-                        const uv_offset: usize = @intCast(linesize.y * height);
-                        gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
-                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.uv));
-                        gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
-                    }
+    //                     // after y plane in memory
+    //                     const uv_offset: usize = @intCast(linesize.y * height);
+    //                     gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
+    //                     gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.uv));
+    //                     gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
+    //                 }
 
-                    gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
-                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, fbs.get());
+    //                 gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
+    //                 gl.BindFramebuffer(gl.READ_FRAMEBUFFER, fbs.get());
 
-                    {
-                        const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
-                        defer flush_z.end();
+    //                 {
+    //                     const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
+    //                     defer flush_z.end();
 
-                        gl.Flush(); // trigger readback immediately
-                    }
+    //                     gl.Flush(); // trigger readback immediately
+    //                 }
 
-                    if (upload_buffer.next()) |upload| blk: {
-                        const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse break :blk;
-                        defer unmapNv12Frame(res, upload.id);
+    //                 if (upload_buffer.next()) |upload| blk: {
+    //                     const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse break :blk;
+    //                     defer unmapNv12Frame(res, upload.id);
 
-                        try encoder.encodeNv12Frame(y, uv, upload.pts);
-                    }
+    //                     try encoder.encodeNv12Frame(y, uv, upload.pts);
+    //                 }
+    //             }
+
+    //             upload_buffer.advance(frame.pts);
+
+    //             // Update progress
+    //             progress_node.setCompletedItems(frame_count);
+    //         } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
+    //             defer shutdown(&decoder.queue);
+    //             defer std.Progress.setStatus(.success);
+
+    //             const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
+    //             defer z.end();
+
+    //             upload_buffer.skip(); // to access the pending frames
+
+    //             while (upload_buffer.flush()) |upload| {
+    //                 const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse continue;
+    //                 defer unmapNv12Frame(res, upload.id);
+
+    //                 try encoder.encodeNv12Frame(y, uv, upload.pts);
+    //             }
+
+    //             // Calculate and display final stats
+    //             const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
+    //             const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
+    //             const speed = video_duration / elapsed;
+
+    //             break log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
+    //         }
+    //     }
+
+    var app: App = .default;
+    defer app.deinit(allocator);
+
+    const state = try allocator.create(platform.gui.State);
+    defer allocator.destroy(state);
+
+    state.* = .default;
+
+    while (!signal.should_quit.load(.monotonic)) {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
+        defer zone.end();
+
+        {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "query input" });
+            defer z.end();
+
+            var event: c.SDL_Event = undefined;
+            while (c.SDL_PollEvent(&event)) {
+                _ = zgui.backend.processEvent(&event);
+
+                switch (event.type) {
+                    c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
+                    c.SDL_EVENT_WINDOW_RESIZED => ui_view.reset(event.window.data1, event.window.data2),
+                    else => {},
                 }
-
-                upload_buffer.advance(frame.pts);
-
-                // Update progress
-                progress_node.setCompletedItems(frame_count);
-            } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
-                defer shutdown(&decoder.queue);
-                defer std.Progress.setStatus(.success);
-
-                const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
-                defer z.end();
-
-                upload_buffer.skip(); // to access the pending frames
-
-                while (upload_buffer.flush()) |upload| {
-                    const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse continue;
-                    defer unmapNv12Frame(res, upload.id);
-
-                    try encoder.encodeNv12Frame(y, uv, upload.pts);
-                }
-
-                // Calculate and display final stats
-                const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
-                const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
-                const speed = video_duration / elapsed;
-
-                break log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
             }
         }
-    } else {
-        // ===== PLAYBACK MODE =====
-        const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
-        const time_base = c.av_q2d(decoder.stream(.video).time_base);
 
-        const start_time = preload(res, &decoder, double_buffer) catch return;
-        log.debug("video start time: {d}s", .{start_time});
+        gl.ClearColor(0, 0, 0, 1.0);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
 
-        try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
+        try app.poll(allocator, ui, state);
+        try app.run();
+
+        try platform.gui.draw(state, ui_view, app.video());
+        zgui.backend.draw();
+
         try ui.swap();
-
-        try audio_clock.start(start_time);
-
-        const refresh_rate = ui.refreshRate() catch 60.0;
-
-        const lookahead = (1.0 / refresh_rate) / 2.0;
-        const delay_threshold = @max(0.010, frame_period * 1.25);
-
-        log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
-        log.debug("display refresh rate: {d:.2}Hz (lookahead: {d:.2}ms)", .{ refresh_rate, lookahead * std.time.ms_per_s });
-        log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
-
-        tracy.plotConfig(.{ .name = "A/V Sync Drift (ms)" });
-
-        var next_frame: ?*c.AVFrame = null;
-        var should_render: bool = true;
-
-        var buf: [0x100]u8 = undefined;
-
-        while (!signal.should_quit.load(.monotonic)) {
-            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
-            defer zone.end();
-
-            {
-                const z = tracy.Zone.begin(.{ .src = @src(), .name = "query input" });
-                defer z.end();
-
-                var event: c.SDL_Event = undefined;
-                while (c.SDL_PollEvent(&event)) {
-                    _ = zgui.backend.processEvent(&event);
-
-                    switch (event.type) {
-                        c.SDL_EVENT_QUIT => shutdown(&decoder.queue),
-                        c.SDL_EVENT_MOUSE_WHEEL => {
-                            const wheel_delta = event.wheel.y * 0.1;
-                            camera.adjustZoom(wheel_delta);
-
-                            log.debug("Zoom: {d:.2}x", .{camera.zoom});
-                        },
-                        c.SDL_EVENT_WINDOW_RESIZED => {
-                            ui_view = .default;
-                            ui_view.push(event.window.data1, event.window.data2) catch unreachable;
-                        },
-                        c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
-                            c.SDL_SCANCODE_M => try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute(),
-                            c.SDL_SCANCODE_EQUALS => {
-                                zoom += 0.05;
-                                log.debug("zoom: {d:.2}", .{zoom});
-                            },
-                            c.SDL_SCANCODE_MINUS => {
-                                zoom -= 0.05;
-                                log.debug("zoom: {d:.2}", .{zoom});
-                            },
-                            c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
-                            else => {},
-                        },
-                        else => {},
-                    }
-                }
-            }
-
-            while (true) { // necessary for when Display Hz !== Video FPS
-                if (next_frame == null) {
-                    if (decoder.queue.frame.tryPop()) |next| {
-                        next_frame = next;
-                        tracy.frameMarkStart("video timing");
-                    }
-                }
-
-                if (next_frame) |frame| {
-                    const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
-                    defer z.end();
-
-                    std.debug.assert(frame.format == c.AV_PIX_FMT_NV12);
-
-                    const back = double_buffer.back();
-                    const next_frame_time = @as(f64, @floatFromInt(frame.pts)) * time_base;
-                    const drop_diff_s = next_frame_time - audio_clock.seconds_passed();
-
-                    if (drop_diff_s < -delay_threshold) {
-                        const msg = try std.fmt.bufPrint(
-                            &buf,
-                            "dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}",
-                            .{ drop_diff_s, -(drop_diff_s - next_frame_time), next_frame_time },
-                        );
-
-                        tracy.message(.{ .text = msg });
-                        tracy.frameMarkEnd("video timing");
-
-                        decoder.queue.frame.recycle(frame);
-                        next_frame = null;
-                        continue;
-                    }
-
-                    const already_uploaded = @abs(next_frame_time - back.displayTime()) < std.math.floatEps(f64);
-
-                    if (!already_uploaded) {
-                        tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(decoder.queue.frame.len()) } });
-
-                        const upload_z = tracy.Zone.begin(.{ .src = @src(), .name = "upload next frame" });
-                        defer upload_z.end();
-
-                        // this is a new frame, upload it to the BACK buffer
-                        uploadPlane(.y, res, back, frame);
-                        uploadPlane(.uv, res, back, frame);
-                        back.setDisplayTime(next_frame_time);
-                    }
-
-                    // after upload, recalculate to check if it's time to swap
-                    const audio_time = audio_clock.seconds_passed();
-                    const diff_s = next_frame_time - audio_time;
-
-                    if (diff_s - lookahead <= 0) { // Time to display the newer frame!
-                        tracy.plot(.{ .name = "Audio Time (s)", .value = .{ .f64 = audio_time } });
-                        tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
-                        tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
-                        tracy.frameMarkEnd("video timing");
-
-                        double_buffer.swap();
-
-                        decoder.queue.frame.recycle(frame);
-                        next_frame = null;
-                        should_render = true;
-                        continue;
-                    }
-                }
-
-                break;
-            }
-
-            if (should_render) {
-                try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
-                should_render = false;
-            }
-
-            gl.ClearColor(0, 0, 0, 1.0);
-            gl.Clear(gl.COLOR_BUFFER_BIT);
-
-            try platform.gui.draw(res, ui_view, render_view);
-            zgui.backend.draw();
-
-            try ui.swap();
-        }
     }
 }
 
@@ -454,7 +266,7 @@ const Id = enum(usize) {
     blur,
 };
 
-fn render(
+pub fn render(
     view: *Viewport,
     fbs: *FbStack,
     front: DoubleBuffer.Buffer,
@@ -658,7 +470,7 @@ fn blur(
 
 const Nv12Tex = struct { y: c_uint, uv: c_uint };
 
-const AngleCalc = struct {
+pub const AngleCalc = struct {
     res: *const GpuResourceManager,
     colour_matrix: [*]const [9]f32,
 
@@ -704,7 +516,7 @@ const AngleCalc = struct {
     }
 };
 
-const Camera = struct {
+pub const Camera = struct {
     view_to_clip: Mat2,
 
     video_resolution: Resolution,
@@ -981,7 +793,10 @@ fn checkFile(maybe_path: ?[]const u8) !bool {
     return std.ascii.eqlIgnoreCase(answer, "y");
 }
 
-fn shutdown(queues: *Decoder.Queues) void {
+pub fn shutdown(queues: *Decoder.Queues) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
     while (!signal.should_quit.load(.monotonic)) {
         signal.should_quit.store(true, .monotonic);
         std.atomic.spinLoopHint();
@@ -993,7 +808,7 @@ fn shutdown(queues: *Decoder.Queues) void {
     queues.frame.interrupt();
 }
 
-fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) !f64 {
+pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) !f64 {
     const FrameQueue = @import("lib/codec.zig").FrameQueue;
 
     const zone = tracy.Zone.begin(.{ .src = @src() });

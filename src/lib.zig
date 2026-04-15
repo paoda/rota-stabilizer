@@ -255,6 +255,9 @@ pub const GpuResourceManager = struct {
     }
 
     pub fn deinit(self: *GpuResourceManager, allocator: std.mem.Allocator) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "GpuResourceManager.deinit" });
+        defer zone.end();
+
         self.vao.deinit();
         self.vbo.deinit();
         self.fbo.deinit();
@@ -815,6 +818,11 @@ pub const Viewport = struct {
         self.idx += 1;
 
         gl.Viewport(0, 0, width, height);
+    }
+
+    pub fn reset(self: *Viewport, width: c_int, height: c_int) void {
+        self.* = .default;
+        self.push(width, height) catch unreachable; // cap == 0
     }
 
     pub fn get(self: Viewport) struct { c_int, c_int } {

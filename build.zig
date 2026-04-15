@@ -27,6 +27,9 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
+    const nfd = b.dependency("nfd", .{ .target = target, .optimize = optimize });
+    exe_mod.addImport("nfd", nfd.module("nfd"));
+
     const sdl = switch (target.result.os.tag) {
         .macos => blk: {
             const result = try std.process.Child.run(.{
