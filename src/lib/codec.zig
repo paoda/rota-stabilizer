@@ -1071,7 +1071,12 @@ pub const Encoder = struct {
                 _ = try libav.err(c.av_frame_get_buffer(ptr, 32));
                 break :blk frame;
             },
-            ._hw = if (codec.hw) |_| .{ .frame = try AvFrame.init() } else null,
+            ._hw = blk: {
+                if (codec.hw == null) break :blk null;
+                const frame = try AvFrame.init();
+
+                break :blk .{ .frame = frame };
+            },
             .sws_ctx = blk: {
                 const ptr: ?*c.SwsContext = c.sws_getContext(
                     width,

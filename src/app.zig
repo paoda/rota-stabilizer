@@ -308,8 +308,9 @@ pub const App = struct {
             .encode => |_| self.session = .{
                 .encode = @panic("TODO: call EncodeSession.init"),
             },
-            .playback => |path| self.session = .{
-                .playback = try PlaybackSession.init(allocator, ui, path),
+            .playback => |path| {
+                const session = try PlaybackSession.init(allocator, ui, path);
+                self.session = .{ .playback = session };
             },
         }
     }
