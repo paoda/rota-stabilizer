@@ -114,6 +114,7 @@ const PlaybackSession = struct {
             manager,
             camera,
         );
+        try ui.swap();
 
         try decoder.audio_clock.?.start(start_time);
 

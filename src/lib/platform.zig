@@ -271,12 +271,12 @@ pub const gui = struct {
         zgui.sameLine(.{});
 
         {
-            const is_possible = input_path.len != 0 and output_path.len != 0;
+            const is_possible = input_path.len != 0 and output_path.len != 0 and false;
 
             if (!is_possible) zgui.beginDisabled(.{});
             defer if (!is_possible) zgui.endDisabled();
 
-            if (zgui.button("Start Encode", .{})) {
+            if (zgui.button("Start Encode (TODO)", .{})) {
                 state.request = .{
                     .encode = .{ .src_path = input_path, .dst_path = output_path },
                 };
