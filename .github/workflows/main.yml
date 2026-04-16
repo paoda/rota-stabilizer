@@ -30,7 +30,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt update
-          sudo apt install -y libavcodec-dev libavformat-dev libswscale-dev libswresample-dev libavutil-dev libavfilter-dev
+          sudo apt install -y \
+            libavcodec-dev \
+            libavformat-dev \
+            libswscale-dev \
+            libswresample-dev \
+            libavutil-dev \
+            libgtk-3-dev
 
       - name: prepare-macos
         if: runner.os == 'macOS'
