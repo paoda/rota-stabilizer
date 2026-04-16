@@ -25,7 +25,7 @@ Alternatively:
 
 [Windows (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-windows-latest.zip>)
 
-[Linux (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-ubuntu-latest.zip>)
+[Linux Flatpak (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-flatpak.zip>)
 
 [macOS (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-macos-latest.zip>)
 

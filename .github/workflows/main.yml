@@ -12,51 +12,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{matrix.os}}
-    steps:
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - run: git config --global core.autocrlf false
-
-      - uses: actions/checkout@v4
-
-      - name: prepare-linux
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            libavcodec-dev \
-            libavformat-dev \
-            libswscale-dev \
-            libswresample-dev \
-            libavutil-dev \
-            libgtk-3-dev
-
-      - name: prepare-macos
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg
-
-      - name: build
-        if: runner.os != 'macOS'
-        run: zig build -Doptimize=ReleaseSafe -Dcpu=x86_64_v3
-
-      # TODO: find a way to pass the equivalent of -Dcpu=x86_64_v3
-      - name: build-macos
-        if: runner.os == 'macOS'
-        run: zig build -Doptimize=ReleaseSafe -Dcpu=apple_m1
-
-      - name: upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: rota-stabilizer-${{matrix.os}}
-          path: zig-out
-
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -67,3 +22,53 @@ jobs:
       - uses: actions/checkout@v4
 
       - run: zig fmt --check src/**/*.zig build.zig build.zig.zon
+  build-native:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            cpu_flag: "-Dcpu=apple_m1"
+          - os: windows-latest
+            cpu_flag: "-Dcpu=x86_64_v3"
+    runs-on: ${{matrix.os}}
+    steps:
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+
+      - name: prepare-macos
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: build
+        run: zig build -Doptimize=ReleaseSafe ${{ matrix.cpu_flag }}
+
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: rota-stabilizer-${{matrix.os}}
+          path: zig-out
+
+  build-flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: rota-stabilizer.flatpak
+          manifest-path: moe.paoda.rota-stabilizer.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Upload Flatpak Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rota-stabilizer-flatpak
+          path: rota-stabilizer.flatpak
