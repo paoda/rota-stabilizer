@@ -10,7 +10,7 @@ const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
-const AV_HWDEVICE_TYPE_AMF_FOR_NON_FREE: c_int = 13;
+const AV_HWDEVICE_TYPE_AMF: c_int = if (@hasDecl(c, "AV_HWDEVICE_TYPE_AMF")) c.AV_HWDEVICE_TYPE_AMF else 13;
 
 pub const HwDeviceType = enum(c.AVHWDeviceType) {
     VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
@@ -18,7 +18,7 @@ pub const HwDeviceType = enum(c.AVHWDeviceType) {
     QSV = c.AV_HWDEVICE_TYPE_QSV,
     VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
     D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
-    AMF = AV_HWDEVICE_TYPE_AMF_FOR_NON_FREE,
+    AMF = AV_HWDEVICE_TYPE_AMF,
     Software = c.AV_HWDEVICE_TYPE_NONE,
 };
 
