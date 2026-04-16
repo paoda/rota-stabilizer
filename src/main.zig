@@ -224,6 +224,7 @@ pub fn main() !void {
     defer allocator.destroy(state);
 
     state.* = .default;
+    state.defaultHardware();
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });

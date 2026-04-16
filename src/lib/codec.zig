@@ -848,7 +848,7 @@ pub const Decoder = struct {
 
     const log = std.log.scoped(.decode);
 
-    pub fn init(allocator: std.mem.Allocator, hw_device: ?c.AVHWDeviceType, path: []const u8, headless: bool) !Decoder {
+    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, path: []const u8, headless: bool) !Decoder {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 

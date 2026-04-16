@@ -229,7 +229,7 @@ pub const dec = struct {
 
     pub const AvCodecContext = struct {
         const Kind = enum { video, audio };
-        const Options = struct { dev_type: ?c.AVHWDeviceType = null };
+        const Options = struct { dev_type: c.AVHWDeviceType = c.AV_HWDEVICE_TYPE_NONE };
 
         inner: ?*c.AVCodecContext,
         stream: c_int,
@@ -241,9 +241,9 @@ pub const dec = struct {
             const self = try allocator.create(@This());
 
             if (kind == .video) blk: {
-                const device_type = opt.dev_type orelse break :blk;
+                if (opt.dev_type == c.AV_HWDEVICE_TYPE_NONE) break :blk;
 
-                self.initHardware(fmt_ctx, device_type) catch {
+                self.initHardware(fmt_ctx, opt.dev_type) catch {
                     break :blk log.err("failed to set up hardware device, defaulting to software", .{});
                 };
 

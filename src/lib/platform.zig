@@ -10,6 +10,16 @@ const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
+pub const HwDeviceType = enum(c.AVHWDeviceType) {
+    VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+    CUDA = c.AV_HWDEVICE_TYPE_CUDA,
+    QSV = c.AV_HWDEVICE_TYPE_QSV,
+    VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
+    D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
+    AMF = c.AV_HWDEVICE_TYPE_AMF,
+    Software = c.AV_HWDEVICE_TYPE_NONE,
+};
+
 const c = @import("../lib.zig").c;
 
 pub var gl_procs: gl.ProcTable = undefined;
@@ -130,26 +140,28 @@ pub inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(
     };
 }
 
-pub fn guessHardware() struct { ?c.AVHWDeviceType, ?c.AVHWDeviceType } {
-    const vendor = std.mem.span(gl.GetString(gl.VENDOR) orelse return .{ null, null });
+pub fn guessHardware() struct { HwDeviceType, HwDeviceType } {
+    const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
 
     const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
-    if (is_apple) return .{ c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
+    if (is_apple) return .{ .VideoToolbox, .VideoToolbox };
 
     const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
-    if (is_nvidia) return .{ c.AV_HWDEVICE_TYPE_CUDA, c.AV_HWDEVICE_TYPE_CUDA };
+    if (is_nvidia) return .{ .CUDA, .CUDA };
 
     const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
-    if (is_intel) return .{ c.AV_HWDEVICE_TYPE_QSV, c.AV_HWDEVICE_TYPE_QSV };
+    if (is_intel) return .{ .QSV, .QSV };
 
-    const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null or std.mem.indexOf(u8, vendor, "ATI") != null;
-    if (is_amd) return switch (builtin.os.tag) {
-        .linux => .{ c.AV_HWDEVICE_TYPE_VAAPI, c.AV_HWDEVICE_TYPE_VAAPI },
-        .windows => .{ c.AV_HWDEVICE_TYPE_D3D11VA, c.AV_HWDEVICE_TYPE_AMF },
+    const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null;
+    const is_ati = std.mem.indexOf(u8, vendor, "ATI") != null;
+
+    if (is_amd or is_ati) return switch (builtin.os.tag) {
+        .linux => .{ .VAAPI, .VAAPI },
+        .windows => .{ .D3D11VA, .AMF },
         else => unreachable,
     };
 
-    return .{ null, null };
+    return .{ .Software, .Software };
 }
 
 pub const signal = struct {
@@ -190,12 +202,21 @@ pub const gui = struct {
             .input_path = [_:0]u8{0} ** std.fs.max_path_bytes,
             .output_path = [_:0]u8{0} ** std.fs.max_path_bytes,
             .request = null,
+            .hw_dec = .Software,
+            .hw_enc = .Software,
         };
 
         input_path: [std.fs.max_path_bytes:0]u8,
         output_path: [std.fs.max_path_bytes:0]u8,
 
+        hw_dec: HwDeviceType,
+        hw_enc: HwDeviceType,
+
         request: ?Request,
+
+        pub fn defaultHardware(self: *State) void {
+            self.hw_dec, self.hw_enc = guessHardware();
+        }
     };
 
     pub fn draw(state: *State, ui_view: Viewport, maybe_video: ?VideoContext) !void {
@@ -207,6 +228,7 @@ pub const gui = struct {
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
+        drawCodecSetup(state);
         try drawSetupWindow(state);
 
         if (maybe_video) |vid| {
@@ -214,12 +236,17 @@ pub const gui = struct {
         }
     }
 
-    // FIXME: does zig not handle this?
-    fn setPath(dst: *[std.fs.max_path_bytes:0]u8, src: [:0]const u8) void {
-        const payload = @min(src.len, std.fs.max_path_bytes - 1);
+    fn drawCodecSetup(state: *State) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
 
-        @memset(dst[0..], 0);
-        @memcpy(dst[0..payload], src[0..payload]);
+        const showing = zgui.begin("Codec Setup", .{ .flags = .{ .always_auto_resize = true } });
+        defer zgui.end();
+
+        if (!showing) return;
+
+        _ = zgui.comboFromEnum("Decoder", &state.hw_dec);
+        _ = zgui.comboFromEnum("Encoder", &state.hw_enc);
     }
 
     fn drawSetupWindow(state: *State) !void {
@@ -330,5 +357,13 @@ pub const gui = struct {
             .uv0 = .{ 0.0, 1.0 },
             .uv1 = .{ 1.0, 0.0 },
         });
+    }
+
+    // FIXME: does zig not handle this?
+    fn setPath(dst: *[std.fs.max_path_bytes:0]u8, src: [:0]const u8) void {
+        const payload = @min(src.len, std.fs.max_path_bytes - 1);
+
+        @memset(dst[0..], 0);
+        @memcpy(dst[0..payload], src[0..payload]);
     }
 };

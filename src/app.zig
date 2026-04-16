@@ -85,7 +85,7 @@ const PlaybackSession = struct {
         self.decoder.queue.frame.interrupt();
     }
 
-    pub fn init(allocator: std.mem.Allocator, ui: Ui, path: []const u8) !PlaybackSession {
+    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, ui: Ui, path: []const u8) !PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
 
@@ -95,13 +95,16 @@ const PlaybackSession = struct {
             std.atomic.spinLoopHint();
         }
 
-        const hwdec, _ = platform.guessHardware();
-        log.debug("guessed {s} hw decode", .{if (hwdec) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no"});
+        const hw_device_name = blk: {
+            if (hw_device == c.AV_HWDEVICE_TYPE_NONE) break :blk "software";
+            break :blk std.mem.span(c.av_hwdevice_get_type_name(hw_device));
+        };
+        log.debug("using {s} for hw decode", .{hw_device_name});
 
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hwdec, path, false);
+        decoder.* = try Decoder.init(allocator, hw_device, path, false);
         errdefer decoder.deinit(allocator);
 
         const double_buffer = try allocator.create(DoubleBuffer);
@@ -309,7 +312,7 @@ pub const App = struct {
                 .encode = @panic("TODO: call EncodeSession.init"),
             },
             .playback => |path| {
-                const session = try PlaybackSession.init(allocator, ui, path);
+                const session = try PlaybackSession.init(allocator, @intFromEnum(state.hw_dec), ui, path);
                 self.session = .{ .playback = session };
             },
         }
