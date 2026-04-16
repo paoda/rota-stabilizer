@@ -18,15 +18,11 @@ const preload = @import("main.zig").preload;
 const render = @import("main.zig").render;
 const uploadPlane = @import("main.zig").uploadPlane;
 
-const startup = @import("main.zig").startup;
-const platform = @import("lib/platform.zig");
-const signal = platform.signal;
+const signal = @import("lib/platform.zig").signal;
 
 const GuiState = @import("lib/platform.zig").gui.State;
 
 const State = enum { idle, playback, encode };
-
-const log = std.log.scoped(.app);
 
 pub const Request = union(State) {
     idle: void,
@@ -35,17 +31,31 @@ pub const Request = union(State) {
 };
 
 const Session = union(State) {
-    idle: void,
+    idle: IdleSession,
     playback: PlaybackSession,
     encode: EncodeSession,
 
     pub fn deinit(self: *Session, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .idle => {},
+            .idle => |s| s.deinit(),
             .playback => |*s| s.deinit(allocator),
             .encode => |*s| s.deinit(allocator),
         }
     }
+};
+
+const IdleSession = struct {
+    pub fn init() IdleSession {
+        // NB: see PlaybackSession.deinit;
+        while (signal.should_quit.load(.monotonic)) {
+            signal.should_quit.store(false, .monotonic);
+            std.atomic.spinLoopHint();
+        }
+
+        return .{};
+    }
+
+    pub fn deinit(_: IdleSession) void {}
 };
 
 const PlaybackSession = struct {
@@ -70,6 +80,8 @@ const PlaybackSession = struct {
     // tracy output buffer
     buf: [0x100]u8 = undefined,
 
+    const log = std.log.scoped(.playback_session);
+
     fn stop(self: *const @This()) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
@@ -85,15 +97,11 @@ const PlaybackSession = struct {
         self.decoder.queue.frame.interrupt();
     }
 
-    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, ui: Ui, path: []const u8) !PlaybackSession {
+    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, path: []const u8) !PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
 
-        // NB: see session.deinit();
-        while (signal.should_quit.load(.monotonic)) {
-            signal.should_quit.store(false, .monotonic);
-            std.atomic.spinLoopHint();
-        }
+        const hw_device: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
 
         const hw_device_name = blk: {
             if (hw_device == c.AV_HWDEVICE_TYPE_NONE) break :blk "software";
@@ -116,7 +124,7 @@ const PlaybackSession = struct {
         errdefer handles.deinit();
 
         var render_view: Viewport = .default;
-        try render_view.push(startup.render_target.width, startup.render_target.height);
+        try render_view.push(state.resolution[0], state.resolution[1]);
 
         const manager = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
         errdefer manager.deinit(allocator);
@@ -294,6 +302,8 @@ pub const App = struct {
 
     session: Session,
 
+    const log = std.log.scoped(.app);
+
     pub fn poll(self: *App, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
@@ -302,17 +312,17 @@ pub const App = struct {
 
         // reset necessary state
         self.session.deinit(allocator);
-        self.session = .idle;
+        self.session = .{ .idle = IdleSession.init() };
 
         state.request = null;
 
         switch (request) {
-            .idle => self.session = .idle,
+            .idle => {}, // already idle
             .encode => |_| self.session = .{
                 .encode = @panic("TODO: call EncodeSession.init"),
             },
             .playback => |path| {
-                const session = try PlaybackSession.init(allocator, @intFromEnum(state.hw_dec), ui, path);
+                const session = try PlaybackSession.init(allocator, state, ui, path);
                 self.session = .{ .playback = session };
             },
         }

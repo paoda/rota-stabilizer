@@ -194,6 +194,8 @@ pub const signal = struct {
     }
 };
 
+const startup = @import("../main.zig").startup;
+
 pub const gui = struct {
     pub const VideoContext = struct { tex_id: c_uint, render_view: Viewport };
 
@@ -204,6 +206,8 @@ pub const gui = struct {
             .request = null,
             .hw_dec = .Software,
             .hw_enc = .Software,
+            .bit_rate = 30_000,
+            .resolution = .{ startup.render_target.width, startup.render_target.height },
         };
 
         input_path: [std.fs.max_path_bytes:0]u8,
@@ -211,6 +215,9 @@ pub const gui = struct {
 
         hw_dec: HwDeviceType,
         hw_enc: HwDeviceType,
+
+        bit_rate: i32,
+        resolution: [2]i32,
 
         request: ?Request,
 
@@ -245,8 +252,20 @@ pub const gui = struct {
 
         if (!showing) return;
 
+        zgui.textDisabled("Hardware Acceleration", .{});
         _ = zgui.comboFromEnum("Decoder", &state.hw_dec);
         _ = zgui.comboFromEnum("Encoder", &state.hw_enc);
+
+        zgui.separator();
+        zgui.textDisabled("Output Settings", .{});
+
+        _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
+
+        _ = zgui.sliderInt("Target Bitrate (kbps)", .{
+            .v = &state.bit_rate,
+            .max = 60_000,
+            .min = 10_000,
+        });
     }
 
     fn drawSetupWindow(state: *State) !void {
@@ -294,6 +313,10 @@ pub const gui = struct {
 
             if (zgui.button("Play", .{})) state.request = .{ .playback = input_path };
         }
+
+        zgui.sameLine(.{});
+
+        if (zgui.button("Stop", .{})) state.request = .idle;
 
         zgui.sameLine(.{});
 
