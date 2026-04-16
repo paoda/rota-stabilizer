@@ -42,7 +42,8 @@ void main() {
     float mask = smoothstep(u_radius - fwidth(d), u_radius, d);
 
     vec3 outer = texture(u_blur, uv).rgb; // * u_tint;
-    vec3 inner = sampleTex(zoom_uv); // purposefully only applied here
+    // vec3 inner = sampleTex(zoom_uv); // purposefully only applied here
+    vec3 inner = outer;
 
     frag_colour = vec4(mix(inner, outer, mask), 1.0);
 }
