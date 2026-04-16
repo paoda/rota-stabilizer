@@ -237,101 +237,96 @@ pub const gui = struct {
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
-        drawCodecSetup(state);
-        try drawSetupWindow(state);
+        try drawSettings(state);
 
         if (maybe_video) |vid| {
             drawVideoWindow(@floatFromInt(width), vid.render_view, vid.tex_id);
         }
     }
 
-    fn drawCodecSetup(state: *State) void {
+    fn drawSettings(state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const showing = zgui.begin("Codec Setup", .{ .flags = .{ .always_auto_resize = true } });
+        // zgui.setNextWindowSize(.{ .w = 500, .h = 0 });
+
+        const showing = zgui.begin("Settings", .{ .flags = .{ .always_auto_resize = true } });
         defer zgui.end();
 
         if (!showing) return;
 
-        zgui.textDisabled("Hardware Acceleration", .{});
-        _ = zgui.comboFromEnum("Decoder", &state.hw_dec);
-        _ = zgui.comboFromEnum("Encoder", &state.hw_enc);
+        {
+            zgui.textDisabled("Hardware Acceleration", .{});
+            _ = zgui.comboFromEnum("Decoder", &state.hw_dec);
+            _ = zgui.comboFromEnum("Encoder", &state.hw_enc);
 
-        zgui.separator();
-        zgui.textDisabled("Output Settings", .{});
+            zgui.spacing();
+            zgui.textDisabled("Output Settings", .{});
 
-        _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
+            _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
 
-        _ = zgui.sliderInt("Target Bitrate (kbps)", .{
-            .v = &state.bit_rate,
-            .max = 60_000,
-            .min = 10_000,
-        });
-    }
-
-    fn drawSetupWindow(state: *State) !void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
-        defer zone.end();
-
-        zgui.setNextWindowSize(.{ .w = 500, .h = 0, .cond = .once });
-
-        // TODO: what should the file filter be?
-        const filter = "mp4,mkv,mov,webm";
-
-        const showing = zgui.begin("Project Setup", .{ .flags = .{ .always_auto_resize = true } });
-        defer zgui.end();
-
-        if (!showing) return;
-
-        if (zgui.button("Browse...##input", .{})) {
-            const maybe_path = try nfd.openFileDialog(filter, null);
-            if (maybe_path) |path| setPath(&state.input_path, path);
+            _ = zgui.sliderInt("Target Bitrate (kbps)", .{
+                .v = &state.bit_rate,
+                .max = 60_000,
+                .min = 10_000,
+            });
         }
-
-        zgui.sameLine(.{});
-        _ = zgui.inputTextWithHint("Input File", .{ .hint = "input.mp4", .buf = &state.input_path });
-
-        if (zgui.button("Browse...##output", .{})) {
-            const maybe_path = try nfd.saveFileDialog(filter, null);
-            if (maybe_path) |path| setPath(&state.output_path, path);
-        }
-
-        zgui.sameLine(.{});
-        _ = zgui.inputTextWithHint("Output Path", .{ .hint = "output.mp4", .buf = &state.output_path });
 
         zgui.spacing();
-        zgui.separator();
-        zgui.spacing();
-
-        const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
-        const output_path: [:0]const u8 = std.mem.sliceTo(state.output_path[0..], 0);
+        zgui.textDisabled("Media Files", .{});
 
         {
-            const is_possible = input_path.len != 0;
+            const filter = "mp4,mkv,mov,webm";
 
-            if (!is_possible) zgui.beginDisabled(.{});
-            defer if (!is_possible) zgui.endDisabled();
+            if (zgui.button("Browse...##input", .{})) {
+                const maybe_path = try nfd.openFileDialog(filter, null);
+                if (maybe_path) |path| setPath(&state.input_path, path);
+            }
 
-            if (zgui.button("Play", .{})) state.request = .{ .playback = input_path };
-        }
+            zgui.sameLine(.{});
+            _ = zgui.inputTextWithHint("Input File", .{ .hint = "input.mp4", .buf = &state.input_path });
 
-        zgui.sameLine(.{});
+            if (zgui.button("Browse...##output", .{})) {
+                const maybe_path = try nfd.saveFileDialog(filter, null);
+                if (maybe_path) |path| setPath(&state.output_path, path);
+            }
 
-        if (zgui.button("Stop", .{})) state.request = .idle;
+            zgui.sameLine(.{});
+            _ = zgui.inputTextWithHint("Output Path", .{ .hint = "output.mp4", .buf = &state.output_path });
 
-        zgui.sameLine(.{});
+            zgui.spacing();
+            zgui.separator();
+            zgui.spacing();
 
-        {
-            const is_possible = input_path.len != 0 and output_path.len != 0 and false;
+            const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
+            const output_path: [:0]const u8 = std.mem.sliceTo(state.output_path[0..], 0);
 
-            if (!is_possible) zgui.beginDisabled(.{});
-            defer if (!is_possible) zgui.endDisabled();
+            {
+                const is_possible = input_path.len != 0;
 
-            if (zgui.button("Start Encode (TODO)", .{})) {
-                state.request = .{
-                    .encode = .{ .src_path = input_path, .dst_path = output_path },
-                };
+                if (!is_possible) zgui.beginDisabled(.{});
+                defer if (!is_possible) zgui.endDisabled();
+
+                if (zgui.button("Play", .{})) state.request = .{ .playback = input_path };
+            }
+
+            zgui.sameLine(.{});
+
+            if (zgui.button("Stop", .{})) state.request = .idle;
+
+            zgui.sameLine(.{});
+
+            {
+                const is_possible = input_path.len != 0 and output_path.len != 0 and false;
+
+                if (!is_possible) zgui.beginDisabled(.{});
+                defer if (!is_possible) zgui.endDisabled();
+
+                if (zgui.button("Start Encode (TODO)", .{})) {
+                    state.request = .{
+                        .encode = .{ .src_path = input_path, .dst_path = output_path },
+                    };
+                }
             }
         }
     }
