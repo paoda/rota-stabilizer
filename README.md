@@ -32,13 +32,7 @@ Alternatively:
 
 ## How to Use
 
-- TODO: Implement a GUI
-
-For now You can type the following in the terminal:
-- `rota_stabilizer -i input.mp4 output.mp4` where `input.mp4` is the screen recording in question and `output.mp4` can be whatever you want.
-  - This will render and encode a video that can then be uploaded to a platform of your choice.
-- `rota_stabilizer -i input.mp4` where `input.mp4` is the screen recording in question
-  - This will open a video-player that will stabilize the gameplay in real time 
+- TODO: Instructions on how to use the GUI
 
 **NOTE:** This tool uses [ffmpeg](https://www.ffmpeg.org/), so it can work with many video file types. Feel free to have an `input.mkv`, `output.webm`, or `input.mov`. 
 
