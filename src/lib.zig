@@ -2,7 +2,10 @@
 //! you are making an executable, the convention is to delete this file and
 //! start with main.zig instead.
 const std = @import("std");
+const tracy = @import("tracy");
 const gl = @import("gl");
+
+const AvFrame = @import("lib/libav.zig").AvFrame;
 
 pub const c = @cImport({
     @cDefine("SDL_DISABLE_OLD_NAMES", {});
@@ -25,6 +28,8 @@ pub const UV_BPP = 2;
 
 pub const magic_aspect_ratio = 1.7763157895;
 
+pub const Resolution = struct { width: c_int, height: c_int };
+
 pub const BlurManager = struct {
     const Layer = struct { fbo: c_uint, tex: c_uint };
 
@@ -42,8 +47,6 @@ pub const BlurManager = struct {
     }
 };
 
-const Resolution = struct { width: u32, height: u32 };
-
 pub const GpuResourceManager = struct {
     vao: VertexArrayPool,
     vbo: VertexBufferPool,
@@ -58,15 +61,15 @@ pub const GpuResourceManager = struct {
     const log = std.log.scoped(.gpu);
 
     const Metadata = struct {
-        circle_len: usize,
         circle_radius: f32,
-        ring_len: usize,
+        ring_radius: f32,
+        ring_thickness: f32,
 
         blur_res: Resolution,
     };
 
     const VertexArrayPool = struct {
-        const Index = enum(usize) { tex = 0, blur, ring, circle, empty };
+        const Index = enum(usize) { tex = 0, blur, empty };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -110,7 +113,7 @@ pub const GpuResourceManager = struct {
     };
 
     const FramebufferPool = struct {
-        const Index = enum(usize) { angle, blur_front, blur_back };
+        const Index = enum(usize) { angle, blur_front, blur_back, y, uv, out };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -131,8 +134,8 @@ pub const GpuResourceManager = struct {
         }
     };
 
-    const PixelBufferPool = struct {
-        const Index = enum(usize) { y_front, y_back, uv_front, uv_back, rgb_front, rgb_back };
+    pub const PixelBufferPool = struct {
+        pub const Index = enum(usize) { yuv_slot0, yuv_slot1, yuv_slot2, yuv_slot3 };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -162,6 +165,9 @@ pub const GpuResourceManager = struct {
             uv_back,
             blur_front,
             blur_back,
+            out,
+            y_out,
+            uv_out,
         };
         const len = @typeInfo(Index).@"enum".fields.len;
 
@@ -184,7 +190,7 @@ pub const GpuResourceManager = struct {
     };
 
     const ProgramPool = struct {
-        const Index = enum(usize) { tex = 0, bg, blur, ring, circle, angle };
+        const Index = enum(usize) { tex = 0, bg, blur, ring, circle, angle, rgb_to_nv12 };
         const len = @typeInfo(Index).@"enum".fields.len;
 
         id: [len]c_uint,
@@ -197,9 +203,10 @@ pub const GpuResourceManager = struct {
                     .tex => try opengl_impl.program("shader/texture.vert", "shader/texture.frag"),
                     .bg => try opengl_impl.program("shader/texture.vert", "shader/bg.frag"),
                     .blur => try opengl_impl.program("shader/blur.vert", "shader/blur.frag"),
-                    .ring => try opengl_impl.program("shader/ring.vert", "shader/ring.frag"),
-                    .circle => try opengl_impl.program("shader/ring.vert", "shader/circle.frag"),
+                    .ring => try opengl_impl.program("shader/texture.vert", "shader/ring.frag"),
+                    .circle => try opengl_impl.program("shader/texture.vert", "shader/circle.frag"),
                     .angle => try opengl_impl.program("shader/blur.vert", "shader/rotation.frag"),
+                    .rgb_to_nv12 => try opengl_impl.program("shader/blur.vert", "shader/rgb_to_nv12.frag"),
                 };
             }
         }
@@ -215,18 +222,19 @@ pub const GpuResourceManager = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, dimensions: struct { u32, u32 }) !*GpuResourceManager {
+    pub fn init(allocator: std.mem.Allocator, render_view: Viewport, dimensions: Resolution) !*GpuResourceManager {
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
 
-        const width, const height = dimensions;
+        const width = dimensions.width;
+        const height = dimensions.height;
 
         {
             const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
-            const gcd = std.math.gcd(width, height);
+            const gcd: c_int = @intCast(std.math.gcd(@as(u32, @intCast(width)), @as(u32, @intCast(height))));
 
             log.debug("Resolution: {}x{}", .{ width, height });
-            log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ width / gcd, height / gcd, aspect });
+            log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ @divTrunc(width, gcd), @divTrunc(height, gcd), aspect });
         }
 
         manager.vao.init();
@@ -236,16 +244,20 @@ pub const GpuResourceManager = struct {
         manager.tex.init();
 
         try manager.prog.compile();
-        try manager.setupVertexArrays(allocator, width, height);
         try manager.setupAngleCalc();
 
-        manager.setupBlur(width, height);
+        manager.setupVertexArrays(dimensions);
+        manager.setupBlur(dimensions);
+        manager.setupVideoTextures(dimensions);
+        try manager.setupOffscreenTarget(render_view);
 
-        manager.setupVideoTextures(width, height);
         return manager;
     }
 
     pub fn deinit(self: *GpuResourceManager, allocator: std.mem.Allocator) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "GpuResourceManager.deinit" });
+        defer zone.end();
+
         self.vao.deinit();
         self.vbo.deinit();
         self.fbo.deinit();
@@ -253,6 +265,25 @@ pub const GpuResourceManager = struct {
         self.tex.deinit();
 
         allocator.destroy(self);
+    }
+
+    pub fn setupOffscreenTarget(self: GpuResourceManager, render_view: Viewport) error{setup_error}!void {
+        const out_tex = self.tex.get(.out);
+        const out_fbo = self.fbo.get(.out);
+        const width, const height = render_view.get();
+
+        gl.BindTexture(gl.TEXTURE_2D, out_tex);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGB8, width, height, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+        gl.BindFramebuffer(gl.FRAMEBUFFER, out_fbo);
+        defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out_tex, 0);
+        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
     }
 
     pub fn blur(self: GpuResourceManager) BlurManager {
@@ -289,21 +320,44 @@ pub const GpuResourceManager = struct {
         if (ret != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
     }
 
-    pub fn setupReadbackBuffers(self: *const GpuResourceManager, width: u32, height: u32) void {
+    pub fn setupEncodingTargets(self: *const GpuResourceManager, encode_view: Viewport, frame: AvFrame) error{setup_error}!void {
         const BufIndex = PixelBufferPool.Index;
 
-        const len = (width * RGB24_BPP) * height;
+        const width, const height = encode_view.get();
 
-        for ([_]BufIndex{ .rgb_front, .rgb_back }) |idx| {
+        const y_len = frame.ptr().linesize[0] * height;
+        const uv_len = frame.ptr().linesize[1] * @divTrunc(height, 2);
+        const len = y_len + uv_len;
+
+        for ([_]BufIndex{ .yuv_slot0, .yuv_slot1, .yuv_slot2, .yuv_slot3 }) |idx| {
             gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.pbo.get(idx));
             gl.BufferData(gl.PIXEL_PACK_BUFFER, len, null, gl.STREAM_READ);
         }
+
+        // setup y fbo + tex
+        gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo.get(.y));
+        gl.BindTexture(gl.TEXTURE_2D, self.tex.get(.y_out));
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.R8, @intCast(width), @intCast(height), 0, gl.RED, gl.UNSIGNED_BYTE, null);
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, self.tex.get(.y_out), 0);
+        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
+
+        // setup uv fbo + tex
+        gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo.get(.uv));
+        gl.BindTexture(gl.TEXTURE_2D, self.tex.get(.uv_out));
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RG8, @divTrunc(width, 2), @divTrunc(height, 2), 0, gl.RG, gl.UNSIGNED_BYTE, null);
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, self.tex.get(.uv_out), 0);
+        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
+
         gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+        gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+        gl.BindTexture(gl.TEXTURE_2D, 0);
     }
 
-    pub fn setupVideoTextures(self: *const GpuResourceManager, width: u32, height: u32) void {
+    pub fn setupVideoTextures(self: *const GpuResourceManager, size: Resolution) void {
         const TexIndex = TexturePool.Index;
-        const BufIndex = PixelBufferPool.Index;
+
+        const width = size.width;
+        const height = size.height;
 
         for ([_]TexIndex{ .y_front, .y_back, .uv_front, .uv_back }) |idx| {
             gl.BindTexture(gl.TEXTURE_2D, self.tex.get(idx));
@@ -314,7 +368,7 @@ pub const GpuResourceManager = struct {
             gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
             const internal: c_int, const format: c_uint, const res: Resolution = switch (idx) {
-                .uv_front, .uv_back => .{ gl.RG8, gl.RG, .{ .width = width / 2, .height = height / 2 } },
+                .uv_front, .uv_back => .{ gl.RG8, gl.RG, .{ .width = @divTrunc(width, 2), .height = @divTrunc(height, 2) } },
                 .y_front, .y_back => .{ gl.R8, gl.RED, .{ .width = width, .height = height } },
                 else => unreachable,
             };
@@ -323,8 +377,8 @@ pub const GpuResourceManager = struct {
                 gl.TEXTURE_2D,
                 0,
                 internal,
-                @intCast(res.width),
-                @intCast(res.height),
+                res.width,
+                res.height,
                 0,
                 format,
                 gl.UNSIGNED_BYTE,
@@ -332,30 +386,20 @@ pub const GpuResourceManager = struct {
             );
         }
 
-        for ([_]BufIndex{ .y_front, .y_back, .uv_front, .uv_back }) |idx| {
-            gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, self.pbo.get(idx));
-
-            const len: c_int = switch (idx) {
-                .uv_front, .uv_back => @intCast((width / 2) * (height / 2) * UV_BPP),
-                .y_front, .y_back => @intCast(width * height * Y_BPP),
-                else => unreachable,
-            };
-
-            gl.BufferData(gl.PIXEL_UNPACK_BUFFER, len, null, gl.STREAM_DRAW);
-        }
-
-        gl.BindTexture(gl.TEXTURE_2D, 0);
         gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
     }
 
-    pub fn setupBlur(self: *GpuResourceManager, full_width: u32, full_height: u32) void {
+    pub fn setupBlur(self: *GpuResourceManager, full_size: Resolution) void {
+        const full_width = full_size.width;
+        const full_height = full_size.height;
+
         const width, const height = blk: {
-            const limit = 128; // arbitrary
+            const limit: c_int = 128; // arbitrary
             var w = full_width;
             var h = full_height;
 
             while (true) {
-                const next = .{ w / 2, h / 2 };
+                const next = .{ @divTrunc(w, 2), @divTrunc(h, 2) };
                 if (@min(next[0], next[1]) < limit) break :blk .{ w, h };
 
                 w, h = next;
@@ -407,7 +451,10 @@ pub const GpuResourceManager = struct {
         self.meta.blur_res = .{ .width = width, .height = height };
     }
 
-    pub fn setupVertexArrays(self: *GpuResourceManager, allocator: std.mem.Allocator, width: u32, height: u32) !void {
+    pub fn setupVertexArrays(self: *GpuResourceManager, size: Resolution) void {
+        const width = size.width;
+        const height = size.height;
+
         // zig fmt: off
         const tex_verts: [16]f32 = .{
             // pos      // uv
@@ -422,22 +469,13 @@ pub const GpuResourceManager = struct {
         const ratio: [2]f32 = if (aspect > 1.0) .{ 1.0, 1.0 / aspect } else .{ aspect, 1.0 };
 
         // https://github.com/Lawrenceeeeeeee/python_rotaeno_stabilizer/blob/6e6504f5e3867404c66d94c5752daab5936eedc2/python_rotaeno_stabilizer.py#L253-L258
-        const magic_radius_scale = 1.570;
-        const magic_thickness = 0.02;
+        const magic_radius_scale = 1.564; // -6
+        const magic_thickness = 0.031; // + 6, trial and error
         const rota_height = if (aspect >= magic_aspect_ratio) ratio[1] else ratio[0] / magic_aspect_ratio;
 
         const radius = magic_radius_scale * rota_height;
         const circle_radius = radius * 1.05;
         const radius_thickness = rota_height * magic_thickness;
-        const inner_radius = @max(radius - radius_thickness, 0.0);
-
-        var ring_verts = try ring(allocator, inner_radius, radius, 0x80);
-        defer ring_verts.deinit(allocator);
-
-        // TODO: by messing with stride I think there's a way to combine the two ArrayLists
-        // TODO: make the radius of the puck a runtime thing (scaling matrix + uniform)
-        var circle_verts = try circle(allocator, circle_radius, 0x80);
-        defer circle_verts.deinit(allocator);
 
         { // Setup for FFMPEG Texture
             gl.BindVertexArray(self.vao.get(.tex));
@@ -452,38 +490,16 @@ pub const GpuResourceManager = struct {
             gl.EnableVertexAttribArray(1);
         }
 
-        { // Setup for Ring
-            gl.BindVertexArray(self.vao.get(.ring));
-
-            gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo.get(.ring));
-
-            gl.BufferData(gl.ARRAY_BUFFER, @intCast(ring_verts.items.len * @sizeOf(f32)), ring_verts.items[0..].ptr, gl.STATIC_DRAW);
-            gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
-            gl.EnableVertexAttribArray(0);
-        }
-
-        { // Setup for Circle
-            gl.BindVertexArray(self.vao.get(.circle));
-            defer gl.BindVertexArray(0);
-
-            gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo.get(.circle));
-            defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-
-            gl.BufferData(gl.ARRAY_BUFFER, @intCast(circle_verts.items.len * @sizeOf(f32)), circle_verts.items[0..].ptr, gl.STATIC_DRAW);
-            gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
-            gl.EnableVertexAttribArray(0);
-        }
-
-        self.meta.circle_len = circle_verts.items.len / 2;
-        self.meta.ring_len = ring_verts.items.len / 2;
         self.meta.circle_radius = circle_radius;
+        self.meta.ring_radius = radius;
+        self.meta.ring_thickness = radius_thickness;
     }
 };
 
 pub fn sleep(duration: u64) void {
     const start = c.SDL_GetTicksNS();
     const target = start + duration;
-    const threshold = 2 * std.time.ns_per_s;
+    const threshold = 2 * std.time.ns_per_ms;
 
     while (true) {
         const now = c.SDL_GetTicksNS();
@@ -593,3 +609,240 @@ fn ring(allocator: std.mem.Allocator, inner_radius: f32, outer_radius: f32, len:
 
     return list;
 }
+
+pub fn Linesize(comptime fmt: c.AVPixelFormat) type {
+    return switch (fmt) {
+        c.AV_PIX_FMT_NV12 => struct {
+            y: c_int,
+            uv: c_int,
+
+            pub fn init(frame: AvFrame) @This() {
+                std.debug.assert(frame.ptr().format == fmt);
+
+                return .{
+                    .y = frame.ptr().linesize[0],
+                    .uv = frame.ptr().linesize[1],
+                };
+            }
+        },
+        c.AV_PIX_FMT_RGB24 => struct {
+            rgb: c_int,
+
+            pub fn init(frame: AvFrame) @This() {
+                std.debug.assert(frame.ptr().format == fmt);
+
+                return .{
+                    .rgb = frame.ptr().linesize[0],
+                };
+            }
+        },
+        else => unreachable,
+    };
+}
+
+pub const UploadBuffer = struct {
+    const PixelBufferPool = GpuResourceManager.PixelBufferPool;
+    const Upload = struct { id: PixelBufferPool.Index, pts: i64 };
+    const len = @typeInfo(PixelBufferPool.Index).@"enum".fields.len;
+
+    pub const default: @This() = .{
+        .id = std.meta.tags(PixelBufferPool.Index).*,
+        .pts = [_]?i64{null} ** len,
+        .idx = 0,
+    };
+
+    id: [len]PixelBufferPool.Index,
+    pts: [len]?i64,
+    idx: usize = 0,
+
+    pub fn current(self: @This()) PixelBufferPool.Index {
+        return self.id[self.idx % len];
+    }
+
+    /// returns the oldest PBO in the Queue
+    pub fn next(self: *@This()) ?Upload {
+        const timestamp = self.pts[(self.idx + 1) % len] orelse return null;
+        self.pts[(self.idx + 1) % len] = null;
+
+        return .{
+            .id = self.id[(self.idx + 1) % len],
+            .pts = timestamp,
+        };
+    }
+
+    /// Writes timestamp to current PBO, prepares next frame to overwrite oldest
+    pub fn advance(self: *@This(), pts: i64) void {
+        self.pts[self.idx % len] = pts;
+        self.idx += 1;
+    }
+
+    pub fn skip(self: *@This()) void {
+        std.debug.assert(self.pts[self.idx % len] == null);
+        self.idx += 1;
+    }
+
+    pub fn flush(self: *@This()) ?Upload {
+        const timestamp = self.pts[self.idx % len] orelse return null;
+        self.pts[self.idx % len] = null;
+
+        const ret: Upload = .{ .id = self.id[self.idx % len], .pts = timestamp };
+        self.idx += 1;
+
+        return ret;
+    }
+};
+
+pub const DoubleBuffer = struct {
+    const TexturePool = GpuResourceManager.TexturePool;
+    pub const default: DoubleBuffer = .{};
+
+    y: [2]TexturePool.Index = .{ .y_front, .y_back },
+    uv: [2]TexturePool.Index = .{ .uv_front, .uv_back },
+
+    display_times: [2]?f64 = .{ null, null },
+    idx: u1 = 0,
+
+    generation: usize = 0,
+
+    pub const Channel = enum { y, uv };
+
+    pub const Buffer = struct {
+        super: *DoubleBuffer,
+        idx: u1,
+
+        generation: usize,
+
+        pub fn tex(self: @This(), comptime ch: Channel) TexturePool.Index {
+            std.debug.assert(self.generation == self.super.generation);
+
+            switch (ch) {
+                .y => return self.super.y[self.idx],
+                .uv => return self.super.uv[self.idx],
+            }
+        }
+
+        pub fn displayTime(self: @This()) f64 {
+            std.debug.assert(self.generation == self.super.generation);
+
+            return self.super.display_times[self.idx].?;
+        }
+
+        pub fn setDisplayTime(self: @This(), timestamp: f64) void {
+            std.debug.assert(self.generation == self.super.generation);
+
+            self.super.display_times[self.idx] = timestamp;
+        }
+
+        pub fn flip(self: @This()) @This() {
+            std.debug.assert(self.generation == self.super.generation);
+
+            return .{
+                .super = self.super,
+                .idx = self.idx +% 1,
+                .generation = self.generation,
+            };
+        }
+    };
+
+    pub fn front(self: *DoubleBuffer) Buffer {
+        return .{ .super = self, .idx = self.idx, .generation = self.generation };
+    }
+
+    pub fn back(self: *DoubleBuffer) Buffer {
+        return .{ .super = self, .idx = self.idx +% 1, .generation = self.generation };
+    }
+
+    pub fn swap(self: *DoubleBuffer) void {
+        self.idx +%= 1;
+        self.generation += 1;
+    }
+};
+
+pub fn trace(comptime fmt: []const u8, args: anytype) void {
+    var buf: [0x40]u8 = undefined;
+    tracy.message(.{ .text = std.fmt.bufPrint(&buf, fmt, args) catch unreachable });
+}
+
+pub const FbStack = struct {
+    const cap = 4;
+    pub const default: @This() = .{ .id = undefined, .idx = 0 };
+
+    id: [cap]c_uint,
+    idx: usize,
+
+    const log = std.log.scoped(.framebuffer_stack);
+
+    pub fn push(self: *FbStack, id: c_uint) !void {
+        if (self.idx >= cap) return error.stack_overflow;
+
+        self.id[self.idx] = id;
+        self.idx += 1;
+
+        gl.BindFramebuffer(gl.FRAMEBUFFER, id);
+    }
+
+    pub fn get(self: *const FbStack) c_uint {
+        if (self.idx == 0) return 0;
+        return self.id[self.idx - 1];
+    }
+
+    pub fn pop(self: *FbStack) void {
+        if (self.idx == 0) return;
+        self.idx -= 1;
+
+        if (self.idx > 0) {
+            const id = self.id[self.idx - 1];
+            gl.BindFramebuffer(gl.FRAMEBUFFER, id);
+        } else {
+            gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+        }
+    }
+};
+
+pub const Viewport = struct {
+    const cap = 5;
+    pub const default: @This() = .{ .width = undefined, .height = undefined, .idx = 0 };
+
+    width: [cap]c_int,
+    height: [cap]c_int,
+
+    idx: usize,
+
+    const log = std.log.scoped(.viewport);
+
+    pub fn push(self: *Viewport, width: c_int, height: c_int) !void {
+        if (self.idx >= cap) return error.stack_overflow;
+
+        self.width[self.idx] = width;
+        self.height[self.idx] = height;
+        self.idx += 1;
+
+        gl.Viewport(0, 0, width, height);
+    }
+
+    pub fn reset(self: *Viewport, width: c_int, height: c_int) void {
+        self.* = .default;
+        self.push(width, height) catch unreachable; // cap == 0
+    }
+
+    pub fn get(self: Viewport) struct { c_int, c_int } {
+        return .{ self.width[self.idx - 1], self.height[self.idx - 1] };
+    }
+
+    pub fn resolution(self: Viewport) Resolution {
+        const width, const height = self.get();
+        return .{ .width = width, .height = height };
+    }
+
+    pub fn pop(self: *Viewport) void {
+        if (self.idx == 0) return;
+        self.idx -= 1;
+
+        if (self.idx > 0) {
+            const w = self.width[self.idx - 1];
+            const h = self.height[self.idx - 1];
+
+            gl.Viewport(0, 0, w, h);
+        }
+    }
+};

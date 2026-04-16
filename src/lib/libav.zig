@@ -1,7 +1,9 @@
 //! FFmpeg bindings
 const std = @import("std");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 const c = @import("../lib.zig").c;
+
+const Resolution = @import("../lib.zig").Resolution;
 
 pub const enc = struct {
     const log = std.log.scoped(.encode);
@@ -141,9 +143,7 @@ pub const enc = struct {
         hw: ?struct { dev_ctx: AvHwDeviceContext } = null,
 
         const Options = struct {
-            // Viewport of the video that will be encoded
-            width: c_int,
-            height: c_int,
+            resolution: Resolution,
 
             input: Input,
 
@@ -163,14 +163,17 @@ pub const enc = struct {
 
             const inpt_vid = opt.input.fmt_ctx.ptr().streams[@intCast(opt.input.video_ctx.stream)];
 
-            ctx.width = opt.width;
-            ctx.height = opt.height;
+            ctx.width = opt.resolution.width;
+            ctx.height = opt.resolution.height;
             ctx.time_base = inpt_vid.*.time_base;
             ctx.framerate = inpt_vid.*.avg_frame_rate;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
             ctx.pix_fmt = codec.pix_fmt;
             ctx.bit_rate = 30_000 * KBPS_TO_BPS; // FIXME: configurable?
             ctx.gop_size = @intFromFloat(c.av_q2d(ctx.framerate) / 2);
+
+            ctx.thread_count = 0;
+            ctx.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
 
             ctx.color_range = c.AVCOL_RANGE_MPEG;
             ctx.color_primaries = c.AVCOL_PRI_BT709;
@@ -226,7 +229,7 @@ pub const dec = struct {
 
     pub const AvCodecContext = struct {
         const Kind = enum { video, audio };
-        const Options = struct { dev_type: ?c.AVHWDeviceType = null };
+        const Options = struct { dev_type: c.AVHWDeviceType = c.AV_HWDEVICE_TYPE_NONE };
 
         inner: ?*c.AVCodecContext,
         stream: c_int,
@@ -238,9 +241,9 @@ pub const dec = struct {
             const self = try allocator.create(@This());
 
             if (kind == .video) blk: {
-                const device_type = opt.dev_type orelse break :blk;
+                if (opt.dev_type == c.AV_HWDEVICE_TYPE_NONE) break :blk;
 
-                self.initHardware(fmt_ctx, device_type) catch {
+                self.initHardware(fmt_ctx, opt.dev_type) catch {
                     break :blk log.err("failed to set up hardware device, defaulting to software", .{});
                 };
 
@@ -271,6 +274,9 @@ pub const dec = struct {
             var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
             errdefer c.avcodec_free_context(&ctx_ptr);
 
+            ctx_ptr.?.thread_count = 0;
+            ctx_ptr.?.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
+
             _ = try err(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
             _ = try err(c.avcodec_open2(ctx_ptr, codec_ptr, null));
 
@@ -283,6 +289,9 @@ pub const dec = struct {
 
             var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
             errdefer c.avcodec_free_context(&ctx_ptr);
+
+            ctx_ptr.?.thread_count = 0;
+            ctx_ptr.?.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
 
             _ = try err(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
 
@@ -420,23 +429,46 @@ pub const AvFrame = struct {
         return .{ .inner = p };
     }
 
-    pub fn setup(self: *@This(), width: c_int, height: c_int, fmt: c.AVPixelFormat) !void {
-        const zone = ztracy.ZoneN(@src(), "AVFrame.setup");
-        defer zone.End();
-
-        self.inner.?.width = width;
-        self.inner.?.height = height;
-        self.inner.?.format = fmt;
-
-        _ = try err(c.av_frame_get_buffer(self.inner, 32));
-    }
-
     pub fn deinit(self: *@This()) void {
         c.av_frame_free(&self.inner);
     }
 
+    pub fn setYData(self: *AvFrame, buf: []const u8) !void {
+        const frame = self.ptr();
+
+        const stride = alignUp(frame.width, 32);
+        const len: usize = @intCast(stride * frame.height);
+        std.debug.assert(buf.len == len);
+
+        frame.linesize[0] = stride;
+        frame.data[0] = @ptrCast(@constCast(buf));
+        frame.buf[0] = c.av_buffer_create(frame.data[0], len, &bufferDummyFree, null, 0);
+
+        if (frame.buf[0] == null) return error.ffmpeg_error;
+    }
+
+    pub fn setUvData(self: *AvFrame, buf: []const u8) !void {
+        const frame = self.ptr();
+
+        const stride = alignUp(frame.width, 32);
+        const len: usize = @intCast(stride * @divTrunc(frame.height, 2));
+        std.debug.assert(buf.len == len);
+
+        frame.linesize[1] = stride;
+        frame.data[1] = @ptrCast(@constCast(buf));
+        frame.buf[1] = c.av_buffer_create(frame.data[0], len, &bufferDummyFree, null, 0);
+
+        if (frame.buf[1] == null) return error.ffmpeg_error;
+    }
+
+    fn bufferDummyFree(_: ?*anyopaque, _: [*c]u8) callconv(.c) void {}
+
     pub fn ptr(self: @This()) *c.AVFrame {
         return self.inner.?;
+    }
+
+    pub fn alignUp(value: c_int, alignment: c_int) c_int {
+        return (value + alignment - 1) & ~(alignment - 1);
     }
 };
 

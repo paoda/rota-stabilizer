@@ -27,7 +27,10 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
-    const sdl_dep = switch (target.result.os.tag) {
+    const nfd = b.dependency("nfd", .{ .target = target, .optimize = optimize });
+    exe_mod.addImport("nfd", nfd.module("nfd"));
+
+    const sdl = switch (target.result.os.tag) {
         .macos => blk: {
             const result = try std.process.Child.run(.{
                 .allocator = b.allocator,
@@ -47,7 +50,16 @@ pub fn build(b: *std.Build) !void {
         },
         else => b.dependency("sdl", .{ .target = target, .optimize = .ReleaseFast, .preferred_linkage = .static }),
     };
-    exe_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+
+    const sdl_lib = sdl.artifact("SDL3");
+    exe_mod.linkLibrary(sdl_lib);
+
+    const zgui = b.dependency("zgui", .{ .shared = false, .backend = .sdl3_opengl3 });
+    exe_mod.addImport("zgui", zgui.module("root"));
+
+    const zgui_lib = zgui.artifact("imgui");
+    zgui_lib.linkLibrary(sdl_lib);
+    exe_mod.linkLibrary(zgui_lib);
 
     switch (target.result.os.tag) {
         .windows => {
@@ -91,10 +103,12 @@ pub fn build(b: *std.Build) !void {
     const clap = b.dependency("clap", .{});
     exe_mod.addImport("clap", clap.module("clap"));
 
-    const enable_ztracy = b.option(bool, "ztracy", "Enable Tracy Profiling") orelse false;
-    const ztracy = b.dependency("ztracy", .{ .enable_ztracy = enable_ztracy });
-    exe_mod.addImport("ztracy", ztracy.module("root"));
-    exe_mod.linkLibrary(ztracy.artifact("tracy"));
+    const enable_tracy = b.option(bool, "tracy", "Enable Tracy Profiling") orelse false;
+    const tracy = b.dependency("tracy", .{ .target = target, .optimize = optimize });
+    const tracy_impl = if (enable_tracy) "tracy_impl_enabled" else "tracy_impl_disabled";
+
+    exe_mod.addImport("tracy", tracy.module("tracy"));
+    exe_mod.addImport("tracy_impl", tracy.module(tracy_impl));
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.

@@ -1,7 +1,7 @@
 const std = @import("std");
 const gl = @import("gl");
-const clap = @import("clap");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
+const zgui = @import("zgui");
 
 const c = @import("lib.zig").c;
 const platform = @import("lib/platform.zig");
@@ -10,11 +10,20 @@ const signal = @import("lib/platform.zig").signal;
 const Encoder = @import("lib/codec.zig").Encoder;
 const Decoder = @import("lib/codec.zig").Decoder;
 
-const GpuResourceManager = @import("lib.zig").GpuResourceManager;
+const UploadBuffer = @import("lib.zig").UploadBuffer;
+const DoubleBuffer = @import("lib.zig").DoubleBuffer;
 const BlurManager = @import("lib.zig").BlurManager;
+const Viewport = @import("lib.zig").Viewport;
+const FbStack = @import("lib.zig").FbStack;
+const GpuResourceManager = @import("lib.zig").GpuResourceManager;
+const PixelBufferPool = GpuResourceManager.PixelBufferPool;
+const Ui = @import("lib/platform.zig").Ui;
+const App = @import("app.zig").App;
 
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
+const Linesize = @import("lib.zig").Linesize;
+const Resolution = @import("lib.zig").Resolution;
 const mat2 = @import("lib/math.zig").mat2;
 const vec2 = @import("lib/math.zig").vec2;
 
@@ -26,384 +35,229 @@ const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
+var zoom: f32 = 1.0;
+
+pub const startup = struct {
+    pub const ui_window: Resolution = .{ .width = 1600, .height = 900 };
+    pub const encode_target: Resolution = .{ .width = 1920, .height = 1080 };
+    pub const render_target: Resolution = .{ .width = 1920, .height = 1080 };
+};
+
+pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
+pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
 
 pub fn main() !void {
-    defer signal.should_quit.store(true, .monotonic);
-
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
-
-    signal.setupHandler();
 
     var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
 
-    const allocator = gpa.allocator();
+    var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
+    const allocator = tracy_alloc.allocator();
 
-    const params = comptime clap.parseParamsComptime(
-        \\-h, --help            Display this help and exit.
-        \\-i, --input <str>     Path to input file.
-        \\<str>                 Path to output file.
-        \\
-    );
-
-    var diag: clap.Diagnostic = .{};
-    var cli = clap.parse(clap.Help, &params, clap.parsers.default, .{
-        .diagnostic = &diag,
-        .allocator = allocator,
-    }) catch |err| return diag.reportToFile(.stderr(), err);
-    defer cli.deinit();
-
-    if (cli.args.help != 0) return clap.helpToFile(.stdout(), clap.Help, &params, .{});
-
-    const ui = if (cli.positionals[0]) |_| try platform.createHeadless(1920, 1080) else try platform.createWindow(1600, 900);
+    const ui = try Ui.init(allocator, startup.ui_window);
     defer ui.deinit();
 
-    const src_path = cli.args.input orelse return error.missing_input_path;
+    var ui_view: Viewport = .default;
+    const ui_size = try ui.windowSize();
+    try ui_view.push(ui_size[0], ui_size[1]);
 
-    const hw_decode, const hw_encode = platform.guessHardware();
-    log.debug("guessed {s} hw decode and {s} hw encode support", .{
-        if (hw_decode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
-        if (hw_encode) |t| std.mem.span(c.av_hwdevice_get_type_name(t)) else "no",
-    });
+    // const should_write = try checkFile(cli.positionals[0]);
+    // if (!should_write) return error.wont_overwrite;
 
-    var decoder = try Decoder.init(allocator, &signal.should_quit, hw_decode, src_path, cli.positionals[0] != null);
-    defer decoder.deinit(allocator);
+    try signal.setupHandler();
 
-    // -- opengl --
-    log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
-    log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
+    // if (cli.positionals[0]) |dst_path| {
+    //     // Initialize encoder
+    //     var encoder = try Encoder.init(.{
+    //         .encode_view = encode_view,
+    //         .decoder = &decoder,
+    //     }, hw_encode, dst_path);
+    //     defer encoder.deinit();
 
-    gl.Enable(gl.BLEND);
-    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.Disable(gl.FRAMEBUFFER_SRGB);
-    _ = c.SDL_GL_SetSwapInterval(0);
+    //     const render_start_time = c.SDL_GetPerformanceCounter();
+    //     const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
 
-    var res = try GpuResourceManager.init(allocator, decoder.dimensions);
-    defer res.deinit(allocator);
+    //     const video_stream = decoder.stream(.video);
+    //     const audio_stream = decoder.stream(.audio);
 
-    var stable_buffer = DoubleBuffer.init(res);
+    //     const estimated_frames: usize = blk: {
+    //         if (video_stream.nb_frames > 0) break :blk @intCast(video_stream.nb_frames);
+    //         if (decoder.fmt_ctx.ptr().duration <= 0) break :blk 0;
 
-    const w, const h = try ui.windowSize();
-    var camera = Camera.init(decoder.dimensions, w, h, decoder.colour_space);
-    var view = Viewport.init(w, h);
+    //         // estimate from duration
+    //         const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
+    //         break :blk @intFromFloat(duration_secs * c.av_q2d(frame_rate));
+    //     };
 
-    const angle_calc = try AngleCalc.init(res, camera);
-    // -- opengl end --
+    //     // Initialize progress
+    //     var progress_buffer: [256]u8 = undefined;
+    //     const progress_node = std.Progress.start(.{
+    //         .root_name = "Encoding",
+    //         .estimated_total_items = estimated_frames,
+    //         .draw_buffer = &progress_buffer,
+    //     });
+    //     defer progress_node.end();
 
-    const frame_rate = decoder.framerate();
-    const frame_period = 1.0 / c.av_q2d(frame_rate);
+    //     try res.setupEncodingTargets(encode_view, encoder._frame);
 
-    const handles = try decoder.spawn(cli.positionals[0]);
-    defer handles.deinit();
+    //     var upload_buffer: UploadBuffer = .default;
+    //     var frame_count: u64 = 0;
 
-    if (cli.positionals[0]) |dst_path| {
-        // Initialize encoder
-        var encoder = try Encoder.init(.{
-            .width = @intCast(view.width),
-            .height = @intCast(view.height),
-            .decoder = &decoder,
-        }, hw_encode, dst_path);
-        defer encoder.deinit();
+    //     _ = try preload(res, &decoder, double_buffer);
+    //     try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
+    //     try writeToNv12Tex(res, &encode_view, fbs, camera);
 
-        const render_start_time = c.SDL_GetPerformanceCounter();
-        const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
+    //     const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
 
-        const video_stream = decoder.stream(.video);
-        const audio_stream = decoder.stream(.audio);
+    //     while (!signal.should_quit.load(.monotonic)) {
+    //         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "encode loop" });
+    //         defer zone.end();
 
-        const estimated_frames: usize = blk: {
-            if (video_stream.nb_frames > 0) break :blk @intCast(video_stream.nb_frames);
-            if (decoder.fmt_ctx.ptr().duration <= 0) break :blk 0;
+    //         // Process any pending audio packets (remux to output)
+    //         while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
+    //             try encoder.writeAudioPacket(audio_stream, audio_pkt);
 
-            // estimate from duration
-            const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
-            break :blk @intFromFloat(duration_secs * c.av_q2d(frame_rate));
-        };
+    //             var pkt: ?*c.AVPacket = audio_pkt;
+    //             c.av_packet_free(&pkt);
+    //         }
 
-        // Initialize progress
-        var progress_buffer: [256]u8 = undefined;
-        const progress_node = std.Progress.start(.{
-            .root_name = "Encoding",
-            .estimated_total_items = estimated_frames,
-            .draw_buffer = &progress_buffer,
-        });
-        defer progress_node.end();
+    //         if (decoder.queue.frame.pop()) |frame| {
+    //             defer decoder.queue.frame.recycle(frame);
+    //             defer double_buffer.swap();
+    //             defer frame_count += 1; // increment after frame is sent to the GPU
 
-        res.setupReadbackBuffers(@intCast(view.width), @intCast(view.height));
+    //             const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
+    //             defer z.end();
 
-        var current_pbo: u1 = 0;
-        var pending_frame_pts: ?i64 = null; // PTS of frame in the "previous" PBO waiting to be encoded
-        var frame_count: u64 = 0;
+    //             const back = double_buffer.back();
+    //             uploadPlane(.y, res, back, frame);
+    //             uploadPlane(.uv, res, back, frame);
 
-        while (!signal.should_quit.load(.monotonic)) {
-            const zone = ztracy.ZoneN(@src(), "encode loop");
-            defer zone.End();
+    //             try render(&render_view, &fbs, back.flip(), angle_calc, res, camera);
+    //             try writeToNv12Tex(res, &encode_view, fbs, camera);
 
-            // Process any pending audio packets (remux to output)
-            while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
-                try encoder.writeAudioPacket(audio_stream, audio_pkt);
+    //             const width, const height = encode_view.get();
 
-                var pkt: ?*c.AVPacket = audio_pkt;
-                c.av_packet_free(&pkt);
-            }
+    //             {
+    //                 const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
+    //                 defer pbo_z.end();
 
-            if (decoder.queue.frame.pop()) |frame| {
-                defer decoder.queue.frame.recycle(frame);
-                defer stable_buffer.swap();
-                defer frame_count += 1; // increment after frame is sent to the GPU
+    //                 const idx = upload_buffer.current();
 
-                const z = ztracy.ZoneN(@src(), "frame received");
-                defer z.End();
+    //                 // read Y and UV into single contiguous PBO with linesize padding
+    //                 gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(idx));
+    //                 defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
-                uploadYTexture(stable_buffer, frame);
-                uploadUvTexture(stable_buffer, frame);
+    //                 {
+    //                     const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
+    //                     defer read_z.end();
 
-                try render(&view, &stable_buffer, angle_calc, res, camera);
+    //                     gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
+    //                     gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.y));
+    //                     gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
+    //                 }
 
-                {
-                    const pbo_z = ztracy.ZoneN(@src(), "read from OpenGL");
-                    defer pbo_z.End();
+    //                 {
+    //                     const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
+    //                     defer read_z.end();
 
-                    // Start async readback into current PBO
-                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (current_pbo == 1) .rgb_front else .rgb_back));
-                    defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+    //                     // after y plane in memory
+    //                     const uv_offset: usize = @intCast(linesize.y * height);
+    //                     gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
+    //                     gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.uv));
+    //                     gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
+    //                 }
 
-                    {
-                        const read_z = ztracy.ZoneN(@src(), "gl.ReadPixels");
-                        defer read_z.End();
+    //                 gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
+    //                 gl.BindFramebuffer(gl.READ_FRAMEBUFFER, fbs.get());
 
-                        gl.ReadPixels(0, 0, view.width, view.height, gl.RGB, gl.UNSIGNED_BYTE, null);
-                    }
+    //                 {
+    //                     const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
+    //                     defer flush_z.end();
 
-                    gl.Flush(); // Ensure readback starts immediately (don't wait for glMapBuffer to trigger it)
+    //                     gl.Flush(); // trigger readback immediately
+    //                 }
 
-                    // encode buffered frame
-                    if (pending_frame_pts) |pts| blk: {
-                        const frame_buf = downloadFrame(res, view, current_pbo) orelse break :blk;
-                        try encoder.encodeRgbFrame(frame_buf, pts);
-                    }
-                }
+    //                 if (upload_buffer.next()) |upload| blk: {
+    //                     const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse break :blk;
+    //                     defer unmapNv12Frame(res, upload.id);
 
-                // Store current frame's PTS for next iteration, swap PBOs
-                pending_frame_pts = frame.best_effort_timestamp;
-                current_pbo +%= 1;
+    //                     try encoder.encodeNv12Frame(y, uv, upload.pts);
+    //                 }
+    //             }
 
-                // Update progress
-                progress_node.setCompletedItems(frame_count);
-            } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
-                defer signal.should_quit.store(true, .monotonic); // exit program once flush is done
-                defer std.Progress.setStatus(.success);
+    //             upload_buffer.advance(frame.pts);
 
-                const z = ztracy.ZoneN(@src(), "final frame received");
-                defer z.End();
+    //             // Update progress
+    //             progress_node.setCompletedItems(frame_count);
+    //         } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
+    //             defer shutdown(&decoder.queue);
+    //             defer std.Progress.setStatus(.success);
 
-                // encode buffered frame
-                if (pending_frame_pts) |pts| blk: {
-                    const frame_buf = downloadFrame(res, view, current_pbo) orelse break :blk;
-                    try encoder.encodeRgbFrame(frame_buf, pts);
-                }
+    //             const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
+    //             defer z.end();
 
-                // Calculate and display final stats
-                const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
-                const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
-                const speed = video_duration / elapsed;
+    //             upload_buffer.skip(); // to access the pending frames
 
-                break log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
-            }
-        }
-    } else {
-        // ===== PLAYBACK MODE =====
-        const audio_clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
+    //             while (upload_buffer.flush()) |upload| {
+    //                 const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse continue;
+    //                 defer unmapNv12Frame(res, upload.id);
 
-        const delay_threshold = @max(0.025, frame_period * 2.0);
-        const wait_normal = frame_period * 1.05;
-        const wait_max = 0.500;
+    //                 try encoder.encodeNv12Frame(y, uv, upload.pts);
+    //             }
 
-        log.debug("frame period: {d:.2}ms ({d:.2}fps)", .{ frame_period * std.time.ms_per_s, c.av_q2d(frame_rate) });
-        log.debug("delay_threshold: {d:.2}ms", .{delay_threshold * std.time.ms_per_s});
-        log.debug("wait_max: {d:.2}ms", .{wait_max * std.time.ms_per_s});
+    //             // Calculate and display final stats
+    //             const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
+    //             const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
+    //             const speed = video_duration / elapsed;
 
-        while (!signal.should_quit.load(.monotonic)) {
+    //             break log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
+    //         }
+    //     }
+
+    var app: App = .default;
+    defer app.deinit(allocator);
+
+    const state = try allocator.create(platform.gui.State);
+    defer allocator.destroy(state);
+
+    state.* = .default;
+    state.defaultHardware();
+
+    while (!signal.should_quit.load(.monotonic)) {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
+        defer zone.end();
+
+        {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "query input" });
+            defer z.end();
+
             var event: c.SDL_Event = undefined;
-
             while (c.SDL_PollEvent(&event)) {
+                _ = zgui.backend.processEvent(&event);
+
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
-                    c.SDL_EVENT_MOUSE_WHEEL => {
-                        const wheel_delta = event.wheel.y * 0.1;
-                        camera.adjustZoom(wheel_delta);
-                        log.debug("Zoom: {d:.2}x", .{camera.zoom});
-                    },
-                    c.SDL_EVENT_WINDOW_RESIZED => {
-                        view = Viewport.init(event.window.data1, event.window.data2);
-                        camera.updateWindow(view.width, view.height);
-
-                        log.debug("Window resized to {}x{}", .{ view.width, view.height });
-                    },
-                    c.SDL_EVENT_KEY_UP => switch (event.key.scancode) {
-                        c.SDL_SCANCODE_M => {
-                            try if (audio_clock.is_muted) audio_clock.unmute() else audio_clock.mute();
-                        },
-                        c.SDL_SCANCODE_F11 => try ui.toggleFullscreen(),
-                        else => {},
-                    },
+                    c.SDL_EVENT_WINDOW_RESIZED => ui_view.reset(event.window.data1, event.window.data2),
                     else => {},
                 }
             }
-
-            if (decoder.queue.frame.pop()) |frame| {
-                defer decoder.queue.frame.recycle(frame);
-                defer stable_buffer.swap();
-
-                const z = ztracy.ZoneN(@src(), "video rame received");
-                defer z.End();
-
-                // Calculate PTS early - needed for initial sync
-                const time_base: f64 = c.av_q2d(decoder.stream(.video).time_base);
-                const pt_in_seconds = @as(f64, @floatFromInt(frame.best_effort_timestamp)) * time_base;
-
-                // Track if this is the first frame (for delayed audio start)
-                const is_first_frame = audio_clock.isPaused();
-
-                if (frame.format != c.AV_PIX_FMT_NV12) {
-                    @branchHint(.cold);
-
-                    const expected = c.av_get_pix_fmt_name(c.AV_PIX_FMT_NV12);
-                    const actual = c.av_get_pix_fmt_name(frame.format);
-                    log.err("unsupported pixel format: expected {s} got {s}", .{ expected, actual });
-                    return error.ffmpeg_error;
-                }
-
-                stable_buffer.set_display_time(pt_in_seconds);
-
-                uploadYTexture(stable_buffer, frame);
-                uploadUvTexture(stable_buffer, frame);
-
-                if (!is_first_frame) {
-                    const audio_time = audio_clock.seconds_passed();
-                    const frame_time = stable_buffer.invert().display_time(); // Frame actually being rendered
-                    const diff_s = frame_time - audio_time;
-
-                    ztracy.PlotF("A/V Sync Drift (ms)", diff_s * std.time.ms_per_s);
-                    ztracy.PlotF("Audio Time (s)", audio_time);
-                    ztracy.PlotF("Frame Time (s)", frame_time);
-
-                    // video is wildly ahead (wait at most wait_max seconds)
-                    if (diff_s > wait_max) {
-                        const z_delay = ztracy.ZoneNC(@src(), "hard delay sync", 0x3b3b3b);
-                        defer z_delay.End();
-
-                        const delay_s = @min(wait_max, diff_s);
-
-                        log.warn("wildly ahead: {d:.1}ms - hard syncing", .{delay_s * std.time.ms_per_s});
-                        sleep(@intFromFloat(delay_s * std.time.ns_per_s));
-                    }
-
-                    // video is behind (drop frame)
-                    if (diff_s < -delay_threshold) {
-                        const z_drop = ztracy.ZoneNC(@src(), "drop sync", 0x3b3b3b);
-                        defer z_drop.End();
-
-                        const diff_ms = diff_s * std.time.ms_per_s;
-
-                        log.debug("video: {d:.3}s audio: {d:.3}s diff: \x1B[36m{d:.1}ms\x1B[39m (drop)", .{ frame_time, audio_time, diff_ms });
-                        continue;
-                    }
-
-                    if (diff_s > 0) {
-                        const z_delay = ztracy.ZoneNC(@src(), "delay sync", 0x3b3b3b);
-                        defer z_delay.End();
-
-                        const delay_s = @min(diff_s, wait_normal);
-                        ztracy.PlotF("A/V Sleep Time (ms)", delay_s * std.time.ms_per_s);
-
-                        if (diff_s > wait_normal) log.debug("ahead: v: {d:.3}s a: {d:.3}s \x1B[33m{d:.1}ms\x1B[39m", .{ frame_time, audio_time, diff_s * std.time.ms_per_s });
-
-                        sleep(@intFromFloat(delay_s * std.time.ns_per_s));
-                    }
-                }
-
-                try render(&view, &stable_buffer, angle_calc, res, camera);
-
-                if (is_first_frame) try audio_clock.start(pt_in_seconds); // aligns audio clock with frame pts
-            } else {
-                // log.err("{}: video decode bottleneck", .{c.SDL_GetPerformanceCounter()}); // TODO: add adaptive sleeping here
-                continue;
-            }
-
-            try ui.swap();
         }
+
+        gl.ClearColor(0, 0, 0, 1.0);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
+
+        try app.poll(allocator, ui, state);
+        try app.run();
+
+        try platform.gui.draw(state, ui_view, app.video());
+        zgui.backend.draw();
+
+        try ui.swap();
     }
 }
-
-const DoubleBuffer = struct {
-    res: *const GpuResourceManager,
-
-    display_times: [2]f64,
-    current: u1,
-
-    const Channel = enum { y, uv };
-
-    const Inverted = struct {
-        inner: DoubleBuffer,
-
-        fn from(super: DoubleBuffer) Inverted {
-            return .{
-                .inner = .{
-                    .res = super.res,
-                    .display_times = super.display_times,
-                    .current = super.current +% 1,
-                },
-            };
-        }
-
-        fn tex(self: @This()) Nv12Tex {
-            const y = self.inner.res.tex.get(if (self.inner.current == 0) .y_front else .y_back);
-            const uv = self.inner.res.tex.get(if (self.inner.current == 0) .uv_front else .uv_back);
-
-            return .{ .y = y, .uv = uv };
-        }
-
-        fn display_time(self: @This()) f64 {
-            return self.inner.display_times[self.inner.current];
-        }
-    };
-
-    pub fn init(res: *const GpuResourceManager) DoubleBuffer {
-        return .{
-            .res = res,
-            .display_times = .{ 0.0, 0.0 },
-            .current = 0,
-        };
-    }
-
-    fn tex(self: @This(), comptime ch: Channel) c_uint {
-        return switch (ch) {
-            .y => self.res.tex.get(if (self.current == 0) .y_front else .y_back),
-            .uv => self.res.tex.get(if (self.current == 0) .uv_front else .uv_back),
-        };
-    }
-
-    fn pbo(self: @This(), comptime ch: Channel) c_uint {
-        return switch (ch) {
-            .y => self.res.pbo.get(if (self.current == 0) .y_front else .y_back),
-            .uv => self.res.pbo.get(if (self.current == 0) .uv_front else .uv_back),
-        };
-    }
-
-    fn set_display_time(self: *@This(), in_seconds: f64) void {
-        self.display_times[self.current] = in_seconds;
-    }
-
-    fn invert(self: @This()) Inverted {
-        return Inverted.from(self);
-    }
-
-    fn swap(self: *@This()) void {
-        self.current = self.current +% 1;
-    }
-};
 
 const Id = enum(usize) {
     texture = 0,
@@ -413,28 +267,28 @@ const Id = enum(usize) {
     blur,
 };
 
-fn render(
+pub fn render(
     view: *Viewport,
-    stable_buffer: *DoubleBuffer,
+    fbs: *FbStack,
+    front: DoubleBuffer.Buffer,
     angle_calc: AngleCalc,
     res: *const GpuResourceManager,
     camera: Camera,
 ) !void {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
-    gl.ClearColor(0, 0, 0, 0);
-    gl.Clear(gl.COLOR_BUFFER_BIT);
+    try fbs.push(res.fbo.get(.out));
+    defer fbs.pop();
 
-    const tex = stable_buffer.invert().tex();
-
-    angle_calc.execute(view, tex);
+    const tex: Nv12Tex = .{ .y = res.tex.get(front.tex(.y)), .uv = res.tex.get(front.tex(.uv)) };
+    try angle_calc.execute(view, fbs, tex);
 
     {
-        const z = ztracy.ZoneN(@src(), "background pass");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "background pass" });
+        defer z.end();
 
-        blur(res.blur(), res, view, tex, camera, 6);
+        try blur(res.blur(), res, view, fbs, tex, camera, 6);
         const prog = res.prog.get(.bg);
 
         gl.UseProgram(prog);
@@ -446,6 +300,12 @@ fn render(
         gl.ActiveTexture(gl.TEXTURE1);
         gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
 
+        gl.ActiveTexture(gl.TEXTURE2);
+        gl.BindTexture(gl.TEXTURE_2D, tex.y);
+
+        gl.ActiveTexture(gl.TEXTURE3);
+        gl.BindTexture(gl.TEXTURE_2D, tex.uv);
+
         const u_world_transform = camera.getBackgroundWorldTransform();
         const u_view_transform = Mat2.identity; // don't zoom in on background
         const u_clip_transform = camera.getViewClipTransform();
@@ -456,13 +316,19 @@ fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 2);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 3);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), res.meta.circle_radius * camera.scale * camera.zoom);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), zoom);
+
+        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     {
-        const z = ztracy.ZoneN(@src(), "ui pass");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "ui pass" });
+        defer z.end();
 
         const circle_prog = res.prog.get(.circle);
         const ring_prog = res.prog.get(.ring);
@@ -473,26 +339,31 @@ fn render(
 
         // Draw Transparent Puck
         gl.UseProgram(circle_prog);
-        gl.BindVertexArray(res.vao.get(.circle));
+        gl.BindVertexArray(res.vao.get(.tex));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
-        gl.DrawArrays(gl.TRIANGLE_FAN, 0, @intCast(res.meta.circle_len));
+
+        gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_radius"), res.meta.circle_radius);
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Draw Ring (matches ring in gameplay)
         gl.UseProgram(ring_prog);
-        gl.BindVertexArray(res.vao.get(.ring));
+        gl.BindVertexArray(res.vao.get(.tex));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
-        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, @intCast(res.meta.ring_len));
+
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_radius"), res.meta.ring_radius);
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_thickness"), res.meta.ring_thickness);
+        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     {
-        const z = ztracy.ZoneN(@src(), "video pass");
-        defer z.End();
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "video pass" });
+        defer z.end();
 
         const prog = res.prog.get(.tex);
 
@@ -526,17 +397,25 @@ fn render(
 
         gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
-        gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution[0], camera.video_resolution[1]);
+        gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution.width, camera.video_resolution.height);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 }
 
-fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex: Nv12Tex, camera: Camera, comptime passes: u32) void {
+fn blur(
+    b: BlurManager,
+    res: *const GpuResourceManager,
+    view: *Viewport,
+    fbs: *FbStack,
+    src_tex: Nv12Tex,
+    camera: Camera,
+    comptime passes: u32,
+) !void {
     if (passes == 0) return;
 
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
     std.debug.assert(passes & 1 == 0);
 
@@ -544,16 +423,8 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
     const height: c_int = @intCast(b.resolution.height);
     const program = res.prog.get(.blur);
 
-    const cache: c_uint = blk: {
-        var buf: [1]c_int = undefined;
-        gl.GetIntegerv(gl.FRAMEBUFFER_BINDING, &buf);
-
-        break :blk @intCast(buf[0]);
-    };
-    defer gl.BindFramebuffer(gl.FRAMEBUFFER, cache);
-
-    view.set(width, height);
-    defer view.restore();
+    try view.push(width, height);
+    defer view.pop();
 
     gl.BindVertexArray(res.vao.get(.blur));
     defer gl.BindVertexArray(0);
@@ -594,43 +465,13 @@ fn blur(b: BlurManager, res: *const GpuResourceManager, view: *Viewport, src_tex
 
         gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
+
+    gl.BindFramebuffer(gl.FRAMEBUFFER, fbs.get());
 }
-
-const Viewport = struct {
-    width: c_int,
-    height: c_int,
-
-    cached: ?[2]c_int = null,
-
-    fn init(width: c_int, height: c_int) Viewport {
-        gl.Viewport(0, 0, width, height);
-
-        return .{ .width = width, .height = height };
-    }
-
-    fn set(self: *@This(), width: c_int, height: c_int) void {
-        gl.Viewport(0, 0, width, height);
-        self.cached = .{ self.width, self.height };
-
-        self.width = width;
-        self.height = height;
-    }
-
-    fn restore(self: *@This()) void {
-        if (self.cached == null) @panic("viewport manager state corrupted");
-
-        const view = self.cached.?;
-        gl.Viewport(0, 0, view[0], view[1]);
-
-        self.width = view[0];
-        self.height = view[1];
-        self.cached = null;
-    }
-};
 
 const Nv12Tex = struct { y: c_uint, uv: c_uint };
 
-const AngleCalc = struct {
+pub const AngleCalc = struct {
     res: *const GpuResourceManager,
     colour_matrix: [*]const [9]f32,
 
@@ -643,20 +484,20 @@ const AngleCalc = struct {
         };
     }
 
-    pub fn execute(self: @This(), view: *Viewport, tex: Nv12Tex) void {
-        const zone = ztracy.ZoneN(@src(), "angle calc pass");
-        defer zone.End();
+    pub fn execute(self: @This(), view: *Viewport, fbs: *FbStack, tex: Nv12Tex) !void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "angle calc pass" });
+        defer zone.end();
 
         const program = self.res.prog.get(.angle);
 
-        view.set(1, 1);
-        defer view.restore();
+        try view.push(1, 1);
+        defer view.pop();
 
         gl.BindVertexArray(self.res.vao.get(.empty));
         defer gl.BindVertexArray(0);
 
-        gl.BindFramebuffer(gl.FRAMEBUFFER, self.res.fbo.get(.angle));
-        defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+        try fbs.push(self.res.fbo.get(.angle));
+        defer fbs.pop();
 
         gl.ActiveTexture(gl.TEXTURE0);
         gl.BindTexture(gl.TEXTURE_2D, tex.y);
@@ -676,10 +517,10 @@ const AngleCalc = struct {
     }
 };
 
-const Camera = struct {
+pub const Camera = struct {
     view_to_clip: Mat2,
 
-    video_resolution: struct { c_int, c_int }, // TODO: consolidate this with Resolution struct in GpuResourceManager
+    video_resolution: Resolution,
 
     world_aspect: f32,
     video_aspect: f32,
@@ -706,8 +547,12 @@ const Camera = struct {
     };
     // zig fmt: on
 
-    pub fn init(video_resolution: struct { u32, u32 }, window_width: c_int, window_height: c_int, colour_space: c.AVColorSpace) Camera {
-        const video_width, const video_height = video_resolution;
+    pub fn init(render_view: Viewport, input_video_resolution: Resolution, colour_space: c.AVColorSpace) Camera {
+        const video_resolution = input_video_resolution;
+        const video_width = video_resolution.width;
+        const video_height = video_resolution.height;
+
+        const window_width, const window_height = render_view.get();
 
         const video_aspect = @as(f32, @floatFromInt(video_width)) / @as(f32, @floatFromInt(video_height));
         const window_aspect = @as(f32, @floatFromInt(window_width)) / @as(f32, @floatFromInt(window_height));
@@ -728,7 +573,7 @@ const Camera = struct {
 
         return .{
             .view_to_clip = calculateAspectCorrection(world_aspect, window_aspect),
-            .video_resolution = .{ @intCast(video_width), @intCast(video_height) },
+            .video_resolution = video_resolution,
 
             .world_aspect = world_aspect,
             .video_aspect = video_aspect,
@@ -820,82 +665,185 @@ const Camera = struct {
     }
 };
 
-pub fn uploadYTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+pub fn uploadPlane(comptime ch: DoubleBuffer.Channel, res: *const GpuResourceManager, buffer: DoubleBuffer.Buffer, frame: *c.AVFrame) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "upload " ++ @tagName(ch) ++ " plane" });
+    defer zone.end();
 
-    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.y));
-    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0); // Disable PBO to read directly from FFMpeg strided memory
 
-    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.y));
+    gl.BindTexture(gl.TEXTURE_2D, res.tex.get(buffer.tex(ch)));
     defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+    const is_y_plane = ch == .y;
 
-    if (pbo) |ptr| {
-        const z = ztracy.ZoneN(@src(), "y plane upload");
-        defer z.End();
+    const width: usize = @intCast(if (is_y_plane) frame.width else @divTrunc(frame.width, 2));
+    const height: usize = @intCast(if (is_y_plane) frame.height else @divTrunc(frame.height, 2));
+    const idx: usize = if (is_y_plane) 0 else 1;
 
-        const bytes_per_line: usize = @intCast(frame.linesize[0]);
-        const height: usize = @intCast(frame.height);
-        const dst_stride = @as(usize, @intCast(frame.width * Y_BPP));
+    // TODO: merge?
+    const bpp: c_int = if (is_y_plane) Y_BPP else UV_BPP;
+    const alignment: c_int = if (is_y_plane) 1 else 2;
 
-        for (0..height) |y| {
-            const src_offset = y * bytes_per_line;
-            const dst_offset = y * dst_stride;
-            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[0][src_offset..][0..dst_stride]);
-        }
-        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
-    }
+    const fmt: c_uint = if (is_y_plane) gl.RED else gl.RG;
 
-    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, gl.RED, gl.UNSIGNED_BYTE, null);
+    gl.PixelStorei(gl.UNPACK_ALIGNMENT, alignment);
+    gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @intCast(@divTrunc(frame.linesize[idx], bpp)));
+    defer gl.PixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+
+    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @intCast(width), @intCast(height), fmt, gl.UNSIGNED_BYTE, frame.data[idx]);
 }
 
-pub fn uploadUvTexture(stable_buffer: DoubleBuffer, frame: *c.AVFrame) void {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, fbs: FbStack, camera: Camera) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
-    gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, stable_buffer.pbo(.uv));
-    defer gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+    const width, const height = view.get();
 
-    gl.BindTexture(gl.TEXTURE_2D, stable_buffer.tex(.uv));
+    gl.BindVertexArray(res.vao.get(.empty));
+    defer gl.BindVertexArray(0);
+
+    gl.ActiveTexture(gl.TEXTURE0);
+
+    gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.out));
     defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-    const pbo: ?[*]u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_UNPACK_BUFFER, gl.WRITE_ONLY));
+    const program = res.prog.get(.rgb_to_nv12);
+    gl.UseProgram(program);
+    defer gl.UseProgram(0);
 
-    if (pbo) |ptr| {
-        const z = ztracy.ZoneN(@src(), "uv plane upload");
-        defer z.End();
+    gl.Uniform1i(gl.GetUniformLocation(program, "u_rgb_tex"), 0);
+    gl.UniformMatrix3fv(gl.GetUniformLocation(program, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
-        const bytes_per_line: usize = @intCast(frame.linesize[1]);
-        const height: usize = @intCast(@divTrunc(frame.height, 2));
-        const dst_stride = @as(usize, @intCast(@divTrunc(frame.width, 2) * UV_BPP));
+    const is_y_loc = gl.GetUniformLocation(program, "u_is_y");
 
-        for (0..height) |y| {
-            const src_offset = y * bytes_per_line;
-            const dst_offset = y * dst_stride;
-            @memcpy(ptr[dst_offset..][0..dst_stride], frame.data[1][src_offset..][0..dst_stride]);
-        }
-        _ = gl.UnmapBuffer(gl.PIXEL_UNPACK_BUFFER);
+    {
+        try view.push(width, height);
+        defer view.pop();
+
+        // render Y plane
+        gl.BindFramebuffer(gl.FRAMEBUFFER, res.fbo.get(.y));
+        gl.Uniform1i(is_y_loc, 1);
+        gl.DrawArrays(gl.TRIANGLES, 0, 3);
     }
 
-    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 2);
-    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @divTrunc(frame.width, 2), @divTrunc(frame.height, 2), gl.RG, gl.UNSIGNED_BYTE, null);
+    {
+        try view.push(@divTrunc(width, 2), @divTrunc(height, 2));
+        defer view.pop();
+
+        // render UV plane
+        gl.BindFramebuffer(gl.FRAMEBUFFER, res.fbo.get(.uv));
+        gl.Uniform1i(is_y_loc, 0);
+        gl.DrawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    gl.BindFramebuffer(gl.FRAMEBUFFER, fbs.get());
 }
 
-pub fn downloadFrame(res: *const GpuResourceManager, view: Viewport, current_pbo: u1) ?[]const u8 {
-    const zone = ztracy.Zone(@src());
-    defer zone.End();
+pub fn mapNv12Frame(res: *const GpuResourceManager, view: Viewport, idx: PixelBufferPool.Index, linesize: Linesize(c.AV_PIX_FMT_NV12)) ?struct { []const u8, []const u8 } {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
-    const idx = current_pbo +% 1;
-
-    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(if (idx == 1) .rgb_front else .rgb_back));
+    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(idx));
     defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 
     const maybe_ptr: ?[*]const u8 = @ptrCast(gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY));
-    defer _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
 
-    const ptr = maybe_ptr orelse return null;
-    return ptr[0..@intCast(view.width * view.height * RGB24_BPP)];
+    if (maybe_ptr) |ptr| {
+        _, const height = view.get();
+        const y_len: usize = @intCast(linesize.y * height);
+        const uv_len: usize = @intCast(linesize.uv * @divTrunc(height, 2));
+
+        return .{ ptr[0..y_len], ptr[y_len..][0..uv_len] };
+    }
+
+    return null;
+}
+
+pub fn unmapNv12Frame(res: *const GpuResourceManager, idx: PixelBufferPool.Index) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(idx));
+    _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
+
+    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+}
+
+fn checkFile(maybe_path: ?[]const u8) !bool {
+    const path = maybe_path orelse return true;
+
+    var buf: [0x40]u8 = undefined;
+
+    var writer = std.fs.File.stdout().writer(buf[0..][0..0x20]);
+    var reader = std.fs.File.stdin().reader(buf[0x20..][0..0x20]);
+
+    var stdout = &writer.interface;
+    var stdin = &reader.interface;
+
+    std.fs.cwd().access(path, .{}) catch |e| switch (e) {
+        error.FileNotFound => return true,
+        else => return e,
+    };
+
+    try stdout.print("File '{s}' already exists. Overwrite? (y/n): ", .{path});
+    try stdout.flush();
+
+    const line = try stdin.takeDelimiter('\n') orelse return false;
+    const answer = std.mem.trim(u8, line, "\r\t\n");
+
+    return std.ascii.eqlIgnoreCase(answer, "y");
+}
+
+pub fn shutdown(queues: *Decoder.Queues) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    while (!signal.should_quit.load(.monotonic)) {
+        signal.should_quit.store(true, .monotonic);
+        std.atomic.spinLoopHint();
+    }
+
+    // wake up all the Queues
+    queues.pkt.video.interrupt();
+    queues.pkt.audio.interrupt();
+    queues.frame.interrupt();
+}
+
+pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) !f64 {
+    const FrameQueue = @import("lib/codec.zig").FrameQueue;
+
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    const frame = decoder.queue.frame.pop() orelse {
+        shutdown(&decoder.queue);
+        return error.early_exit;
+    };
+    defer decoder.queue.frame.recycle(frame);
+
+    const time_base = c.av_q2d(decoder.stream(.video).time_base);
+    const timestamp = @as(f64, @floatFromInt(frame.pts)) * time_base;
+
+    const front = double_buffer.front();
+    uploadPlane(.y, res, front, frame);
+    uploadPlane(.uv, res, front, frame);
+    front.setDisplayTime(timestamp);
+
+    const back = double_buffer.back();
+    uploadPlane(.y, res, back, frame);
+    uploadPlane(.uv, res, back, frame);
+    back.setDisplayTime(timestamp);
+
+    // might as well completely fill the queue before we start
+    {
+        const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for queue to fill", .color = .gray25 });
+        defer z.end();
+
+        while (decoder.queue.frame.len() + 1 != FrameQueue.capacity) {
+            if (decoder.queue.frame.end_of_stream.load(.monotonic)) break;
+            sleep(1 * std.time.ns_per_ms);
+        }
+    }
+
+    return timestamp;
 }

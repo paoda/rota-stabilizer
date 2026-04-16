@@ -12,6 +12,7 @@ zen_workaround.py
 **/*.csv
 **/*.mkv
 **/*.webm
+mov/
 
 **/*.patch
 
