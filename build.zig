@@ -1,5 +1,16 @@
 const std = @import("std");
 
+fn buildCheck(b: *std.Build, mod: *std.Build.Module) !void {
+    const step = b.step("check", "check if rota-stabilizer compiles");
+
+    const exe = b.addExecutable(.{
+        .name = "rota-stabilizer",
+        .root_module = mod,
+    });
+
+    step.dependOn(&exe.step);
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -109,6 +120,8 @@ pub fn build(b: *std.Build) !void {
 
     exe_mod.addImport("tracy", tracy.module("tracy"));
     exe_mod.addImport("tracy_impl", tracy.module(tracy_impl));
+
+    try buildCheck(b, exe_mod);
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
