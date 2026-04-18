@@ -289,7 +289,7 @@ pub const gui = struct {
             }
 
             zgui.sameLine(.{});
-            _ = zgui.inputTextWithHint("Input File", .{ .hint = "input.mp4", .buf = &state.input_path });
+            _ = zgui.inputText("Input", .{ .buf = &state.input_path });
 
             if (zgui.button("Browse...##output", .{})) {
                 const maybe_path = try nfd.saveFileDialog(filter, null);
@@ -297,18 +297,16 @@ pub const gui = struct {
             }
 
             zgui.sameLine(.{});
-            _ = zgui.inputTextWithHint("Output Path", .{ .hint = "output.mp4", .buf = &state.output_path });
+            _ = zgui.inputTextWithHint("Output", .{ .hint = "output.mp4", .buf = &state.output_path });
 
             zgui.spacing();
             zgui.separator();
             zgui.spacing();
 
             const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
-            const output_path: [:0]const u8 = std.mem.sliceTo(state.output_path[0..], 0);
+            const is_possible = input_path.len != 0;
 
             {
-                const is_possible = input_path.len != 0;
-
                 if (!is_possible) zgui.beginDisabled(.{});
                 defer if (!is_possible) zgui.endDisabled();
 
@@ -317,23 +315,28 @@ pub const gui = struct {
 
             zgui.sameLine(.{});
 
-            if (zgui.button("Stop", .{})) {
-                state.request = .idle;
-                state.encode_progress = 0.0;
-            }
-
-            zgui.sameLine(.{});
-
             {
-                const is_possible = input_path.len != 0 and output_path.len != 0;
-
                 if (!is_possible) zgui.beginDisabled(.{});
                 defer if (!is_possible) zgui.endDisabled();
 
                 if (zgui.button("Start Encode", .{})) {
+                    const output_path = blk: {
+                        const str = std.mem.sliceTo(state.output_path[0..], 0);
+                        if (str.len == 0) setPath(&state.output_path, "output.mp4");
+
+                        break :blk std.mem.sliceTo(state.output_path[0..], 0);
+                    };
+
                     state.request = .{ .encode = .{ .src_path = input_path, .dst_path = output_path } };
                     state.encode_progress = 0.0;
                 }
+            }
+
+            zgui.sameLine(.{});
+
+            if (zgui.button("Stop", .{})) {
+                state.request = .idle;
+                state.encode_progress = 0.0;
             }
 
             if (state.encode_progress > 0.0) {
