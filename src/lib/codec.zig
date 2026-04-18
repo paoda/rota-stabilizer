@@ -926,10 +926,10 @@ pub const Decoder = struct {
         self.fmt_ctx.deinit();
     }
 
-    pub fn spawn(self: *Decoder, render: ?[]const u8) !Handles {
+    pub fn spawn(self: *Decoder, headless: bool) !Handles {
         const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{self});
         const video_handle = try std.Thread.spawn(.{}, video.decode, .{self});
-        const audio_handle = if (render) |_| null else try std.Thread.spawn(.{}, audio.decode, .{self});
+        const audio_handle = if (headless) null else try std.Thread.spawn(.{}, audio.decode, .{self});
 
         return .{
             .pkt = pkt_handle,

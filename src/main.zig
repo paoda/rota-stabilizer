@@ -59,163 +59,12 @@ pub fn main() !void {
     const ui = try Ui.init(allocator, startup.ui_window);
     defer ui.deinit();
 
+    const ui_width, const ui_height = try ui.windowSize();
+
     var ui_view: Viewport = .default;
-    const ui_size = try ui.windowSize();
-    try ui_view.push(ui_size[0], ui_size[1]);
+    try ui_view.push(ui_width, ui_height);
 
-    // const should_write = try checkFile(cli.positionals[0]);
-    // if (!should_write) return error.wont_overwrite;
-
-    try signal.setupHandler();
-
-    // if (cli.positionals[0]) |dst_path| {
-    //     // Initialize encoder
-    //     var encoder = try Encoder.init(.{
-    //         .encode_view = encode_view,
-    //         .decoder = &decoder,
-    //     }, hw_encode, dst_path);
-    //     defer encoder.deinit();
-
-    //     const render_start_time = c.SDL_GetPerformanceCounter();
-    //     const perf_freq: f64 = @floatFromInt(c.SDL_GetPerformanceFrequency());
-
-    //     const video_stream = decoder.stream(.video);
-    //     const audio_stream = decoder.stream(.audio);
-
-    //     const estimated_frames: usize = blk: {
-    //         if (video_stream.nb_frames > 0) break :blk @intCast(video_stream.nb_frames);
-    //         if (decoder.fmt_ctx.ptr().duration <= 0) break :blk 0;
-
-    //         // estimate from duration
-    //         const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
-    //         break :blk @intFromFloat(duration_secs * c.av_q2d(frame_rate));
-    //     };
-
-    //     // Initialize progress
-    //     var progress_buffer: [256]u8 = undefined;
-    //     const progress_node = std.Progress.start(.{
-    //         .root_name = "Encoding",
-    //         .estimated_total_items = estimated_frames,
-    //         .draw_buffer = &progress_buffer,
-    //     });
-    //     defer progress_node.end();
-
-    //     try res.setupEncodingTargets(encode_view, encoder._frame);
-
-    //     var upload_buffer: UploadBuffer = .default;
-    //     var frame_count: u64 = 0;
-
-    //     _ = try preload(res, &decoder, double_buffer);
-    //     try render(&render_view, &fbs, double_buffer.front(), angle_calc, res, camera);
-    //     try writeToNv12Tex(res, &encode_view, fbs, camera);
-
-    //     const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
-
-    //     while (!signal.should_quit.load(.monotonic)) {
-    //         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "encode loop" });
-    //         defer zone.end();
-
-    //         // Process any pending audio packets (remux to output)
-    //         while (decoder.queue.pkt.audio.tryPop()) |audio_pkt| {
-    //             try encoder.writeAudioPacket(audio_stream, audio_pkt);
-
-    //             var pkt: ?*c.AVPacket = audio_pkt;
-    //             c.av_packet_free(&pkt);
-    //         }
-
-    //         if (decoder.queue.frame.pop()) |frame| {
-    //             defer decoder.queue.frame.recycle(frame);
-    //             defer double_buffer.swap();
-    //             defer frame_count += 1; // increment after frame is sent to the GPU
-
-    //             const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
-    //             defer z.end();
-
-    //             const back = double_buffer.back();
-    //             uploadPlane(.y, res, back, frame);
-    //             uploadPlane(.uv, res, back, frame);
-
-    //             try render(&render_view, &fbs, back.flip(), angle_calc, res, camera);
-    //             try writeToNv12Tex(res, &encode_view, fbs, camera);
-
-    //             const width, const height = encode_view.get();
-
-    //             {
-    //                 const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
-    //                 defer pbo_z.end();
-
-    //                 const idx = upload_buffer.current();
-
-    //                 // read Y and UV into single contiguous PBO with linesize padding
-    //                 gl.BindBuffer(gl.PIXEL_PACK_BUFFER, res.pbo.get(idx));
-    //                 defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
-
-    //                 {
-    //                     const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
-    //                     defer read_z.end();
-
-    //                     gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
-    //                     gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.y));
-    //                     gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
-    //                 }
-
-    //                 {
-    //                     const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
-    //                     defer read_z.end();
-
-    //                     // after y plane in memory
-    //                     const uv_offset: usize = @intCast(linesize.y * height);
-    //                     gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
-    //                     gl.BindFramebuffer(gl.READ_FRAMEBUFFER, res.fbo.get(.uv));
-    //                     gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
-    //                 }
-
-    //                 gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
-    //                 gl.BindFramebuffer(gl.READ_FRAMEBUFFER, fbs.get());
-
-    //                 {
-    //                     const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
-    //                     defer flush_z.end();
-
-    //                     gl.Flush(); // trigger readback immediately
-    //                 }
-
-    //                 if (upload_buffer.next()) |upload| blk: {
-    //                     const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse break :blk;
-    //                     defer unmapNv12Frame(res, upload.id);
-
-    //                     try encoder.encodeNv12Frame(y, uv, upload.pts);
-    //                 }
-    //             }
-
-    //             upload_buffer.advance(frame.pts);
-
-    //             // Update progress
-    //             progress_node.setCompletedItems(frame_count);
-    //         } else if (decoder.queue.frame.end_of_stream.load(.monotonic)) {
-    //             defer shutdown(&decoder.queue);
-    //             defer std.Progress.setStatus(.success);
-
-    //             const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
-    //             defer z.end();
-
-    //             upload_buffer.skip(); // to access the pending frames
-
-    //             while (upload_buffer.flush()) |upload| {
-    //                 const y, const uv = mapNv12Frame(res, encode_view, upload.id, linesize) orelse continue;
-    //                 defer unmapNv12Frame(res, upload.id);
-
-    //                 try encoder.encodeNv12Frame(y, uv, upload.pts);
-    //             }
-
-    //             // Calculate and display final stats
-    //             const elapsed: f64 = @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - render_start_time)) / perf_freq;
-    //             const video_duration = @as(f64, @floatFromInt(frame_count)) / c.av_q2d(frame_rate);
-    //             const speed = video_duration / elapsed;
-
-    //             break log.info("Finished rendering {} frames in {d:.1}s ({d:.2}x realtime)", .{ frame_count, elapsed, speed });
-    //         }
-    //     }
+    try signal.setupHandler(); // NB: Has to come after SDL Init
 
     var app: App = .default;
     defer app.deinit(allocator);
@@ -253,7 +102,6 @@ pub fn main() !void {
         try app.run();
 
         try platform.gui.draw(state, ui_view, app.video());
-        zgui.backend.draw();
 
         try ui.swap();
     }

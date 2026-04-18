@@ -233,7 +233,9 @@ pub const gui = struct {
         defer zone.end();
 
         const width, const height = ui_view.get();
+
         zgui.backend.newFrame(@intCast(width), @intCast(height));
+        defer zgui.backend.draw();
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
@@ -317,15 +319,13 @@ pub const gui = struct {
             zgui.sameLine(.{});
 
             {
-                const is_possible = input_path.len != 0 and output_path.len != 0 and false;
+                const is_possible = input_path.len != 0 and output_path.len != 0;
 
                 if (!is_possible) zgui.beginDisabled(.{});
                 defer if (!is_possible) zgui.endDisabled();
 
-                if (zgui.button("Start Encode (TODO)", .{})) {
-                    state.request = .{
-                        .encode = .{ .src_path = input_path, .dst_path = output_path },
-                    };
+                if (zgui.button("Start Encode", .{})) {
+                    state.request = .{ .encode = .{ .src_path = input_path, .dst_path = output_path } };
                 }
             }
         }

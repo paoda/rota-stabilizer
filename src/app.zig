@@ -102,12 +102,7 @@ const PlaybackSession = struct {
         defer zone.end();
 
         const hw_device: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
-
-        const hw_device_name = blk: {
-            if (hw_device == c.AV_HWDEVICE_TYPE_NONE) break :blk "software";
-            break :blk std.mem.span(c.av_hwdevice_get_type_name(hw_device));
-        };
-        log.debug("using {s} for hw decode", .{hw_device_name});
+        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_device)});
 
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
@@ -120,7 +115,7 @@ const PlaybackSession = struct {
 
         double_buffer.* = .{};
 
-        const handles = try decoder.spawn(null);
+        const handles = try decoder.spawn(false);
         errdefer handles.deinit();
 
         var render_view: Viewport = .default;
@@ -285,15 +280,237 @@ const PlaybackSession = struct {
     }
 };
 
+const Encoder = @import("lib/codec.zig").Encoder;
+const UploadBuffer = @import("lib.zig").UploadBuffer;
+const writeToNv12Tex = @import("main.zig").writeToNv12Tex;
+const mapNv12Frame = @import("main.zig").mapNv12Frame;
+const unmapNv12Frame = @import("main.zig").unmapNv12Frame;
+const Linesize = @import("lib.zig").Linesize;
+
 const EncodeSession = struct {
-    pub fn init() EncodeSession {
-        @panic("TODO: implement");
+    encoder: *Encoder,
+    decoder: *Decoder,
+
+    manager: *GpuResourceManager,
+
+    camera: Camera,
+    angle_calc: AngleCalc,
+
+    double_buffer: *DoubleBuffer,
+    handles: Decoder.Handles,
+
+    render_view: Viewport,
+    encode_view: Viewport,
+
+    upload_buffer: UploadBuffer,
+
+    fbs: FbStack,
+
+    const log = std.log.scoped(.encode_session);
+
+    fn stop(self: *const @This()) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
+        // TODO: session unique atomic
+        while (!signal.should_quit.load(.monotonic)) {
+            signal.should_quit.store(true, .monotonic);
+            std.atomic.spinLoopHint();
+        }
+
+        self.decoder.queue.pkt.video.interrupt();
+        self.decoder.queue.pkt.audio.interrupt();
+        self.decoder.queue.frame.interrupt();
     }
 
-    pub fn deinit(self: EncodeSession, allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
-        @panic("TODO: deinit");
+    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, src_path: []const u8, dst_path: []const u8) !EncodeSession {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.init" });
+        defer zone.end();
+
+        const hw_dec: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
+        const hw_enc: c.AVHWDeviceType = @intFromEnum(state.hw_enc);
+        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_dec)});
+        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_enc)});
+
+        var render_view: Viewport = .default;
+        try render_view.push(state.resolution[0], state.resolution[1]);
+
+        var encode_view: Viewport = .default;
+        try encode_view.push(state.resolution[0], state.resolution[1]);
+
+        const decoder = try allocator.create(Decoder);
+        errdefer allocator.destroy(decoder);
+
+        decoder.* = try Decoder.init(allocator, hw_dec, src_path, true);
+        errdefer decoder.deinit(allocator);
+
+        const encoder = try allocator.create(Encoder);
+        errdefer allocator.destroy(encoder);
+
+        encoder.* = try Encoder.init(
+            .{ .encode_view = encode_view, .decoder = decoder },
+            hw_enc,
+            dst_path,
+        );
+        errdefer encoder.deinit();
+
+        const double_buffer = try allocator.create(DoubleBuffer);
+        errdefer allocator.destroy(double_buffer);
+
+        double_buffer.* = .{};
+
+        const manager = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
+        errdefer manager.deinit(allocator);
+
+        try manager.setupEncodingTargets(encode_view, encoder._frame);
+
+        const handles = try decoder.spawn(true);
+        errdefer handles.deinit();
+
+        const camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
+        const angle_calc = try AngleCalc.init(manager, camera);
+
+        // TODO: Track + Display Encode Progress
+
+        var fbs: FbStack = .default;
+
+        _ = try preload(manager, decoder, double_buffer);
+        try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera);
+        try writeToNv12Tex(manager, &encode_view, fbs, camera);
+
+        return .{
+            .encoder = encoder,
+            .decoder = decoder,
+            .manager = manager,
+            .double_buffer = double_buffer,
+            .upload_buffer = .default,
+            .camera = camera,
+            .angle_calc = angle_calc,
+            .fbs = fbs,
+
+            .handles = handles,
+
+            .render_view = render_view,
+            .encode_view = encode_view,
+        };
+    }
+
+    pub fn deinit(self: *EncodeSession, allocator: std.mem.Allocator) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.deinit" });
+        defer zone.end();
+
+        self.stop();
+
+        self.handles.deinit();
+        self.manager.deinit(allocator);
+
+        allocator.destroy(self.double_buffer);
+
+        self.encoder.deinit();
+        allocator.destroy(self.encoder);
+
+        self.decoder.deinit(allocator);
+        allocator.destroy(self.decoder);
+    }
+
+    // FIXME: This is vsync bound for literally no reason
+    pub fn run(self: *EncodeSession) !void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.run" });
+        defer zone.end();
+
+        const audio_stream = self.decoder.stream(.audio);
+        const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(self.encoder._frame);
+
+        // Process any pending audio packets (remux to output)
+        while (self.decoder.queue.pkt.audio.tryPop()) |pkt| {
+            try self.encoder.writeAudioPacket(audio_stream, pkt);
+
+            var tmp: ?*c.AVPacket = pkt;
+            c.av_packet_free(&tmp);
+        }
+
+        if (self.decoder.queue.frame.pop()) |frame| {
+            defer self.decoder.queue.frame.recycle(frame);
+            defer self.double_buffer.swap();
+            // defer frame_count += 1; // increment after frame is sent to the GPU
+
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
+            defer z.end();
+
+            const back = self.double_buffer.back();
+            uploadPlane(.y, self.manager, back, frame);
+            uploadPlane(.uv, self.manager, back, frame);
+
+            try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera);
+            try writeToNv12Tex(self.manager, &self.encode_view, self.fbs, self.camera);
+
+            const width, const height = self.encode_view.get();
+            const gl = @import("gl");
+
+            {
+                const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
+                defer pbo_z.end();
+
+                const idx = self.upload_buffer.current();
+
+                // read Y and UV into single contiguous PBO with linesize padding
+                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.manager.pbo.get(idx));
+                defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+
+                {
+                    const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
+                    defer read_z.end();
+
+                    gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
+                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.manager.fbo.get(.y));
+                    gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
+                }
+
+                {
+                    const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
+                    defer read_z.end();
+
+                    // after y plane in memory
+                    const uv_offset: usize = @intCast(linesize.y * height);
+                    gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
+                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.manager.fbo.get(.uv));
+                    gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
+                }
+
+                gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
+                gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.fbs.get());
+
+                {
+                    const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
+                    defer flush_z.end();
+
+                    gl.Flush(); // trigger readback immediately
+                }
+
+                if (self.upload_buffer.next()) |upload| blk: {
+                    const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse break :blk;
+                    defer unmapNv12Frame(self.manager, upload.id);
+
+                    try self.encoder.encodeNv12Frame(y, uv, upload.pts);
+                }
+            }
+
+            self.upload_buffer.advance(frame.pts);
+        } else if (self.decoder.queue.frame.end_of_stream.load(.monotonic)) {
+            defer self.stop();
+
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
+            defer z.end();
+
+            self.upload_buffer.skip(); // to access the pending frames
+
+            while (self.upload_buffer.flush()) |upload| {
+                const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse continue;
+                defer unmapNv12Frame(self.manager, upload.id);
+
+                try self.encoder.encodeNv12Frame(y, uv, upload.pts);
+            }
+        }
     }
 };
 
@@ -318,8 +535,12 @@ pub const App = struct {
 
         switch (request) {
             .idle => {}, // already idle
-            .encode => |_| self.session = .{
-                .encode = @panic("TODO: call EncodeSession.init"),
+            .encode => |paths| {
+                const source = paths.src_path;
+                const target = paths.dst_path;
+
+                const session = try EncodeSession.init(allocator, state, source, target);
+                self.session = .{ .encode = session };
             },
             .playback => |path| {
                 const session = try PlaybackSession.init(allocator, state, ui, path);
@@ -333,8 +554,8 @@ pub const App = struct {
         defer zone.end();
 
         switch (self.session) {
-            .idle, .encode => {},
-            .playback => |*s| try s.run(),
+            .idle => {},
+            inline .playback, .encode => |*s| try s.run(),
         }
     }
 
@@ -353,3 +574,9 @@ pub const App = struct {
         self.session = .idle;
     }
 };
+
+fn getHwDeviceName(@"type": c.AVHWDeviceType) []const u8 {
+    if (@"type" == c.AV_HWDEVICE_TYPE_NONE) return "software";
+
+    return std.mem.span(c.av_hwdevice_get_type_name(@"type"));
+}
