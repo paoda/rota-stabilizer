@@ -48,7 +48,11 @@ jobs:
 
       - name: bundle-dylibs
         if: runner.os == 'macOS'
-        run: dylibbundler -cd -b -x zig-out/bin/rota-stabilizer -d zig-out/bin/libs -p @executable_path/libs
+        run: |
+          dylibbundler -cd -b -x zig-out/bin/rota-stabilizer -d zig-out/bin/libs -p @executable_path/libs
+
+          codesign --force --sign - zig-out/bin/libs/*.dylib
+          codesign --force --sign - zig-out/bin/rota-stabilizer
 
       - name: upload
         uses: actions/upload-artifact@v4
