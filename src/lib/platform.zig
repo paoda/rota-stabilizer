@@ -209,6 +209,7 @@ pub const gui = struct {
             .hw_dec = .Software,
             .hw_enc = .Software,
             .bit_rate = 30_000,
+            .encode_progress = 0.0,
             .resolution = .{ startup.render_target.width, startup.render_target.height },
         };
 
@@ -220,6 +221,8 @@ pub const gui = struct {
 
         bit_rate: i32,
         resolution: [2]i32,
+
+        encode_progress: f32,
 
         request: ?Request,
 
@@ -314,7 +317,10 @@ pub const gui = struct {
 
             zgui.sameLine(.{});
 
-            if (zgui.button("Stop", .{})) state.request = .idle;
+            if (zgui.button("Stop", .{})) {
+                state.request = .idle;
+                state.encode_progress = 0.0;
+            }
 
             zgui.sameLine(.{});
 
@@ -326,7 +332,19 @@ pub const gui = struct {
 
                 if (zgui.button("Start Encode", .{})) {
                     state.request = .{ .encode = .{ .src_path = input_path, .dst_path = output_path } };
+                    state.encode_progress = 0.0;
                 }
+            }
+
+            if (state.encode_progress > 0.0) {
+                zgui.spacing();
+
+                zgui.progressBar(.{
+                    .fraction = state.encode_progress,
+                    .w = -1.0,
+                    .h = 0.0,
+                    .overlay = "Encoding...",
+                });
             }
         }
     }

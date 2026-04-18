@@ -1,6 +1,7 @@
 const std = @import("std");
 const tracy = @import("tracy");
 const c = @import("lib.zig").c;
+const gl = @import("gl");
 
 const Decoder = @import("lib/codec.zig").Decoder;
 const Camera = @import("main.zig").Camera;
@@ -306,6 +307,12 @@ const EncodeSession = struct {
 
     fbs: FbStack,
 
+    frame_count: usize = 0,
+    frame_total: usize,
+
+    refresh_rate: f32,
+    is_finished: bool = false,
+
     const log = std.log.scoped(.encode_session);
 
     fn stop(self: *const @This()) void {
@@ -323,7 +330,7 @@ const EncodeSession = struct {
         self.decoder.queue.frame.interrupt();
     }
 
-    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, src_path: []const u8, dst_path: []const u8) !EncodeSession {
+    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, src_path: []const u8, dst_path: []const u8) !EncodeSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.init" });
         defer zone.end();
 
@@ -378,6 +385,15 @@ const EncodeSession = struct {
         try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
+        const frame_estimate: usize = blk: {
+            const stream = decoder.stream(.video);
+            if (stream.nb_frames > 0) break :blk @intCast(stream.nb_frames);
+            if (decoder.fmt_ctx.ptr().duration <= 0) break :blk 0;
+
+            const duration_secs = @as(f64, @floatFromInt(decoder.fmt_ctx.ptr().duration)) / @as(f64, c.AV_TIME_BASE);
+            break :blk @intFromFloat(duration_secs * c.av_q2d(decoder.framerate()));
+        };
+
         return .{
             .encoder = encoder,
             .decoder = decoder,
@@ -387,11 +403,14 @@ const EncodeSession = struct {
             .camera = camera,
             .angle_calc = angle_calc,
             .fbs = fbs,
+            .refresh_rate = ui.refreshRate() catch 60.0,
 
             .handles = handles,
 
             .render_view = render_view,
             .encode_view = encode_view,
+
+            .frame_total = frame_estimate,
         };
     }
 
@@ -413,7 +432,6 @@ const EncodeSession = struct {
         allocator.destroy(self.decoder);
     }
 
-    // FIXME: This is vsync bound for literally no reason
     pub fn run(self: *EncodeSession) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.run" });
         defer zone.end();
@@ -421,94 +439,104 @@ const EncodeSession = struct {
         const audio_stream = self.decoder.stream(.audio);
         const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(self.encoder._frame);
 
-        // Process any pending audio packets (remux to output)
-        while (self.decoder.queue.pkt.audio.tryPop()) |pkt| {
-            try self.encoder.writeAudioPacket(audio_stream, pkt);
+        var timer = try std.time.Timer.start();
 
-            var tmp: ?*c.AVPacket = pkt;
-            c.av_packet_free(&tmp);
-        }
+        const offset_s = 6 * 0.001; // P99.9 for input + draw is gonna be ~5ms
+        const interval_s = (1.0 / self.refresh_rate) - offset_s;
+        const target_ns: u64 = @intFromFloat(interval_s * std.time.ns_per_s);
 
-        if (self.decoder.queue.frame.pop()) |frame| {
-            defer self.decoder.queue.frame.recycle(frame);
-            defer self.double_buffer.swap();
-            // defer frame_count += 1; // increment after frame is sent to the GPU
+        while (timer.read() < target_ns) {
 
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
-            defer z.end();
+            // Process any pending audio packets (remux to output)
+            while (self.decoder.queue.pkt.audio.tryPop()) |pkt| {
+                try self.encoder.writeAudioPacket(audio_stream, pkt);
 
-            const back = self.double_buffer.back();
-            uploadPlane(.y, self.manager, back, frame);
-            uploadPlane(.uv, self.manager, back, frame);
+                var tmp: ?*c.AVPacket = pkt;
+                c.av_packet_free(&tmp);
+            }
 
-            try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera);
-            try writeToNv12Tex(self.manager, &self.encode_view, self.fbs, self.camera);
+            if (self.decoder.queue.frame.pop()) |frame| {
+                defer self.decoder.queue.frame.recycle(frame);
+                defer self.double_buffer.swap();
 
-            const width, const height = self.encode_view.get();
-            const gl = @import("gl");
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
+                defer z.end();
 
-            {
-                const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
-                defer pbo_z.end();
+                const back = self.double_buffer.back();
+                uploadPlane(.y, self.manager, back, frame);
+                uploadPlane(.uv, self.manager, back, frame);
 
-                const idx = self.upload_buffer.current();
+                try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera);
+                try writeToNv12Tex(self.manager, &self.encode_view, self.fbs, self.camera);
 
-                // read Y and UV into single contiguous PBO with linesize padding
-                gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.manager.pbo.get(idx));
-                defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+                const width, const height = self.encode_view.get();
 
                 {
-                    const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
-                    defer read_z.end();
+                    const pbo_z = tracy.Zone.begin(.{ .src = @src(), .name = "read from opengl" });
+                    defer pbo_z.end();
 
-                    gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
-                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.manager.fbo.get(.y));
-                    gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
+                    const idx = self.upload_buffer.current();
+
+                    // read Y and UV into single contiguous PBO with linesize padding
+                    gl.BindBuffer(gl.PIXEL_PACK_BUFFER, self.manager.pbo.get(idx));
+                    defer gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
+
+                    {
+                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels y" });
+                        defer read_z.end();
+
+                        gl.PixelStorei(gl.PACK_ROW_LENGTH, @intCast(linesize.y));
+                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.manager.fbo.get(.y));
+                        gl.ReadPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, @ptrFromInt(0));
+                    }
+
+                    {
+                        const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
+                        defer read_z.end();
+
+                        // after y plane in memory
+                        const uv_offset: usize = @intCast(linesize.y * height);
+                        gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
+                        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.manager.fbo.get(.uv));
+                        gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
+                    }
+
+                    gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
+                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.fbs.get());
+
+                    {
+                        const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
+                        defer flush_z.end();
+
+                        gl.Flush(); // trigger readback immediately
+                    }
+
+                    if (self.upload_buffer.next()) |upload| blk: {
+                        const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse break :blk;
+                        defer unmapNv12Frame(self.manager, upload.id);
+
+                        try self.encoder.encodeNv12Frame(y, uv, upload.pts);
+                        self.frame_count += 1;
+                    }
                 }
 
-                {
-                    const read_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.ReadPixels uv" });
-                    defer read_z.end();
+                self.upload_buffer.advance(frame.pts);
+            } else if (self.decoder.queue.frame.end_of_stream.load(.monotonic)) {
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
+                defer z.end();
 
-                    // after y plane in memory
-                    const uv_offset: usize = @intCast(linesize.y * height);
-                    gl.PixelStorei(gl.PACK_ROW_LENGTH, @divTrunc(linesize.uv, 2)); // FFMpeg linesize is bytes, RG is 2 bytes per pixel
-                    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.manager.fbo.get(.uv));
-                    gl.ReadPixels(0, 0, @divTrunc(width, 2), @divTrunc(height, 2), gl.RG, gl.UNSIGNED_BYTE, @ptrFromInt(uv_offset));
-                }
+                self.upload_buffer.skip(); // to access the pending frames
 
-                gl.PixelStorei(gl.PACK_ROW_LENGTH, 0);
-                gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.fbs.get());
-
-                {
-                    const flush_z = tracy.Zone.begin(.{ .src = @src(), .name = "gl.Flush" });
-                    defer flush_z.end();
-
-                    gl.Flush(); // trigger readback immediately
-                }
-
-                if (self.upload_buffer.next()) |upload| blk: {
-                    const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse break :blk;
+                while (self.upload_buffer.flush()) |upload| {
+                    const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse continue;
                     defer unmapNv12Frame(self.manager, upload.id);
 
                     try self.encoder.encodeNv12Frame(y, uv, upload.pts);
+                    self.frame_count += 1;
                 }
-            }
 
-            self.upload_buffer.advance(frame.pts);
-        } else if (self.decoder.queue.frame.end_of_stream.load(.monotonic)) {
-            defer self.stop();
-
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "final frame received" });
-            defer z.end();
-
-            self.upload_buffer.skip(); // to access the pending frames
-
-            while (self.upload_buffer.flush()) |upload| {
-                const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse continue;
-                defer unmapNv12Frame(self.manager, upload.id);
-
-                try self.encoder.encodeNv12Frame(y, uv, upload.pts);
+                self.is_finished = true;
+                break;
             }
         }
     }
@@ -525,12 +553,27 @@ pub const App = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        if (self.session == .encode) {
+            const num: f32 = @floatFromInt(self.session.encode.frame_count);
+            const den: f32 = @floatFromInt(self.session.encode.frame_total);
+            state.encode_progress = num / den;
+
+            if (self.session.encode.is_finished) {
+                state.request = .idle;
+
+                if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
+                    log.warn("encode_progressed finished at {d:.2}", .{state.encode_progress});
+                }
+            }
+        }
+
         const request = state.request orelse return;
 
         // reset necessary state
         self.session.deinit(allocator);
         self.session = .{ .idle = IdleSession.init() };
 
+        state.encode_progress = 0.0;
         state.request = null;
 
         switch (request) {
@@ -539,7 +582,7 @@ pub const App = struct {
                 const source = paths.src_path;
                 const target = paths.dst_path;
 
-                const session = try EncodeSession.init(allocator, state, source, target);
+                const session = try EncodeSession.init(allocator, state, ui, source, target);
                 self.session = .{ .encode = session };
             },
             .playback => |path| {
