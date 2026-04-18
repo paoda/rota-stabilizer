@@ -41,10 +41,14 @@ jobs:
 
       - name: prepare-macos
         if: runner.os == 'macOS'
-        run: brew install ffmpeg
+        run: brew install ffmpeg dylibbundler
 
       - name: build
         run: zig build -Doptimize=ReleaseSafe ${{ matrix.cpu_flag }}
+
+      - name: bundle-dylibs
+        if: runner.os == 'macOS'
+        run: dylibbundler -cd -b -x zig-out/bin/rota-stabilizer -d zig-out/bin/libs -p @executable_path/libs
 
       - name: upload
         uses: actions/upload-artifact@v4
