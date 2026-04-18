@@ -144,6 +144,7 @@ pub const enc = struct {
 
         const Options = struct {
             resolution: Resolution,
+            bit_rate: i64,
 
             input: Input,
 
@@ -169,7 +170,7 @@ pub const enc = struct {
             ctx.framerate = inpt_vid.*.avg_frame_rate;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
             ctx.pix_fmt = codec.pix_fmt;
-            ctx.bit_rate = 30_000 * KBPS_TO_BPS; // FIXME: configurable?
+            ctx.bit_rate = opt.bit_rate * KBPS_TO_BPS;
             ctx.gop_size = @intFromFloat(c.av_q2d(ctx.framerate) / 2);
 
             ctx.thread_count = 0;

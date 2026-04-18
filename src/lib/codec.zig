@@ -964,6 +964,7 @@ pub const Encoder = struct {
 
     pub const Options = struct {
         encode_view: Viewport,
+        bit_rate: c_int,
 
         decoder: *const Decoder,
     };
@@ -1007,6 +1008,7 @@ pub const Encoder = struct {
 
         var codec_ctx = try enc.AvCodecContext.init(codec, fmt_ctx, .{
             .resolution = encode_resolution,
+            .bit_rate = opt.bit_rate,
             .input = .{
                 .fmt_ctx = opt.decoder.fmt_ctx,
                 .video_ctx = opt.decoder.video_ctx,

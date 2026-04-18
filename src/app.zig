@@ -355,7 +355,11 @@ const EncodeSession = struct {
         errdefer allocator.destroy(encoder);
 
         encoder.* = try Encoder.init(
-            .{ .encode_view = encode_view, .decoder = decoder },
+            .{
+                .encode_view = encode_view,
+                .decoder = decoder,
+                .bit_rate = state.bit_rate,
+            },
             hw_enc,
             dst_path,
         );
