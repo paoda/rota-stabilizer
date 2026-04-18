@@ -958,8 +958,6 @@ pub const Encoder = struct {
 
     _hw: ?struct { frame: AvFrame } = null,
 
-    sw_pix_fmt: c.AVPixelFormat,
-
     const log = std.log.scoped(.encode);
 
     pub const Options = struct {
@@ -1095,7 +1093,6 @@ pub const Encoder = struct {
 
                 break :blk ptr.?;
             },
-            .sw_pix_fmt = sw_pix_fmt,
         };
     }
 
@@ -1118,7 +1115,7 @@ pub const Encoder = struct {
 
         src_frame.width = self.resolution.width;
         src_frame.height = self.resolution.height;
-        src_frame.format = self.sw_pix_fmt;
+        src_frame.format = c.AV_PIX_FMT_NV12;
         src_frame.pts = frame_pts;
 
         try self._frame.setYData(y_buf);
