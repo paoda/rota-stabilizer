@@ -445,7 +445,7 @@ const EncodeSession = struct {
 
         var timer = try std.time.Timer.start();
 
-        const offset_s = 6 * 0.001; // P99.9 for input + draw is gonna be ~5ms
+        const offset_s = 7 * 0.001; // P99.9 for input + draw is gonna be ~6ms
         const interval_s = (1.0 / self.refresh_rate) - offset_s;
         const target_ns: u64 = @intFromFloat(interval_s * std.time.ns_per_s);
 
@@ -608,7 +608,7 @@ pub const App = struct {
 
     pub fn video(self: *const App) ?VideoContext {
         return switch (self.session) {
-            .playback => |s| .{ .tex_id = s.manager.tex.get(.out), .render_view = s.render_view },
+            inline .playback, .encode => |s| .{ .tex_id = s.manager.tex.get(.out), .render_view = s.render_view },
             else => null,
         };
     }
