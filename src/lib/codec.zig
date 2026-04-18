@@ -184,6 +184,8 @@ pub const audio = struct {
 
         stream: *c.SDL_AudioStream,
 
+        volume: f32,
+
         const log = std.log.scoped(.audio);
 
         const AudioPll = struct {
@@ -248,6 +250,9 @@ pub const audio = struct {
             try errify(c.SDL_GetAudioDeviceFormat(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &actual, &sample_frames));
             const offset = @as(f64, @floatFromInt(sample_frames)) / @as(f64, @floatFromInt(actual.freq));
 
+            const volume: f32 = 0.5;
+            try errify(c.SDL_SetAudioStreamGain(stream, volume));
+
             log.info("hw latency: {d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
             tracy.plotConfig(.{ .name = "Audio Clock Drift (ms)" });
             tracy.plotConfig(.{ .name = "Audio Samples Queued" });
@@ -259,6 +264,7 @@ pub const audio = struct {
                 .hw_latency_secs = offset,
                 .bytes_per_sample = @intCast(c.av_get_bytes_per_sample(c.AV_SAMPLE_FMT_FLT)),
                 .stream = stream,
+                .volume = volume,
             };
         }
 
@@ -269,7 +275,7 @@ pub const audio = struct {
 
         pub fn unmute(self: *@This()) !void {
             self.is_muted = false;
-            try errify(c.SDL_SetAudioStreamGain(self.stream, 1.0));
+            try errify(c.SDL_SetAudioStreamGain(self.stream, self.volume));
         }
 
         pub fn deinit(self: @This()) void {
