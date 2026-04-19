@@ -67,8 +67,8 @@ pub const Ui = struct {
         zgui.backend.init(window, gl_ctx);
         zgui.io.setIniFilename(null);
 
-        std.log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
-        std.log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
+        log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
+        log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
 
         gl.Enable(gl.BLEND);
         gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);

@@ -3,6 +3,9 @@ const std = @import("std");
 const tracy = @import("tracy");
 const c = @import("../lib.zig").c;
 
+const getPixelFormatName = @import("../lib.zig").getPixelFormatName;
+const KBPS_TO_BPS = 1000;
+
 const Resolution = @import("../lib.zig").Resolution;
 
 pub const enc = struct {
@@ -155,8 +158,6 @@ pub const enc = struct {
         };
 
         pub fn init(codec: AvCodec, fmt: AvFormatContext, opt: Options) !AvCodecContext {
-            const KBPS_TO_BPS = 1000;
-
             var p: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec.ptr());
             errdefer c.avcodec_free_context(&p);
 
@@ -226,8 +227,6 @@ pub const enc = struct {
 };
 
 pub const dec = struct {
-    const log = std.log.scoped(.decode);
-
     pub const AvCodecContext = struct {
         const Kind = enum { video, audio };
         const Options = struct { dev_type: c.AVHWDeviceType = c.AV_HWDEVICE_TYPE_NONE };
@@ -236,6 +235,8 @@ pub const dec = struct {
         stream: c_int,
 
         device: ?Device = null, //TODO: move Device to inside this struct
+
+        const log = std.log.scoped(.dec_codec);
 
         // FIXME: why is this heap allocated?
         pub fn init(allocator: std.mem.Allocator, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) !*AvCodecContext {
@@ -254,6 +255,27 @@ pub const dec = struct {
 
             try self.initSoftware(kind, fmt_ctx);
             return self;
+        }
+
+        // TODO: dump audio information as well?
+        pub fn dump(self: @This()) void {
+            const inner = self.inner.?;
+
+            const width: u32 = @intCast(inner.width);
+            const height: u32 = @intCast(inner.height);
+
+            const gcd = std.math.gcd(width, height);
+            const aspect_ratio = @as(f32, @floatFromInt(inner.width)) / @as(f32, @floatFromInt(inner.height));
+
+            log.debug("bit_rate: {d:.2}kbps", .{@as(f32, @floatFromInt(inner.bit_rate)) / KBPS_TO_BPS});
+            log.debug("resolution: {}x{}", .{ inner.width, inner.height });
+            log.debug("pix_fmt: {s}", .{getPixelFormatName(inner.pix_fmt)});
+            log.debug("sw_pix_fmt: {s}", .{getPixelFormatName(inner.sw_pix_fmt)});
+            log.debug("aspect ratio: {}:{} | {d:.3}", .{ width / gcd, height / gcd, aspect_ratio });
+            log.debug("colour primaries: {s}", .{c.av_color_primaries_name(inner.color_primaries)});
+            log.debug("colour transfer: {s}", .{c.av_color_transfer_name(inner.color_trc)});
+            log.debug("colour space: {s}", .{c.av_color_space_name(inner.colorspace)});
+            log.debug("colour range: {s}", .{c.av_color_range_name(inner.color_range)});
         }
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -339,6 +361,7 @@ pub const dec = struct {
             };
         }
     };
+
     const Device = struct {
         ctx: ?*c.AVBufferRef,
         pix_fmt: c.AVPixelFormat,
@@ -373,6 +396,8 @@ pub const dec = struct {
     pub const AvFormatContext = struct {
         inner: ?*c.AVFormatContext,
 
+        const log = std.log.scoped(.dec_fmt);
+
         pub fn init(path: []const u8) !AvFormatContext {
             var p: ?*c.AVFormatContext = c.avformat_alloc_context();
             errdefer c.avformat_close_input(&p);
@@ -381,6 +406,16 @@ pub const dec = struct {
             _ = try err(c.avformat_find_stream_info(p, null));
 
             return .{ .inner = p };
+        }
+
+        pub fn dump(self: @This()) void {
+            const inner = self.inner.?;
+
+            // bit_rate exists here too
+
+            log.debug("format: {s} ", .{inner.iformat.*.long_name});
+            log.debug("stream count: {}", .{inner.nb_streams});
+            log.debug("bit_rate: {d:.2}kbps", .{@as(f32, @floatFromInt(inner.bit_rate)) / KBPS_TO_BPS});
         }
 
         pub inline fn ptr(self: @This()) *c.AVFormatContext {

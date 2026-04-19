@@ -226,15 +226,15 @@ pub const GpuResourceManager = struct {
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
 
-        const width = dimensions.width;
-        const height = dimensions.height;
+        const width: u32 = @intCast(dimensions.width);
+        const height: u32 = @intCast(dimensions.height);
 
         {
             const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
-            const gcd: c_int = @intCast(std.math.gcd(@as(u32, @intCast(width)), @as(u32, @intCast(height))));
+            const gcd = std.math.gcd(width, height);
 
-            log.debug("Resolution: {}x{}", .{ width, height });
-            log.debug("Aspect Ratio: {}:{} | {d:.5}", .{ @divTrunc(width, gcd), @divTrunc(height, gcd), aspect });
+            log.debug("render resolution: {}x{}", .{ width, height });
+            log.debug("render aspect ratio: {}:{} | {d:.3}", .{ width / gcd, height / gcd, aspect });
         }
 
         manager.vao.init();
@@ -846,3 +846,8 @@ pub const Viewport = struct {
         }
     }
 };
+
+pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
+    if (kind == c.AV_PIX_FMT_NONE) return "none";
+    return std.mem.span(c.av_get_pix_fmt_name(kind));
+}

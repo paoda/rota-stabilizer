@@ -858,10 +858,12 @@ pub const Decoder = struct {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
+        fmt_ctx.dump();
+
         var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
         errdefer video_ctx.deinit(allocator);
 
-        log.debug("colour space: {s}", .{c.av_color_space_name(video_ctx.inner.?.colorspace)});
+        video_ctx.dump();
 
         var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit(allocator);

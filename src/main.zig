@@ -35,7 +35,6 @@ const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
-var zoom: f32 = 1.0;
 
 pub const startup = struct {
     pub const ui_window: Resolution = .{ .width = 1600, .height = 900 };
@@ -167,7 +166,7 @@ pub fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 2);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 3);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), res.meta.circle_radius * camera.scale * camera.zoom);
-        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), zoom);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), 1.0);
 
         gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
