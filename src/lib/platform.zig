@@ -5,6 +5,8 @@ const tracy = @import("tracy");
 const zgui = @import("zgui");
 const nfd = @import("nfd");
 
+const version = @import("build.zig.zon").version;
+
 const Request = @import("../app.zig").Request;
 const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
@@ -41,7 +43,7 @@ pub const Ui = struct {
         try errify(c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO));
         errdefer c.SDL_Quit();
 
-        try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", "0.1.0", "moe.paoda.rota-stabilizer"));
+        try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", version, "moe.paoda.rota-stabilizer"));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, gl.info.version_minor));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));

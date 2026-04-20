@@ -38,6 +38,8 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
+    exe_mod.addAnonymousImport("build.zig.zon", .{ .root_source_file = b.path("build.zig.zon") });
+
     const nfd = b.dependency("nfd", .{ .target = target, .optimize = optimize });
     exe_mod.addImport("nfd", nfd.module("nfd"));
 
