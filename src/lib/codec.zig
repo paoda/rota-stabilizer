@@ -460,6 +460,110 @@ pub const audio = struct {
 };
 
 pub const video = struct {
+    const FilterGraph = struct {
+        graph: ?*c.AVFilterGraph,
+        src: ?*c.AVFilterContext,
+        sink: ?*c.AVFilterContext,
+
+        const PullResult = enum { frame, again, eof };
+
+        // FIXME: don't pass decoder in here?
+        // FIXME: Hardware Acceleration
+
+        fn init(decoder: *const Decoder) !@This() {
+            var graph = c.avfilter_graph_alloc() orelse return error.out_of_memory;
+            errdefer c.avfilter_graph_free(&graph);
+
+            var self: @This() = .{ .graph = graph, .src = null, .sink = null };
+
+            const video_ctx = decoder.video_ctx.inner.?;
+            const stream = decoder.stream(.video);
+
+            const pixel_aspect: c.AVRational = blk: {
+                if (stream.sample_aspect_ratio.den == 0) break :blk .{ .num = 1, .den = 1 };
+                break :blk stream.sample_aspect_ratio;
+            };
+
+            const time_base: c.AVRational = blk: {
+                if (stream.time_base.den == 0) break :blk video_ctx.time_base;
+                break :blk stream.time_base;
+            };
+
+            var buf: [0x100]u8 = undefined;
+            const args = try std.fmt.bufPrintZ(
+                &buf,
+                "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
+                .{
+                    video_ctx.width,
+                    video_ctx.height,
+                    c.AV_PIX_FMT_NV12,
+                    time_base.num,
+                    time_base.den,
+                    pixel_aspect.num,
+                    pixel_aspect.den,
+                },
+            );
+
+            const buffersrc = c.avfilter_get_by_name("buffer") orelse return error.ffmpeg_error;
+            const buffersink = c.avfilter_get_by_name("buffersink") orelse return error.ffmpeg_error;
+
+            _ = try libav.err(c.avfilter_graph_create_filter(&self.src, buffersrc, "video_in", args.ptr, null, self.graph));
+            _ = try libav.err(c.avfilter_graph_create_filter(&self.sink, buffersink, "video_out", null, null, self.graph));
+
+            switch (decoder.display_rotation) {
+                0 => _ = try libav.err(c.avfilter_link(self.src.?, 0, self.sink.?, 0)),
+                90, 270 => {
+                    const arg = if (decoder.display_rotation == 90) "cclock" else "clock";
+                    var transpose: ?*c.AVFilterContext = null;
+                    const transpose_filter = c.avfilter_get_by_name("transpose") orelse return error.ffmpeg_error;
+
+                    _ = try libav.err(c.avfilter_graph_create_filter(&transpose, transpose_filter, "display_rotate", arg, null, self.graph));
+                    _ = try libav.err(c.avfilter_link(self.src.?, 0, transpose.?, 0));
+                    _ = try libav.err(c.avfilter_link(transpose.?, 0, self.sink.?, 0));
+                },
+                180 => {
+                    var hflip: ?*c.AVFilterContext = null;
+                    var vflip: ?*c.AVFilterContext = null;
+
+                    const hflip_filter = c.avfilter_get_by_name("hflip") orelse return error.ffmpeg_error;
+                    const vflip_filter = c.avfilter_get_by_name("vflip") orelse return error.ffmpeg_error;
+
+                    _ = try libav.err(c.avfilter_graph_create_filter(&hflip, hflip_filter, "display_hflip", null, null, self.graph));
+                    _ = try libav.err(c.avfilter_graph_create_filter(&vflip, vflip_filter, "display_vflip", null, null, self.graph));
+                    _ = try libav.err(c.avfilter_link(self.src.?, 0, hflip.?, 0));
+                    _ = try libav.err(c.avfilter_link(hflip.?, 0, vflip.?, 0));
+                    _ = try libav.err(c.avfilter_link(vflip.?, 0, self.sink.?, 0));
+                },
+                else => return error.unsupported_display_matrix,
+            }
+
+            _ = try libav.err(c.avfilter_graph_config(self.graph, null));
+            return self;
+        }
+
+        fn deinit(self: *@This()) void {
+            c.avfilter_graph_free(&self.graph);
+            self.* = undefined;
+        }
+
+        fn push(self: *@This(), frame: ?*c.AVFrame) !void {
+            const flags: c_int = if (frame == null) 0 else c.AV_BUFFERSRC_FLAG_KEEP_REF;
+            _ = try libav.err(c.av_buffersrc_add_frame_flags(self.src.?, frame, flags));
+        }
+
+        fn pull(self: *@This(), frame: *c.AVFrame) !PullResult {
+            switch (c.av_buffersink_get_frame(self.sink.?, frame)) {
+                0 => return .frame,
+                c.AVERROR(c.EAGAIN) => return .again,
+                c.AVERROR_EOF => return .eof,
+                else => |e| {
+                    _ = try libav.err(e);
+                    unreachable;
+                },
+            }
+        }
+    };
+
     pub fn decode(decoder: *Decoder) !void {
         const log = std.log.scoped(.video_decode);
         defer log.debug("thread exit", .{});
@@ -474,7 +578,21 @@ pub const video = struct {
         var src_frame: AvFrame = try .init();
         defer src_frame.deinit();
 
+        var mid_frame: AvFrame = try .init();
+        defer mid_frame.deinit();
+
+        var dst_frame: AvFrame = try .init();
+        defer dst_frame.deinit();
+
         const video_ctx = codec_ctx.*.inner.?;
+
+        mid_frame.ptr().width = video_ctx.width;
+        mid_frame.ptr().height = video_ctx.height;
+        mid_frame.ptr().format = c.AV_PIX_FMT_NV12;
+        _ = try libav.err(c.av_frame_get_buffer(mid_frame.ptr(), 32));
+
+        var filter = try FilterGraph.init(decoder);
+        defer filter.deinit();
 
         const maybe_sws = c.sws_getContext(
             video_ctx.width,
@@ -509,14 +627,19 @@ pub const video = struct {
                     0 => {
                         defer c.av_frame_unref(src_frame.ptr());
 
-                        const dst_frame = frame_queue.acquire() catch |e| if (e != error.early_exit) return e else break :recv_loop;
-                        defer frame_queue.commit(dst_frame);
+                        c.av_frame_unref(mid_frame.ptr());
+                        c.av_frame_unref(dst_frame.ptr());
 
-                        _ = try libav.err(c.av_frame_copy_props(dst_frame, src_frame.ptr()));
-                        try convert(decoder.video_ctx, src_frame.ptr(), dst_frame, sws);
+                        try convert(decoder.video_ctx, src_frame.ptr(), mid_frame.ptr(), sws);
+                        try filter.push(mid_frame.ptr());
+                        try drainFilter(&filter, frame_queue, dst_frame.ptr());
                     },
                     c.AVERROR(c.EAGAIN) => break :recv_loop,
-                    c.AVERROR_EOF => return frame_queue.end_of_stream.store(true, .monotonic),
+                    c.AVERROR_EOF => {
+                        try filter.push(null);
+                        try drainFilter(&filter, frame_queue, dst_frame.ptr());
+                        return frame_queue.end_of_stream.store(true, .monotonic);
+                    },
                     else => |e| _ = try libav.err(e),
                 }
             }
@@ -552,6 +675,23 @@ pub const video = struct {
 
                 if (send_ret == c.AVERROR_EOF) return frame_queue.end_of_stream.store(true, .monotonic);
                 if (send_ret < 0) _ = try libav.err(send_ret);
+            }
+        }
+    }
+
+    fn drainFilter(filter: *FilterGraph, frame_queue: *FrameQueue, frame: *c.AVFrame) !void {
+        while (true) {
+            c.av_frame_unref(frame);
+
+            switch (try filter.pull(frame)) {
+                .frame => {
+                    const dst_frame = frame_queue.acquire() catch |e| if (e != error.early_exit) return e else return;
+                    defer frame_queue.commit(dst_frame);
+
+                    _ = try libav.err(c.av_frame_copy(dst_frame, frame));
+                    _ = try libav.err(c.av_frame_copy_props(dst_frame, frame));
+                },
+                .again, .eof => return,
             }
         }
     }
@@ -862,6 +1002,16 @@ pub const Decoder = struct {
 
     const log = std.log.scoped(.decode);
 
+    fn normalizeRotation(angle: f64) !i16 {
+        const snapped = @as(i32, @intFromFloat(@round(angle / 90.0) * 90.0));
+        if (@abs(angle - @as(f64, @floatFromInt(snapped))) > 1.0) return error.unsupported_display_matrix;
+
+        var normalized = @mod(snapped, 360);
+        if (normalized < 0) normalized += 360;
+
+        return @intCast(normalized);
+    }
+
     pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, path: []const u8, headless: bool) !Decoder {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
@@ -876,7 +1026,7 @@ pub const Decoder = struct {
         var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit(allocator);
 
-        // TODO: do something with this data
+        var display_rotation: i16 = 0;
 
         {
             const st: ?*c.AVStream = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)];
@@ -890,7 +1040,10 @@ pub const Decoder = struct {
                 switch (ptr.type) {
                     c.AV_PKT_DATA_DISPLAYMATRIX => {
                         const angle = c.av_display_rotation_get(@ptrCast(@alignCast(ptr.data)));
+                        display_rotation = try normalizeRotation(angle);
+
                         log.debug("display matrix angle: {d:.2}", .{angle});
+                        log.debug("display matrix snapped rotation: {}", .{display_rotation});
                     },
                     else => log.debug("found {s} side_data", .{c.av_packet_side_data_name(ptr.type)}),
                 }
@@ -903,9 +1056,31 @@ pub const Decoder = struct {
             else => {},
         }
 
+        const resolution: Resolution = blk: {
+            const ctx = video_ctx.inner.?;
+
+            if (display_rotation == 90 or display_rotation == 270)
+                break :blk .{ .width = ctx.height, .height = ctx.width };
+
+            break :blk .{ .width = ctx.width, .height = ctx.height };
+        };
+
+        log.info(
+            "display transform: rotation={} src={}x{} post={}x{}",
+            .{
+                display_rotation,
+                video_ctx.inner.?.width,
+                video_ctx.inner.?.height,
+                resolution.width,
+                resolution.height,
+            },
+        );
+
+        if (resolution.width < resolution.height) return error.unsupported_orientation;
+
         var frame_queue = try FrameQueue.init(allocator, .{
-            .width = video_ctx.inner.?.width,
-            .height = video_ctx.inner.?.height,
+            .width = resolution.width,
+            .height = resolution.height,
         });
         errdefer frame_queue.deinit(allocator);
 
@@ -931,7 +1106,8 @@ pub const Decoder = struct {
             },
             .audio_clock = audio_clock,
             .colour_space = video_ctx.inner.?.colorspace,
-            .resolution = .{ .width = video_ctx.inner.?.width, .height = video_ctx.inner.?.height },
+            .resolution = resolution,
+            .display_rotation = display_rotation,
         };
     }
 
