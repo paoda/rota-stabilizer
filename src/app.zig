@@ -446,10 +446,13 @@ const EncodeSession = struct {
         var timer = try std.time.Timer.start();
 
         const offset_s = 7 * 0.001; // P99.9 for input + draw is gonna be ~6ms
-        const interval_s = (1.0 / self.refresh_rate) - offset_s;
-        const target_ns: u64 = @intFromFloat(interval_s * std.time.ns_per_s);
+        const interval_s = @max(0.0, (1.0 / self.refresh_rate) - offset_s);
 
-        while (timer.read() < target_ns) {
+        const target_ns: u64 = @intFromFloat(interval_s * std.time.ns_per_s);
+        var just_once = interval_s < std.math.floatEps(f32);
+
+        while (timer.read() < target_ns or just_once) {
+            just_once = false;
 
             // Process any pending audio packets (remux to output)
             while (self.decoder.queue.pkt.audio.tryPop()) |pkt| {

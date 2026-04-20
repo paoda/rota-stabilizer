@@ -474,7 +474,8 @@ pub const video = struct {
             var graph = c.avfilter_graph_alloc() orelse return error.out_of_memory;
             errdefer c.avfilter_graph_free(&graph);
 
-            var self: @This() = .{ .graph = graph, .src = null, .sink = null };
+            var src: ?*c.AVFilterContext = null;
+            var sink: ?*c.AVFilterContext = null;
 
             const video_ctx = decoder.video_ctx.inner.?;
             const stream = decoder.stream(.video);
@@ -507,19 +508,19 @@ pub const video = struct {
             const buffersrc = c.avfilter_get_by_name("buffer") orelse return error.ffmpeg_error;
             const buffersink = c.avfilter_get_by_name("buffersink") orelse return error.ffmpeg_error;
 
-            _ = try libav.err(c.avfilter_graph_create_filter(&self.src, buffersrc, "video_in", args.ptr, null, self.graph));
-            _ = try libav.err(c.avfilter_graph_create_filter(&self.sink, buffersink, "video_out", null, null, self.graph));
+            _ = try libav.err(c.avfilter_graph_create_filter(&src, buffersrc, "video_in", args.ptr, null, graph));
+            _ = try libav.err(c.avfilter_graph_create_filter(&sink, buffersink, "video_out", null, null, graph));
 
             switch (decoder.display_rotation) {
-                0 => _ = try libav.err(c.avfilter_link(self.src.?, 0, self.sink.?, 0)),
+                0 => _ = try libav.err(c.avfilter_link(src.?, 0, sink.?, 0)),
                 90, 270 => {
                     const arg = if (decoder.display_rotation == 90) "cclock" else "clock";
                     var transpose: ?*c.AVFilterContext = null;
                     const transpose_filter = c.avfilter_get_by_name("transpose") orelse return error.ffmpeg_error;
 
-                    _ = try libav.err(c.avfilter_graph_create_filter(&transpose, transpose_filter, "display_rotate", arg, null, self.graph));
-                    _ = try libav.err(c.avfilter_link(self.src.?, 0, transpose.?, 0));
-                    _ = try libav.err(c.avfilter_link(transpose.?, 0, self.sink.?, 0));
+                    _ = try libav.err(c.avfilter_graph_create_filter(&transpose, transpose_filter, "display_rotate", arg, null, graph));
+                    _ = try libav.err(c.avfilter_link(src.?, 0, transpose.?, 0));
+                    _ = try libav.err(c.avfilter_link(transpose.?, 0, sink.?, 0));
                 },
                 180 => {
                     var hflip: ?*c.AVFilterContext = null;
@@ -528,17 +529,22 @@ pub const video = struct {
                     const hflip_filter = c.avfilter_get_by_name("hflip") orelse return error.ffmpeg_error;
                     const vflip_filter = c.avfilter_get_by_name("vflip") orelse return error.ffmpeg_error;
 
-                    _ = try libav.err(c.avfilter_graph_create_filter(&hflip, hflip_filter, "display_hflip", null, null, self.graph));
-                    _ = try libav.err(c.avfilter_graph_create_filter(&vflip, vflip_filter, "display_vflip", null, null, self.graph));
-                    _ = try libav.err(c.avfilter_link(self.src.?, 0, hflip.?, 0));
+                    _ = try libav.err(c.avfilter_graph_create_filter(&hflip, hflip_filter, "display_hflip", null, null, graph));
+                    _ = try libav.err(c.avfilter_graph_create_filter(&vflip, vflip_filter, "display_vflip", null, null, graph));
+                    _ = try libav.err(c.avfilter_link(src.?, 0, hflip.?, 0));
                     _ = try libav.err(c.avfilter_link(hflip.?, 0, vflip.?, 0));
-                    _ = try libav.err(c.avfilter_link(vflip.?, 0, self.sink.?, 0));
+                    _ = try libav.err(c.avfilter_link(vflip.?, 0, sink.?, 0));
                 },
                 else => return error.unsupported_display_matrix,
             }
 
-            _ = try libav.err(c.avfilter_graph_config(self.graph, null));
-            return self;
+            _ = try libav.err(c.avfilter_graph_config(graph, null));
+
+            return .{
+                .src = src,
+                .sink = sink,
+                .graph = graph,
+            };
         }
 
         fn deinit(self: *@This()) void {
