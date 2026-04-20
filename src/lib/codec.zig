@@ -826,6 +826,8 @@ pub const Decoder = struct {
     colour_space: c.AVColorSpace,
     resolution: Resolution,
 
+    display_rotation: i16 = 0,
+
     pub const Queues = struct {
         frame: FrameQueue,
         pkt: struct { audio: PacketQueue, video: PacketQueue },
@@ -873,6 +875,27 @@ pub const Decoder = struct {
 
         var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit(allocator);
+
+        // TODO: do something with this data
+
+        {
+            const st: ?*c.AVStream = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)];
+            const data = st.?.codecpar.*.coded_side_data;
+            const count: usize = @intCast(st.?.codecpar.*.nb_coded_side_data);
+
+            for (0..count) |i| {
+                const ptr = &data[i];
+                log.debug("{}: {s}", .{ i, c.av_packet_side_data_name(ptr.type) });
+
+                switch (ptr.type) {
+                    c.AV_PKT_DATA_DISPLAYMATRIX => {
+                        const angle = c.av_display_rotation_get(@ptrCast(@alignCast(ptr.data)));
+                        log.debug("display matrix angle: {d:.2}", .{angle});
+                    },
+                    else => log.debug("found {s} side_data", .{c.av_packet_side_data_name(ptr.type)}),
+                }
+            }
+        }
 
         const sw_fmt = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar.*.format;
         switch (sw_fmt) {

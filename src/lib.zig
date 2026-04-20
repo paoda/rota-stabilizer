@@ -19,6 +19,7 @@ pub const c = @cImport({
     @cInclude("libswresample/swresample.h");
     @cInclude("libavutil/imgutils.h");
     @cInclude("libavutil/opt.h");
+    @cInclude("libavutil/display.h");
 });
 
 // bytes per pixel, i know... sorry
