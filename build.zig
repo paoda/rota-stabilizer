@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) !void {
             exe_mod.addIncludePath(ffmpeg.path("include/"));
             exe_mod.addLibraryPath(ffmpeg.path("lib/"));
 
-            const ffmpeg_libs = [_][]const u8{ "avcodec", "avformat", "swscale", "avutil", "swresample" };
+            const ffmpeg_libs = [_][]const u8{ "avcodec", "avformat", "avfilter", "swscale", "avutil", "swresample" };
 
             const base_path = ffmpeg.path("bin" ++ std.fs.path.sep_str);
             const dir = try base_path.getPath3(b, null).openDir(".", .{ .iterate = true });
@@ -98,6 +98,7 @@ pub fn build(b: *std.Build) !void {
         else => {
             exe_mod.linkSystemLibrary("avcodec", .{});
             exe_mod.linkSystemLibrary("avformat", .{});
+            exe_mod.linkSystemLibrary("avfilter", .{});
             exe_mod.linkSystemLibrary("swscale", .{});
             exe_mod.linkSystemLibrary("swresample", .{});
             exe_mod.linkSystemLibrary("avutil", .{});

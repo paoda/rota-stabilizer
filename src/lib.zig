@@ -15,6 +15,9 @@ pub const c = @cImport({
     @cInclude("SDL3/SDL_main.h");
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
+    @cInclude("libavfilter/avfilter.h");
+    @cInclude("libavfilter/buffersink.h");
+    @cInclude("libavfilter/buffersrc.h");
     @cInclude("libswscale/swscale.h");
     @cInclude("libswresample/swresample.h");
     @cInclude("libavutil/imgutils.h");
