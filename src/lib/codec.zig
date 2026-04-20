@@ -493,7 +493,7 @@ pub const video = struct {
             var buf: [0x100]u8 = undefined;
             const args = try std.fmt.bufPrintZ(
                 &buf,
-                "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
+                "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}:colorspace={}:range={}",
                 .{
                     video_ctx.width,
                     video_ctx.height,
@@ -502,6 +502,8 @@ pub const video = struct {
                     time_base.den,
                     pixel_aspect.num,
                     pixel_aspect.den,
+                    video_ctx.colorspace,
+                    video_ctx.color_range,
                 },
             );
 
