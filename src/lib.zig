@@ -32,7 +32,14 @@ pub const UV_BPP = 2;
 
 pub const magic_aspect_ratio = 1.7763157895;
 
-pub const Resolution = struct { width: c_int, height: c_int };
+pub const Resolution = struct {
+    width: c_int,
+    height: c_int,
+
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("{}x{}", .{ self.width, self.height });
+    }
+};
 
 pub const BlurManager = struct {
     const Layer = struct { fbo: c_uint, tex: c_uint };

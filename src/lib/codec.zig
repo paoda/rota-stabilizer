@@ -1066,13 +1066,12 @@ pub const Decoder = struct {
         };
 
         log.info(
-            "display transform: rotation={} src={}x{} post={}x{}",
+            "display transform: angle={} pre={}x{} post={f}",
             .{
                 display_rotation,
                 video_ctx.inner.?.width,
                 video_ctx.inner.?.height,
-                resolution.width,
-                resolution.height,
+                resolution,
             },
         );
 
