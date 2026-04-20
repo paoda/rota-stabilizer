@@ -51,13 +51,51 @@ jobs:
         run: |
           dylibbundler -cd -b -x zig-out/bin/rota-stabilizer -d zig-out/bin/libs -p @executable_path/libs
 
-          codesign --force --sign - zig-out/bin/libs/*.dylib
-          codesign --force --sign - zig-out/bin/rota-stabilizer
+      - name: package-macos-app
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p zig-out/rota-stabilizer.app/Contents/MacOS
+
+          cp zig-out/bin/rota-stabilizer zig-out/rota-stabilizer.app/Contents/MacOS/
+          cp -R zig-out/bin/libs zig-out/rota-stabilizer.app/Contents/MacOS/
+
+          cat > zig-out/rota-stabilizer.app/Contents/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>rota-stabilizer</string>
+              <key>CFBundleIdentifier</key>
+              <string>moe.paoda.rota-stabilizer</string>
+              <key>CFBundleName</key>
+              <string>rota-stabilizer</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --deep --sign - zig-out/rota-stabilizer.app
+          ditto -c -k --sequesterRsrc --keepParent zig-out/rota-stabilizer.app zig-out/rota-stabilizer-macos-latest.zip
+
+      - name: upload-macos
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rota-stabilizer-macos-latest.zip
+          path: zig-out/rota-stabilizer-macos-latest.zip
+          archive: false
 
       - name: upload
-        uses: actions/upload-artifact@v4
+        if: runner.os != 'macOS'
+        uses: actions/upload-artifact@v7
         with:
-          name: rota-stabilizer-${{matrix.os}}
+          name: rota-stabilizer-${{matrix.os}}.zip
           path: zig-out
 
   build-flatpak:
@@ -74,9 +112,11 @@ jobs:
           bundle: rota-stabilizer.flatpak
           manifest-path: moe.paoda.rota-stabilizer.yml
           cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: false
 
       - name: Upload Flatpak Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: rota-stabilizer-flatpak
+          name: rota-stabilizer.flatpak
           path: rota-stabilizer.flatpak
+          archive: false

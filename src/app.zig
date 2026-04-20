@@ -446,9 +446,14 @@ const EncodeSession = struct {
         var timer = try std.time.Timer.start();
 
         const offset_s = 7 * 0.001; // P99.9 for input + draw is gonna be ~6ms
+
+        // NB: displays above (1 / offset_s) will have an interval_s of 0.0
         const interval_s = @max(0.0, (1.0 / self.refresh_rate) - offset_s);
 
         const target_ns: u64 = @intFromFloat(interval_s * std.time.ns_per_s);
+
+        // hack for when interval_s is 0.0;
+        // FIXME: I feel like this really should just be a ran in another thread....
         var just_once = interval_s < std.math.floatEps(f32);
 
         while (timer.read() < target_ns or just_once) {
