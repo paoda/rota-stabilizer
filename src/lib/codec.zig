@@ -11,6 +11,7 @@ const signal = @import("platform.zig").signal;
 
 const enc = @import("libav.zig").enc;
 const dec = @import("libav.zig").dec;
+const sleep = @import("../lib.zig").sleep;
 
 const AvPacket = @import("libav.zig").AvPacket;
 const AvFrame = @import("libav.zig").AvFrame;
@@ -331,7 +332,7 @@ pub const audio = struct {
         tracy.setThreadName("audio decode");
 
         const clock = &(decoder.audio_clock orelse return error.uninitialized_audio_clock);
-        const codec_ctx = &decoder.audio_ctx;
+        const audio_ctx = decoder.audio_ctx.*.inner.?;
         const pkt_queue = &decoder.queue.pkt.audio;
 
         const max_queue_sec = clock.hw_latency_secs * 1.1;
@@ -341,20 +342,11 @@ pub const audio = struct {
         log.info("rate: {} channels: {} bytes_per_sample: {}", .{ clock.sample_rate, clock.channels, clock.bytes_per_sample });
         log.info("queue: {d:.2}ms ({d} bytes)", .{ max_queue_sec * std.time.ms_per_s, @floor(max_queue_sec * bytes_per_sec) });
 
-        var maybe_src_frame: ?*c.AVFrame = c.av_frame_alloc();
-        defer c.av_frame_free(&maybe_src_frame);
+        var src_frame = try AvFrame.init();
+        defer src_frame.deinit();
 
-        var maybe_dst_frame: ?*c.AVFrame = c.av_frame_alloc();
-        defer c.av_frame_free(&maybe_dst_frame);
-
-        const src_frame = maybe_src_frame orelse return error.out_of_memory;
-        const dst_frame = maybe_dst_frame orelse return error.out_of_memory;
-
-        const audio_ctx = codec_ctx.*.inner.?;
-
-        _ = try libav.err(c.av_channel_layout_copy(&dst_frame.ch_layout, &audio_ctx.ch_layout));
-        dst_frame.sample_rate = audio_ctx.sample_rate;
-        dst_frame.format = c.AV_SAMPLE_FMT_FLT;
+        var dst_frame = try AvFrame.init();
+        defer dst_frame.deinit();
 
         var maybe_swr = c.swr_alloc();
         defer c.swr_free(&maybe_swr);
@@ -376,20 +368,28 @@ pub const audio = struct {
                 const recv_z = tracy.Zone.begin(.{ .src = @src(), .name = "avcodec_receive_frame" });
                 defer recv_z.end();
 
-                switch (c.avcodec_receive_frame(audio_ctx, src_frame)) {
+                switch (c.avcodec_receive_frame(audio_ctx, src_frame.ptr())) {
                     0 => { // got a frame
-                        defer c.av_frame_unref(src_frame);
+                        defer c.av_frame_unref(src_frame.ptr());
+                        defer c.av_frame_unref(dst_frame.ptr());
 
                         const z = tracy.Zone.begin(.{ .src = @src(), .name = "process frame" });
                         defer z.end();
 
                         frame_count += 1;
 
+                        const source = src_frame.ptr();
+                        const dest = dst_frame.ptr();
+
+                        _ = try libav.err(c.av_channel_layout_copy(&dest.ch_layout, &audio_ctx.ch_layout));
+                        dest.sample_rate = audio_ctx.sample_rate;
+                        dest.format = c.AV_SAMPLE_FMT_FLT;
+
                         {
                             const swr_z = tracy.Zone.begin(.{ .src = @src(), .name = "swr_convert_frame" });
                             defer swr_z.end();
 
-                            _ = try libav.err(c.swr_convert_frame(swr, dst_frame, src_frame));
+                            _ = try libav.err(c.swr_convert_frame(swr, dest, source));
                         }
 
                         // Track stalls when audio buffer is full
@@ -399,7 +399,7 @@ pub const audio = struct {
 
                             while (true) {
                                 if (c.SDL_GetAudioStreamQueued(clock.stream) < max_len) break;
-                                std.Thread.sleep(5 * std.time.ns_per_ms);
+                                sleep(2 * std.time.ns_per_ms);
                             }
                         }
 
@@ -407,8 +407,14 @@ pub const audio = struct {
                             const put_z = tracy.Zone.begin(.{ .src = @src(), .name = "SDL_PutAudioStreamData" });
                             defer put_z.end();
 
-                            const len = c.av_samples_get_buffer_size(null, dst_frame.ch_layout.nb_channels, dst_frame.nb_samples, dst_frame.format, 0);
-                            _ = c.SDL_PutAudioStreamData(clock.stream, dst_frame.data[0], len);
+                            const len = c.av_samples_get_buffer_size(
+                                null,
+                                dest.ch_layout.nb_channels,
+                                dest.nb_samples,
+                                dest.format,
+                                0,
+                            );
+                            _ = c.SDL_PutAudioStreamData(clock.stream, dest.data[0], len);
                             _ = clock.bytes_sent.fetchAdd(@intCast(len), .monotonic);
                         }
                     },
