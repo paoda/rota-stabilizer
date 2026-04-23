@@ -206,7 +206,7 @@ const PlaybackSession = struct {
         const time_base = c.av_q2d(self.decoder.stream(.video).time_base);
         const audio_clock = &(self.decoder.audio_clock orelse return error.uninitialized_audio_clock);
 
-        var should_render: bool = false;
+        var is_dirty: bool = false;
 
         while (true) {
             if (self.next_frame == null) self.next_frame = self.decoder.queue.frame.tryPop() orelse break;
@@ -225,6 +225,8 @@ const PlaybackSession = struct {
                 const audio_time = audio_clock.seconds_passed();
                 const diff_s = frame_time - audio_time;
 
+                const already_uploaded = @abs(frame_time - back.displayTime()) < std.math.floatEps(f64);
+
                 if (diff_s < -self.delay_threshold) {
                     trace("dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}", .{ diff_s, audio_time, frame_time });
 
@@ -239,7 +241,7 @@ const PlaybackSession = struct {
                 const estimated_upload_s = 0.001; // 1ms
 
                 // frame falls within +/- self.lookahead, but is greater than -self.delay_threshold
-                if (diff_s - self.lookahead <= 0) blk: {
+                if (!already_uploaded and diff_s - self.lookahead <= 0) blk: {
                     const next = self.decoder.queue.frame.peek() orelse break :blk;
                     const next_time = @as(f64, @floatFromInt(next.pts)) * time_base;
 
@@ -255,7 +257,6 @@ const PlaybackSession = struct {
                 }
 
                 // at this point we know that this is the frame we want to consider
-                const already_uploaded = @abs(frame_time - back.displayTime()) < std.math.floatEps(f64);
 
                 if (!already_uploaded) {
                     const upload_z = tracy.Zone.begin(.{ .src = @src(), .name = "upload next frame" });
@@ -279,7 +280,9 @@ const PlaybackSession = struct {
                     self.decoder.queue.frame.recycle(frame);
                     self.next_frame = null;
 
-                    should_render = true;
+                    tracy.frameMark("video");
+                    is_dirty = true;
+
                     break;
                 }
             }
@@ -287,7 +290,7 @@ const PlaybackSession = struct {
             break;
         }
 
-        if (should_render) {
+        if (is_dirty) {
             try render(
                 &self.render_view,
                 &self.fbs,
@@ -296,8 +299,6 @@ const PlaybackSession = struct {
                 self.manager,
                 self.camera,
             );
-
-            tracy.frameMark("video");
         }
     }
 };

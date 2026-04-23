@@ -115,7 +115,7 @@ pub const Ui = struct {
     }
 
     pub fn swap(self: @This()) !void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
+        const zone = tracy.Zone.begin(.{ .src = @src(), .color = .gray25 });
         defer zone.end();
 
         try errify(c.SDL_GL_SwapWindow(self.window));
