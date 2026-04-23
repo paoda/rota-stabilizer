@@ -222,29 +222,30 @@ pub const gui = struct {
     var built_layout: bool = false;
 
     pub const State = struct {
-        pub const default: @This() = .{
-            .input_path = [_:0]u8{0} ** std.fs.max_path_bytes,
-            .output_path = [_:0]u8{0} ** std.fs.max_path_bytes,
-            .request = null,
-            .hw_dec = .Software,
-            .hw_enc = .Software,
-            .bit_rate = 30_000,
-            .encode_progress = 0.0,
-            .resolution = .{ startup.render_target.width, startup.render_target.height },
-        };
-
-        input_path: [std.fs.max_path_bytes:0]u8,
-        output_path: [std.fs.max_path_bytes:0]u8,
+        input_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
+        output_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
 
         hw_dec: HwDeviceType,
         hw_enc: HwDeviceType,
 
-        bit_rate: i32,
+        bit_rate: i32 = 30_000,
         resolution: [2]i32,
 
-        encode_progress: f32,
+        encode_progress: f32 = 0.0,
+        request: ?Request = null,
 
-        request: ?Request,
+        local_addr: std.net.Address,
+
+        pub fn init() !State {
+            const hw_dec, const hw_enc = guessHardware();
+
+            return .{
+                .local_addr = try getLocalIpAddress(),
+                .hw_dec = hw_dec,
+                .hw_enc = hw_enc,
+                .resolution = .{ startup.render_target.width, startup.render_target.height },
+            };
+        }
 
         pub fn defaultHardware(self: *State) void {
             self.hw_dec, self.hw_enc = guessHardware();
@@ -417,6 +418,9 @@ pub const gui = struct {
                 });
             }
         }
+
+        const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
+        zgui.text("Your Local IP: {}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
     }
 
     fn drawVideoWindow(maybe_video: ?VideoContext) void {
@@ -479,3 +483,19 @@ pub const gui = struct {
         @memcpy(dst[0..payload], src[0..payload]);
     }
 };
+
+/// dummy udp connection to figure out what the active local ip is
+fn getLocalIpAddress() !std.net.Address {
+    const target = try std.net.Address.parseIp4("8.8.8.8", 53);
+
+    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
+    defer std.posix.close(sock);
+
+    try std.posix.connect(sock, &target.any, target.getOsSockLen());
+
+    var local_addr: std.net.Address = undefined;
+    var addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(local_addr.any));
+    try std.posix.getsockname(sock, &local_addr.any, &addr_len);
+
+    return local_addr;
+}

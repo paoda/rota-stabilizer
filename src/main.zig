@@ -71,8 +71,7 @@ pub fn main() !void {
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    state.* = .default;
-    state.defaultHardware();
+    state.* = try .init();
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
