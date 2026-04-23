@@ -1,27 +1,34 @@
 const std = @import("std");
 const tracy = @import("tracy");
-const c = @import("lib.zig").c;
 const gl = @import("gl");
+const c = @import("lib.zig").c;
 
-const Decoder = @import("lib/codec.zig").Decoder;
 const Camera = @import("main.zig").Camera;
+const AngleCalc = @import("main.zig").AngleCalc;
 
-const DoubleBuffer = @import("lib.zig").DoubleBuffer;
-const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const Viewport = @import("lib.zig").Viewport;
-const Ui = @import("lib/platform.zig").Ui;
 const FbStack = @import("lib.zig").FbStack;
+const GpuResourceManager = @import("lib.zig").GpuResourceManager;
+const DoubleBuffer = @import("lib.zig").DoubleBuffer;
+const UploadBuffer = @import("lib.zig").UploadBuffer;
+const Linesize = @import("lib.zig").Linesize;
+
+const Ui = @import("lib/platform.zig").Ui;
+const GuiState = @import("lib/platform.zig").gui.State;
 const VideoContext = @import("lib/platform.zig").gui.VideoContext;
 
-const AngleCalc = @import("main.zig").AngleCalc;
+const Encoder = @import("lib/codec.zig").Encoder;
+const Decoder = @import("lib/codec.zig").Decoder;
+
+const signal = @import("lib/platform.zig").signal;
 
 const preload = @import("main.zig").preload;
 const render = @import("main.zig").render;
 const uploadPlane = @import("main.zig").uploadPlane;
-
-const signal = @import("lib/platform.zig").signal;
-
-const GuiState = @import("lib/platform.zig").gui.State;
+const writeToNv12Tex = @import("main.zig").writeToNv12Tex;
+const mapNv12Frame = @import("main.zig").mapNv12Frame;
+const unmapNv12Frame = @import("main.zig").unmapNv12Frame;
+const trace = @import("lib.zig").trace;
 
 const State = enum { idle, playback, encode };
 
@@ -37,6 +44,9 @@ const Session = union(State) {
     encode: EncodeSession,
 
     pub fn deinit(self: *Session, allocator: std.mem.Allocator) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Session.deinit" });
+        defer zone.end();
+
         switch (self.*) {
             .idle => |s| s.deinit(),
             .playback => |*s| s.deinit(allocator),
@@ -47,6 +57,9 @@ const Session = union(State) {
 
 const IdleSession = struct {
     pub fn init() IdleSession {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "IdleSession.init" });
+        defer zone.end();
+
         // NB: see PlaybackSession.deinit;
         while (signal.should_quit.load(.monotonic)) {
             signal.should_quit.store(false, .monotonic);
@@ -78,13 +91,10 @@ const PlaybackSession = struct {
 
     next_frame: ?*c.AVFrame = null,
 
-    // tracy output buffer
-    buf: [0x100]u8 = undefined,
-
     const log = std.log.scoped(.playback_session);
 
     fn stop(self: *const @This()) void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.stop" });
         defer zone.end();
 
         // TODO: session unique atomic
@@ -198,70 +208,79 @@ const PlaybackSession = struct {
 
         var should_render: bool = false;
 
-        while (true) { // necessary for when Display Hz !== Video FPS
+        while (true) {
+            if (self.next_frame == null) self.next_frame = self.decoder.queue.frame.tryPop() orelse break;
 
-            if (self.next_frame == null) {
-                if (self.decoder.queue.frame.tryPop()) |next| {
-                    self.next_frame = next;
-                    tracy.frameMarkStart("video timing");
-                }
-            }
+            // FIXME: self.next_frame guaranteed to be true here
 
             if (self.next_frame) |frame| {
-                const z = tracy.Zone.begin(.{ .src = @src(), .name = "have next frame" });
+                const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame obtained" });
                 defer z.end();
 
                 std.debug.assert(frame.format == c.AV_PIX_FMT_NV12);
 
                 const back = self.double_buffer.back();
-                const next_frame_time = @as(f64, @floatFromInt(frame.pts)) * time_base;
-                const drop_diff_s = next_frame_time - audio_clock.seconds_passed();
+                const frame_time = @as(f64, @floatFromInt(frame.pts)) * time_base;
 
-                if (drop_diff_s < -self.delay_threshold) {
-                    const msg = try std.fmt.bufPrint(
-                        &self.buf,
-                        "dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}",
-                        .{ drop_diff_s, -(drop_diff_s - next_frame_time), next_frame_time },
-                    );
+                const audio_time = audio_clock.seconds_passed();
+                const diff_s = frame_time - audio_time;
 
-                    tracy.message(.{ .text = msg });
-                    tracy.frameMarkEnd("video timing");
+                if (diff_s < -self.delay_threshold) {
+                    trace("dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}", .{ diff_s, audio_time, frame_time });
 
+                    // invalidate frame and mark the memory as free as we aren't gonna display it
                     self.decoder.queue.frame.recycle(frame);
                     self.next_frame = null;
-                    continue;
+
+                    continue; // we want to try the next frame
                 }
 
-                const already_uploaded = @abs(next_frame_time - back.displayTime()) < std.math.floatEps(f64);
+                // based on some tracy data
+                const estimated_upload_s = 0.001; // 1ms
+
+                // frame falls within +/- self.lookahead, but is greater than -self.delay_threshold
+                if (diff_s - self.lookahead <= 0) blk: {
+                    const next = self.decoder.queue.frame.peek() orelse break :blk;
+                    const next_time = @as(f64, @floatFromInt(next.pts)) * time_base;
+
+                    if ((next_time - (audio_time + estimated_upload_s)) <= 0) {
+                        // the next next frame happens to also be ready
+                        trace("skipped frame | d: {d:.3} a: {d:.3} v: {d:.3}", .{ diff_s, audio_time, frame_time });
+
+                        self.decoder.queue.frame.recycle(frame);
+                        self.next_frame = null;
+
+                        continue; // we want to now grab that frame next iteration
+                    }
+                }
+
+                // at this point we know that this is the frame we want to consider
+                const already_uploaded = @abs(frame_time - back.displayTime()) < std.math.floatEps(f64);
 
                 if (!already_uploaded) {
-                    tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(self.decoder.queue.frame.len()) } });
-
                     const upload_z = tracy.Zone.begin(.{ .src = @src(), .name = "upload next frame" });
                     defer upload_z.end();
 
-                    // this is a new frame, upload it to the BACK buffer
+                    tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(self.decoder.queue.frame.len()) } });
+
                     uploadPlane(.y, self.manager, back, frame);
                     uploadPlane(.uv, self.manager, back, frame);
-                    back.setDisplayTime(next_frame_time);
+                    back.setDisplayTime(frame_time);
                 }
 
-                // after upload, recalculate to check if it's time to swap
-                const audio_time = audio_clock.seconds_passed();
-                const diff_s = next_frame_time - audio_time;
-
-                if (diff_s - self.lookahead <= 0) { // Time to display the newer frame!
+                if (diff_s - self.lookahead <= 0) {
                     tracy.plot(.{ .name = "Audio Time (s)", .value = .{ .f64 = audio_time } });
-                    tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = next_frame_time } });
+                    tracy.plot(.{ .name = "Next Frame Time (s)", .value = .{ .f64 = frame_time } });
                     tracy.plot(.{ .name = "A/V Sync Drift (ms)", .value = .{ .f64 = diff_s * std.time.ms_per_s } });
-                    tracy.frameMarkEnd("video timing");
 
-                    self.double_buffer.swap();
+                    self.double_buffer.swap(); // frame has been uploaded, and marked for display so swap the buffers
 
+                    // frame has been copied to gpu so we are ready to cleanup
                     self.decoder.queue.frame.recycle(frame);
                     self.next_frame = null;
+
                     should_render = true;
-                    continue;
+                    break;
                 }
             }
 
@@ -277,16 +296,11 @@ const PlaybackSession = struct {
                 self.manager,
                 self.camera,
             );
+
+            tracy.frameMark("video");
         }
     }
 };
-
-const Encoder = @import("lib/codec.zig").Encoder;
-const UploadBuffer = @import("lib.zig").UploadBuffer;
-const writeToNv12Tex = @import("main.zig").writeToNv12Tex;
-const mapNv12Frame = @import("main.zig").mapNv12Frame;
-const unmapNv12Frame = @import("main.zig").unmapNv12Frame;
-const Linesize = @import("lib.zig").Linesize;
 
 const EncodeSession = struct {
     encoder: *Encoder,
@@ -316,7 +330,7 @@ const EncodeSession = struct {
     const log = std.log.scoped(.encode_session);
 
     fn stop(self: *const @This()) void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.stop" });
         defer zone.end();
 
         // TODO: session unique atomic
@@ -562,7 +576,7 @@ pub const App = struct {
     const log = std.log.scoped(.app);
 
     pub fn poll(self: *App, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) !void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.poll" });
         defer zone.end();
 
         if (self.session == .encode) {
@@ -574,27 +588,18 @@ pub const App = struct {
                 state.request = .idle;
 
                 if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
-                    log.warn("encode_progressed finished at {d:.2}", .{state.encode_progress});
+                    log.warn("encode_progress finished at {d:.2}", .{state.encode_progress});
                 }
             }
         }
 
         const request = state.request orelse return;
-
-        // reset necessary state
-        self.session.deinit(allocator);
-        self.session = .{ .idle = IdleSession.init() };
-
-        state.encode_progress = 0.0;
-        state.request = null;
+        self.reset(allocator, state);
 
         switch (request) {
             .idle => {}, // already idle
             .encode => |paths| {
-                const source = paths.src_path;
-                const target = paths.dst_path;
-
-                const session = try EncodeSession.init(allocator, state, ui, source, target);
+                const session = try EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path);
                 self.session = .{ .encode = session };
             },
             .playback => |path| {
@@ -604,8 +609,19 @@ pub const App = struct {
         }
     }
 
+    pub fn reset(self: *App, allocator: std.mem.Allocator, state: *GuiState) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.reset" });
+        defer zone.end();
+
+        self.session.deinit(allocator);
+        self.session = .{ .idle = IdleSession.init() };
+
+        state.encode_progress = 0.0;
+        state.request = null;
+    }
+
     pub fn run(self: *App) !void {
-        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Session.run" });
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.run" });
         defer zone.end();
 
         switch (self.session) {
@@ -630,8 +646,8 @@ pub const App = struct {
     }
 };
 
-fn getHwDeviceName(@"type": c.AVHWDeviceType) []const u8 {
-    if (@"type" == c.AV_HWDEVICE_TYPE_NONE) return "software";
+fn getHwDeviceName(t: c.AVHWDeviceType) []const u8 {
+    if (t == c.AV_HWDEVICE_TYPE_NONE) return "software";
 
-    return std.mem.span(c.av_hwdevice_get_type_name(@"type"));
+    return std.mem.span(c.av_hwdevice_get_type_name(t));
 }
