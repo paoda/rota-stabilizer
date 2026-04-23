@@ -14,14 +14,26 @@ const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
 const AV_HWDEVICE_TYPE_AMF: c_int = if (@hasDecl(c, "AV_HWDEVICE_TYPE_AMF")) c.AV_HWDEVICE_TYPE_AMF else 13;
 
-pub const HwDeviceType = enum(c.AVHWDeviceType) {
-    VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-    CUDA = c.AV_HWDEVICE_TYPE_CUDA,
-    QSV = c.AV_HWDEVICE_TYPE_QSV,
-    VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
-    D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
-    AMF = AV_HWDEVICE_TYPE_AMF,
-    Software = c.AV_HWDEVICE_TYPE_NONE,
+pub const HwDeviceType = switch (builtin.os.tag) {
+    .macos => enum(c.AVHWDeviceType) {
+        VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    .windows => enum(c.AVHWDeviceType) {
+        CUDA = c.AV_HWDEVICE_TYPE_CUDA,
+        QSV = c.AV_HWDEVICE_TYPE_QSV,
+        D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
+        AMF = AV_HWDEVICE_TYPE_AMF,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    .linux => enum(c.AVHWDeviceType) {
+        CUDA = c.AV_HWDEVICE_TYPE_CUDA,
+        QSV = c.AV_HWDEVICE_TYPE_QSV,
+        VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
+        AMF = AV_HWDEVICE_TYPE_AMF,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    else => unreachable,
 };
 
 const c = @import("../lib.zig").c;
@@ -147,12 +159,15 @@ pub inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(
 pub fn guessHardware() struct { HwDeviceType, HwDeviceType } {
     const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
 
-    const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
-    if (is_apple) return .{ .VideoToolbox, .VideoToolbox };
+    if (builtin.os.tag == .macos) {
+        const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
+        if (is_apple) return .{ .VideoToolbox, .VideoToolbox };
+    }
 
     const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
     if (is_nvidia) return .{ .CUDA, .CUDA };
 
+    // FIXME is it fine to use QSV like this?
     const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
     if (is_intel) return .{ .QSV, .QSV };
 
