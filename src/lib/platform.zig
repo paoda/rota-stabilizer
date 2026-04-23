@@ -328,20 +328,20 @@ pub const gui = struct {
 
         if (!showing) return;
 
+        zgui.textDisabled("Hardware Acceleration", .{});
+
         {
-            zgui.textDisabled("Hardware Acceleration", .{});
             _ = zgui.comboFromEnum("Decoder", &state.hw_dec);
             _ = zgui.comboFromEnum("Encoder", &state.hw_enc);
 
             zgui.spacing();
+
             zgui.textDisabled("Output Settings", .{});
-
             _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
-
             _ = zgui.sliderInt("Target Bitrate (kbps)", .{
                 .v = &state.bit_rate,
-                .max = 60_000,
-                .min = 10_000,
+                .max = 100_000,
+                .min = 1000,
             });
         }
 
@@ -366,11 +366,28 @@ pub const gui = struct {
 
             zgui.sameLine(.{});
             _ = zgui.inputTextWithHint("Output", .{ .hint = "output.mp4", .buf = &state.output_path });
+        }
 
-            zgui.spacing();
-            zgui.separator();
-            zgui.spacing();
+        zgui.spacing();
+        zgui.textDisabled("Configuration", .{});
 
+        {
+            _ = zgui.text("TODO: Enable/Disable Ring, Circle, Border, etc.", .{});
+        }
+
+        zgui.spacing();
+        zgui.textDisabled("Information", .{});
+
+        {
+            const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
+            zgui.text("Local IP: {}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
+        }
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
+
+        {
             const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
             const is_possible = input_path.len != 0;
 
@@ -418,9 +435,6 @@ pub const gui = struct {
                 });
             }
         }
-
-        const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
-        zgui.text("Your Local IP: {}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
     }
 
     fn drawVideoWindow(maybe_video: ?VideoContext) void {
