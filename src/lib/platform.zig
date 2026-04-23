@@ -162,7 +162,7 @@ pub fn guessHardware() struct { HwDeviceType, HwDeviceType } {
 
     if (builtin.os.tag == .macos) {
         const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
-        if (is_apple) return .{ .VideoToolbox, .VideoToolbox };
+        if (is_apple) return .{ .VideoToolbox, .VideoToolbox } else return .{ .Software, .Software };
     }
 
     const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
