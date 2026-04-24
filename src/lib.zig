@@ -840,6 +840,14 @@ pub const Viewport = struct {
         return .{ self.width[self.idx - 1], self.height[self.idx - 1] };
     }
 
+    pub fn aspect(self: Viewport) f32 {
+        const res = self.resolution();
+        const width: f32 = @floatFromInt(res.width);
+        const height: f32 = @floatFromInt(res.height);
+
+        return width / height;
+    }
+
     pub fn resolution(self: Viewport) Resolution {
         const width, const height = self.get();
         return .{ .width = width, .height = height };

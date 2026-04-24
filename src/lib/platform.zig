@@ -14,14 +14,26 @@ const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
 const AV_HWDEVICE_TYPE_AMF: c_int = if (@hasDecl(c, "AV_HWDEVICE_TYPE_AMF")) c.AV_HWDEVICE_TYPE_AMF else 13;
 
-pub const HwDeviceType = enum(c.AVHWDeviceType) {
-    VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-    CUDA = c.AV_HWDEVICE_TYPE_CUDA,
-    QSV = c.AV_HWDEVICE_TYPE_QSV,
-    VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
-    D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
-    AMF = AV_HWDEVICE_TYPE_AMF,
-    Software = c.AV_HWDEVICE_TYPE_NONE,
+pub const HwDeviceType = switch (builtin.os.tag) {
+    .macos => enum(c.AVHWDeviceType) {
+        VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    .windows => enum(c.AVHWDeviceType) {
+        CUDA = c.AV_HWDEVICE_TYPE_CUDA,
+        QSV = c.AV_HWDEVICE_TYPE_QSV,
+        D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
+        AMF = AV_HWDEVICE_TYPE_AMF,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    .linux => enum(c.AVHWDeviceType) {
+        CUDA = c.AV_HWDEVICE_TYPE_CUDA,
+        QSV = c.AV_HWDEVICE_TYPE_QSV,
+        VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
+        AMF = AV_HWDEVICE_TYPE_AMF,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    else => unreachable,
 };
 
 const c = @import("../lib.zig").c;
@@ -68,6 +80,7 @@ pub const Ui = struct {
         zgui.init(allocator);
         zgui.backend.init(window, gl_ctx);
         zgui.io.setIniFilename(null);
+        zgui.io.setConfigFlags(.{ .dock_enable = true });
 
         log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
         log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
@@ -115,7 +128,7 @@ pub const Ui = struct {
     }
 
     pub fn swap(self: @This()) !void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
+        const zone = tracy.Zone.begin(.{ .src = @src(), .color = .gray25 });
         defer zone.end();
 
         try errify(c.SDL_GL_SwapWindow(self.window));
@@ -147,12 +160,15 @@ pub inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(
 pub fn guessHardware() struct { HwDeviceType, HwDeviceType } {
     const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
 
-    const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
-    if (is_apple) return .{ .VideoToolbox, .VideoToolbox };
+    if (builtin.os.tag == .macos) {
+        const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
+        if (is_apple) return .{ .VideoToolbox, .VideoToolbox } else return .{ .Software, .Software };
+    }
 
     const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
     if (is_nvidia) return .{ .CUDA, .CUDA };
 
+    // FIXME is it fine to use QSV like this?
     const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
     if (is_intel) return .{ .QSV, .QSV };
 
@@ -203,30 +219,33 @@ const startup = @import("../main.zig").startup;
 pub const gui = struct {
     pub const VideoContext = struct { tex_id: c_uint, render_view: Viewport };
 
-    pub const State = struct {
-        pub const default: @This() = .{
-            .input_path = [_:0]u8{0} ** std.fs.max_path_bytes,
-            .output_path = [_:0]u8{0} ** std.fs.max_path_bytes,
-            .request = null,
-            .hw_dec = .Software,
-            .hw_enc = .Software,
-            .bit_rate = 30_000,
-            .encode_progress = 0.0,
-            .resolution = .{ startup.render_target.width, startup.render_target.height },
-        };
+    var built_layout: bool = false;
 
-        input_path: [std.fs.max_path_bytes:0]u8,
-        output_path: [std.fs.max_path_bytes:0]u8,
+    pub const State = struct {
+        input_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
+        output_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
 
         hw_dec: HwDeviceType,
         hw_enc: HwDeviceType,
 
-        bit_rate: i32,
+        bit_rate: i32 = 30_000,
         resolution: [2]i32,
 
-        encode_progress: f32,
+        encode_progress: f32 = 0.0,
+        request: ?Request = null,
 
-        request: ?Request,
+        local_addr: std.net.Address,
+
+        pub fn init() !State {
+            const hw_dec, const hw_enc = guessHardware();
+
+            return .{
+                .local_addr = try getLocalIpAddress(),
+                .hw_dec = hw_dec,
+                .hw_enc = hw_enc,
+                .resolution = .{ startup.render_target.width, startup.render_target.height },
+            };
+        }
 
         pub fn defaultHardware(self: *State) void {
             self.hw_dec, self.hw_enc = guessHardware();
@@ -244,38 +263,85 @@ pub const gui = struct {
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
-        try drawSettings(state);
+        const view_pos = zgui.getMainViewport().getWorkPos();
 
-        if (maybe_video) |vid| {
-            drawVideoWindow(@floatFromInt(width), vid.render_view, vid.tex_id);
+        zgui.setNextWindowPos(.{ .x = view_pos[0], .y = view_pos[1], .cond = .always });
+        zgui.setNextWindowSize(.{ .w = @floatFromInt(width), .h = @floatFromInt(height), .cond = .always });
+
+        const show_dockspace = zgui.begin("MainDockSpace", .{
+            .flags = .{
+                .no_title_bar = true,
+                .no_move = true,
+                .no_resize = true,
+                .no_collapse = true,
+                .no_bring_to_front_on_focus = true,
+                .no_nav_focus = true,
+                .no_docking = true,
+                .no_background = true,
+            },
+        });
+        defer zgui.end();
+
+        if (show_dockspace) {
+            if (!built_layout) {
+                setupDockingLayout("MainDockSpace", ui_view);
+                built_layout = true;
+            }
+
+            _ = zgui.dockSpace("MainDockSpace", .{ 0.0, 0.0 }, .{ .passthru_central_node = true });
         }
+
+        try drawSettings(state);
+        drawVideoWindow(maybe_video);
+        try drawControls();
+    }
+
+    fn setupDockingLayout(str_id: [:0]const u8, ui_view: Viewport) void {
+        const view_size = ui_view.get();
+        const dock_id = zgui.getStrIdZ(str_id);
+        const size: [2]f32 = .{ @floatFromInt(view_size[0]), @floatFromInt(view_size[1]) };
+
+        _ = zgui.dockBuilderAddNode(dock_id, .{});
+        zgui.dockBuilderSetNodeSize(dock_id, size);
+
+        var top_id: zgui.Ident = undefined;
+        var bottom_id: zgui.Ident = undefined;
+        _ = zgui.dockBuilderSplitNode(dock_id, .down, 0.33, &bottom_id, &top_id);
+
+        var settings_id: zgui.Ident = undefined;
+        var video_id: zgui.Ident = undefined;
+        _ = zgui.dockBuilderSplitNode(top_id, .left, 0.33, &settings_id, &video_id);
+
+        zgui.dockBuilderDockWindow("Settings", settings_id);
+        zgui.dockBuilderDockWindow("Video", video_id);
+        zgui.dockBuilderDockWindow("Controls", bottom_id);
+
+        zgui.dockBuilderFinish(dock_id);
     }
 
     fn drawSettings(state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        // zgui.setNextWindowSize(.{ .w = 500, .h = 0 });
-
-        const showing = zgui.begin("Settings", .{ .flags = .{ .always_auto_resize = true } });
+        const showing = zgui.begin("Settings", .{});
         defer zgui.end();
 
         if (!showing) return;
 
+        zgui.textDisabled("Hardware Acceleration", .{});
+
         {
-            zgui.textDisabled("Hardware Acceleration", .{});
             _ = zgui.comboFromEnum("Decoder", &state.hw_dec);
             _ = zgui.comboFromEnum("Encoder", &state.hw_enc);
 
             zgui.spacing();
+
             zgui.textDisabled("Output Settings", .{});
-
             _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
-
             _ = zgui.sliderInt("Target Bitrate (kbps)", .{
                 .v = &state.bit_rate,
-                .max = 60_000,
-                .min = 10_000,
+                .max = 100_000,
+                .min = 1000,
             });
         }
 
@@ -300,11 +366,28 @@ pub const gui = struct {
 
             zgui.sameLine(.{});
             _ = zgui.inputTextWithHint("Output", .{ .hint = "output.mp4", .buf = &state.output_path });
+        }
 
-            zgui.spacing();
-            zgui.separator();
-            zgui.spacing();
+        zgui.spacing();
+        zgui.textDisabled("Configuration", .{});
 
+        {
+            _ = zgui.text("TODO: Enable/Disable Ring, Circle, Border, etc.", .{});
+        }
+
+        zgui.spacing();
+        zgui.textDisabled("Information", .{});
+
+        {
+            const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
+            zgui.text("Local IP: {}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
+        }
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
+
+        {
             const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
             const is_possible = input_path.len != 0;
 
@@ -354,22 +437,9 @@ pub const gui = struct {
         }
     }
 
-    fn drawVideoWindow(window_width: f32, render_view: Viewport, tex_id: c_uint) void {
+    fn drawVideoWindow(maybe_video: ?VideoContext) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
-
-        const vw, const vh = render_view.get();
-        const video_aspect = @as(f32, @floatFromInt(vw)) / @as(f32, @floatFromInt(vh));
-
-        const scale = 0.80;
-        const width = window_width * scale;
-        const height = @ceil(width / video_aspect);
-
-        zgui.setNextWindowSize(.{
-            .w = width,
-            .h = height + zgui.getFrameHeight(),
-            .cond = .first_use_ever,
-        });
 
         zgui.pushStyleVar2f(.{ .idx = .window_padding, .v = .{ 0.0, 0.0 } });
         defer zgui.popStyleVar(.{ .count = 1 });
@@ -379,6 +449,11 @@ pub const gui = struct {
         defer zgui.end();
 
         if (!showing) return;
+
+        const vid = maybe_video orelse {
+            return zgui.textDisabled("Video preview will appear here once a frame is available.", .{});
+        };
+        const video_aspect = vid.render_view.aspect();
 
         const dw, const dh = zgui.getContentRegionAvail();
         if (dw <= 0 or dh <= 0) return;
@@ -394,12 +469,24 @@ pub const gui = struct {
             pos[1] + (dh - h) * 0.5,
         });
 
-        zgui.image(.{ .tex_data = null, .tex_id = @enumFromInt(tex_id) }, .{
+        zgui.image(.{ .tex_data = null, .tex_id = @enumFromInt(vid.tex_id) }, .{
             .w = w,
             .h = h,
             .uv0 = .{ 0.0, 1.0 },
             .uv1 = .{ 1.0, 0.0 },
         });
+    }
+
+    fn drawControls() !void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
+        const showing = zgui.begin("Controls", .{});
+        defer zgui.end();
+
+        if (!showing) return;
+
+        zgui.textDisabled("TODO: add more controls here", .{});
     }
 
     // FIXME: does zig not handle this?
@@ -410,3 +497,19 @@ pub const gui = struct {
         @memcpy(dst[0..payload], src[0..payload]);
     }
 };
+
+/// dummy udp connection to figure out what the active local ip is
+fn getLocalIpAddress() !std.net.Address {
+    const target = try std.net.Address.parseIp4("8.8.8.8", 53);
+
+    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
+    defer std.posix.close(sock);
+
+    try std.posix.connect(sock, &target.any, target.getOsSockLen());
+
+    var local_addr: std.net.Address = undefined;
+    var addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(local_addr.any));
+    try std.posix.getsockname(sock, &local_addr.any, &addr_len);
+
+    return local_addr;
+}

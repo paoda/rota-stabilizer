@@ -918,6 +918,21 @@ pub const FrameQueue = struct {
         return &self.slot.frame[idx];
     }
 
+    /// you *must* not call recycle() on this AvFrame
+    pub fn peek(self: *@This()) ?*c.AVFrame {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
+        const idx = self.mask(self.read_idx);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.slot.state[idx] != .in_use) return null;
+
+        return &self.slot.frame[idx];
+    }
+
     pub fn recycle(self: *@This(), used_frame: *c.AVFrame) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
