@@ -638,7 +638,7 @@ pub const video = struct {
                         c.av_frame_unref(mid_frame.ptr());
                         c.av_frame_unref(dst_frame.ptr());
 
-                        try convert(decoder.video_ctx, src_frame.ptr(), mid_frame.ptr(), sws);
+                        try convert(src_frame.ptr(), mid_frame.ptr(), sws);
                         try filter.push(mid_frame.ptr());
                         try drainFilter(&filter, frame_queue, dst_frame.ptr());
                     },
@@ -704,12 +704,12 @@ pub const video = struct {
         }
     }
 
-    fn convert(codec_ctx: *const dec.AvCodecContext, src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
+    fn convert(src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
         @setRuntimeSafety(false);
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        if (codec_ctx.device) |_| {
+        if (src_frame.hw_frames_ctx) |_| {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "hwframe_transfer_data" });
             defer z.end();
 
