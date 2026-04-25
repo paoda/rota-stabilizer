@@ -38,6 +38,11 @@ pub const Request = union(State) {
     encode: struct { src_path: []const u8, dst_path: []const u8 },
 };
 
+pub const Action = union(enum) {
+    SetVolume: f32,
+    Seek: f32,
+};
+
 const Session = union(State) {
     idle: IdleSession,
     playback: PlaybackSession,
@@ -118,7 +123,7 @@ const PlaybackSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_device, path, false);
+        decoder.* = try Decoder.init(allocator, hw_device, state.volume.value, path, false);
         errdefer decoder.deinit(allocator);
 
         const double_buffer = try allocator.create(DoubleBuffer);
@@ -363,7 +368,7 @@ const EncodeSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_dec, src_path, true);
+        decoder.* = try Decoder.init(allocator, hw_dec, 0.0, src_path, true);
         errdefer decoder.deinit(allocator);
 
         const encoder = try allocator.create(Encoder);
@@ -580,18 +585,39 @@ pub const App = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.poll" });
         defer zone.end();
 
-        if (self.session == .encode) {
-            const num: f32 = @floatFromInt(self.session.encode.frame_count);
-            const den: f32 = @floatFromInt(self.session.encode.frame_total);
-            state.encode_progress = num / den;
+        switch (self.session) {
+            .encode => {
+                const num: f32 = @floatFromInt(self.session.encode.frame_count);
+                const den: f32 = @floatFromInt(self.session.encode.frame_total);
+                state.encode_progress = num / den;
 
-            if (self.session.encode.is_finished) {
-                state.request = .idle;
+                if (self.session.encode.is_finished) {
+                    state.request = .idle;
 
-                if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
-                    log.warn("encode_progress finished at {d:.2}", .{state.encode_progress});
+                    if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
+                        log.warn("encode_progress finished at {d:.2}", .{state.encode_progress});
+                    }
                 }
-            }
+            },
+            .playback => |playback| {
+                const audio = &(playback.decoder.audio_clock orelse @panic("invariant broken"));
+                state.volume.value = audio.volume;
+
+                state.progress = .{
+                    .timestamp = @floatCast(playback.double_buffer.back().displayTime()),
+                    .end_timestamp = @floatCast(self.session.playback.decoder.duration()),
+                };
+
+                if (state.action) |action| {
+                    defer state.action = null;
+
+                    switch (action) {
+                        .SetVolume => |volume| try audio.setVolume(volume),
+                        .Seek => |timestamp| log.warn("TODO: Seek to {d:.3}s", .{timestamp}),
+                    }
+                }
+            },
+            else => {},
         }
 
         const request = state.request orelse return;
@@ -618,6 +644,8 @@ pub const App = struct {
         self.session = .{ .idle = IdleSession.init() };
 
         state.encode_progress = 0.0;
+        state.progress = .default;
+
         state.request = null;
     }
 

@@ -8,6 +8,7 @@ const nfd = @import("nfd");
 const version = @import("build.zig.zon").version;
 
 const Request = @import("../app.zig").Request;
+const Action = @import("../app.zig").Action;
 const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
@@ -224,6 +225,8 @@ pub const gui = struct {
     var built_layout: bool = false;
 
     pub const State = struct {
+        const default_volume = 0.5;
+
         input_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
         output_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
 
@@ -234,9 +237,28 @@ pub const gui = struct {
         resolution: [2]i32,
 
         encode_progress: f32 = 0.0,
-        request: ?Request = null,
+        progress: VideoProgress = .default,
 
         local_addr: std.net.Address,
+
+        request: ?Request = null, // session change
+        action: ?Action = null,
+
+        volume: VolumeState = .default,
+
+        const VideoProgress = struct {
+            pub const default: @This() = .{ .end_timestamp = null, .timestamp = 0.0 };
+
+            end_timestamp: ?f32,
+            timestamp: f32,
+        };
+
+        const VolumeState = struct {
+            pub const default: @This() = .{ .value = 0.5, .cache = 0.5 };
+
+            value: f32,
+            cache: f32,
+        };
 
         pub fn init() !State {
             const hw_dec, const hw_enc = guessHardware();
@@ -295,7 +317,7 @@ pub const gui = struct {
 
         try drawSettings(state);
         drawVideoWindow(maybe_video);
-        try drawControls();
+        try drawControls(state);
     }
 
     fn setupDockingLayout(str_id: [:0]const u8, ui_view: Viewport) void {
@@ -306,17 +328,17 @@ pub const gui = struct {
         _ = zgui.dockBuilderAddNode(dock_id, .{});
         zgui.dockBuilderSetNodeSize(dock_id, size);
 
-        var top_id: zgui.Ident = undefined;
-        var bottom_id: zgui.Ident = undefined;
-        _ = zgui.dockBuilderSplitNode(dock_id, .down, 0.33, &bottom_id, &top_id);
+        var left_id: zgui.Ident = undefined;
+        var video_id: zgui.Ident = undefined;
+        _ = zgui.dockBuilderSplitNode(dock_id, .left, 0.25, &left_id, &video_id);
 
         var settings_id: zgui.Ident = undefined;
-        var video_id: zgui.Ident = undefined;
-        _ = zgui.dockBuilderSplitNode(top_id, .left, 0.33, &settings_id, &video_id);
+        var controls_id: zgui.Ident = undefined;
+        _ = zgui.dockBuilderSplitNode(left_id, .down, 0.33, &controls_id, &settings_id);
 
         zgui.dockBuilderDockWindow("Settings", settings_id);
         zgui.dockBuilderDockWindow("Video", video_id);
-        zgui.dockBuilderDockWindow("Controls", bottom_id);
+        zgui.dockBuilderDockWindow("Controls", controls_id);
 
         zgui.dockBuilderFinish(dock_id);
     }
@@ -340,7 +362,7 @@ pub const gui = struct {
 
             zgui.textDisabled("Output Settings", .{});
             _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
-            _ = zgui.sliderInt("Target Bitrate (kbps)", .{
+            _ = zgui.sliderInt("Bitrate (kbps)", .{
                 .v = &state.bit_rate,
                 .max = 100_000,
                 .min = 1000,
@@ -425,17 +447,6 @@ pub const gui = struct {
                 state.request = .idle;
                 state.encode_progress = 0.0;
             }
-
-            if (state.encode_progress > 0.0) {
-                zgui.spacing();
-
-                zgui.progressBar(.{
-                    .fraction = state.encode_progress,
-                    .w = -1.0,
-                    .h = 0.0,
-                    .overlay = "Encoding...",
-                });
-            }
         }
     }
 
@@ -479,7 +490,7 @@ pub const gui = struct {
         });
     }
 
-    fn drawControls() !void {
+    fn drawControls(state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -487,6 +498,46 @@ pub const gui = struct {
         defer zgui.end();
 
         if (!showing) return;
+
+        const is_muted = state.volume.value < std.math.floatEps(f32);
+        if (zgui.button(if (is_muted) "Unmute" else "Mute", .{})) {
+            state.action = .{ .SetVolume = if (is_muted) state.volume.cache else 0.0 };
+        }
+
+        zgui.sameLine(.{});
+
+        {
+            zgui.pushItemWidth(-1.0);
+            defer zgui.popItemWidth();
+
+            if (zgui.sliderFloat("##Volume", .{ .min = 0.0, .max = 1.0, .v = &state.volume.value })) {
+                state.volume.cache = state.volume.value;
+                state.action = .{ .SetVolume = state.volume.value };
+            }
+        }
+
+        zgui.spacing();
+
+        if (state.encode_progress > 0.0) {
+            zgui.progressBar(.{
+                .fraction = state.encode_progress,
+                .w = -1.0,
+                .overlay = "Encoding...",
+            });
+        } else {
+            zgui.pushItemWidth(-1.0);
+            defer zgui.popItemWidth();
+
+            const duration = state.progress.end_timestamp orelse 0.0;
+
+            // FIXME: until seeking impl, always disabled
+            if (duration == 0.0 or true) zgui.beginDisabled(.{});
+            defer if (duration == 0.0 or true) zgui.endDisabled();
+
+            if (zgui.sliderFloat("##Progress", .{ .min = 0.0, .max = duration, .v = &state.progress.timestamp })) {
+                state.action = .{ .Seek = state.progress.timestamp };
+            }
+        }
 
         zgui.textDisabled("TODO: add more controls here", .{});
     }
