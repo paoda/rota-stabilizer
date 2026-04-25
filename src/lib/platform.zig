@@ -6,6 +6,7 @@ const zgui = @import("zgui");
 const nfd = @import("nfd");
 
 const version = @import("build.zig.zon").version;
+const default_font = @embedFile("asset/Inter-Medium.ttf");
 
 const Request = @import("../app.zig").Request;
 const Action = @import("../app.zig").Action;
@@ -84,6 +85,7 @@ pub const Ui = struct {
         zgui.backend.init(window, gl_ctx);
         zgui.io.setIniFilename(null);
         zgui.io.setConfigFlags(.{ .dock_enable = true });
+        _ = zgui.io.addFontFromMemory(default_font, 16.0);
 
         log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
         log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
