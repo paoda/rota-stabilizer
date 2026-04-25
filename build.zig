@@ -114,9 +114,6 @@ pub fn build(b: *std.Build) !void {
     });
     exe_mod.addImport("gl", gl_mod);
 
-    const clap = b.dependency("clap", .{});
-    exe_mod.addImport("clap", clap.module("clap"));
-
     const enable_tracy = b.option(bool, "tracy", "Enable Tracy Profiling") orelse false;
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = optimize });
     const tracy_impl = if (enable_tracy) "tracy_impl_enabled" else "tracy_impl_disabled";

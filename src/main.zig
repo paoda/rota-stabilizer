@@ -107,14 +107,6 @@ pub fn main() !void {
     }
 }
 
-const Id = enum(usize) {
-    texture = 0,
-    ring,
-    circle,
-    background,
-    blur,
-};
-
 pub fn render(
     view: *Viewport,
     fbs: *FbStack,
@@ -615,31 +607,6 @@ pub fn unmapNv12Frame(res: *const GpuResourceManager, idx: PixelBufferPool.Index
     _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
 
     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
-}
-
-fn checkFile(maybe_path: ?[]const u8) !bool {
-    const path = maybe_path orelse return true;
-
-    var buf: [0x40]u8 = undefined;
-
-    var writer = std.fs.File.stdout().writer(buf[0..][0..0x20]);
-    var reader = std.fs.File.stdin().reader(buf[0x20..][0..0x20]);
-
-    var stdout = &writer.interface;
-    var stdin = &reader.interface;
-
-    std.fs.cwd().access(path, .{}) catch |e| switch (e) {
-        error.FileNotFound => return true,
-        else => return e,
-    };
-
-    try stdout.print("File '{s}' already exists. Overwrite? (y/n): ", .{path});
-    try stdout.flush();
-
-    const line = try stdin.takeDelimiter('\n') orelse return false;
-    const answer = std.mem.trim(u8, line, "\r\t\n");
-
-    return std.ascii.eqlIgnoreCase(answer, "y");
 }
 
 pub fn shutdown(queues: *Decoder.Queues) void {
