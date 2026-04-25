@@ -249,7 +249,6 @@ pub const dec = struct {
                     break :blk log.err("failed to set up hardware device, defaulting to software", .{});
                 };
 
-                self.device.?.configure();
                 return self;
             }
 
@@ -341,9 +340,14 @@ pub const dec = struct {
                     log.info("found {s} decoder for {s} ", .{ c.av_hwdevice_get_type_name(device_type), codec_ptr.?.name });
 
                     _ = try err(c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0));
-                    defer c.av_buffer_unref(&hw_device_ctx);
+                    errdefer c.av_buffer_unref(&hw_device_ctx);
 
                     ctx_ptr.?.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
+
+                    self.device = .{ .ctx = hw_device_ctx, .pix_fmt = hw_pix_fmt };
+
+                    ctx_ptr.?.@"opaque" = &self.device.?;
+                    ctx_ptr.?.get_format = Device.getFormat;
 
                     break;
                 }
@@ -351,14 +355,8 @@ pub const dec = struct {
 
             _ = try err(c.avcodec_open2(ctx_ptr, codec_ptr, null));
 
-            self.* = .{
-                .inner = ctx_ptr,
-                .stream = stream,
-                .device = .{
-                    .pix_fmt = hw_pix_fmt,
-                    .ctx = hw_device_ctx,
-                },
-            };
+            self.inner = ctx_ptr;
+            self.stream = stream;
         }
     };
 
@@ -366,15 +364,7 @@ pub const dec = struct {
         ctx: ?*c.AVBufferRef,
         pix_fmt: c.AVPixelFormat,
 
-        /// Must be called immediately after creation, sets a self-referential ptr in self.codec_ctx.@"opaque"
-        ///
-        /// Also sets the get_format fn pointer in AVCodecContext
-        fn configure(self: *@This()) void {
-            const super: *AvCodecContext = @fieldParentPtr("device", @as(*?Device, @ptrCast(self)));
-
-            super.inner.?.@"opaque" = @ptrCast(self);
-            super.inner.?.get_format = @This().getFormat;
-        }
+        const log = std.log.scoped(.dec_device);
 
         fn deinit(self: *@This()) void {
             c.av_buffer_unref(&self.ctx);
@@ -382,14 +372,20 @@ pub const dec = struct {
 
         fn getFormat(ctx: ?*c.AVCodecContext, formats: [*c]const c.AVPixelFormat) callconv(.c) c.AVPixelFormat {
             const self: *const @This() = @ptrCast(@alignCast(ctx.?.@"opaque"));
-
             const fmts = std.mem.sliceTo(formats, c.AV_PIX_FMT_NONE);
+
+            const sw = fmts[fmts.len - 1];
+            std.debug.assert(c.av_pix_fmt_desc_get(sw).*.flags & c.AV_PIX_FMT_FLAG_HWACCEL == 0);
+
             for (fmts) |fmt| {
-                // if (hw_pix_fmt == null) break; TODO: maybe i still need this?
-                if (fmt == self.pix_fmt) return self.pix_fmt;
+                if (fmt == self.pix_fmt) {
+                    log.debug("match for {s} found", .{c.av_get_pix_fmt_name(fmt)});
+                    return self.pix_fmt;
+                }
             }
 
-            return c.AV_PIX_FMT_NONE;
+            log.err("failed to match hw pix fmt. fallback to {s}", .{getPixelFormatName(sw)});
+            return sw;
         }
     };
 
