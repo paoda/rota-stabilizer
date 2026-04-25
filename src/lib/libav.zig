@@ -495,7 +495,7 @@ pub const AvFrame = struct {
 
     fn bufferDummyFree(_: ?*anyopaque, _: [*c]u8) callconv(.c) void {}
 
-    pub fn ptr(self: @This()) *c.AVFrame {
+    pub inline fn ptr(self: @This()) *c.AVFrame {
         return self.inner.?;
     }
 

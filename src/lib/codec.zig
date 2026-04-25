@@ -638,7 +638,7 @@ pub const video = struct {
                         c.av_frame_unref(mid_frame.ptr());
                         c.av_frame_unref(dst_frame.ptr());
 
-                        try convert(src_frame.ptr(), mid_frame.ptr(), sws);
+                        try convert(sws, mid_frame, src_frame);
                         try filter.push(mid_frame.ptr());
                         try drainFilter(&filter, frame_queue, dst_frame.ptr());
                     },
@@ -704,30 +704,30 @@ pub const video = struct {
         }
     }
 
-    fn convert(src_frame: *c.AVFrame, dst_frame: *c.AVFrame, sws: *c.SwsContext) !void {
+    fn convert(sws: *c.SwsContext, dst_frame: AvFrame, src_frame: AvFrame) !void {
         @setRuntimeSafety(false);
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        if (src_frame.hw_frames_ctx) |_| {
+        if (src_frame.ptr().hw_frames_ctx != null) {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "hwframe_transfer_data" });
             defer z.end();
 
-            _ = try libav.err(c.av_hwframe_transfer_data(dst_frame, src_frame, 0));
+            _ = try libav.err(c.av_hwframe_transfer_data(dst_frame.ptr(), src_frame.ptr(), 0));
         } else {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "sws_scale_frame" });
             defer z.end();
 
-            _ = try libav.err(c.sws_scale_frame(sws, dst_frame, src_frame));
+            _ = try libav.err(c.sws_scale_frame(sws, dst_frame.ptr(), src_frame.ptr()));
         }
 
         // timing
-        dst_frame.pts = src_frame.pts;
+        dst_frame.ptr().pts = src_frame.ptr().pts;
 
-        dst_frame.colorspace = src_frame.colorspace;
-        dst_frame.color_range = src_frame.color_range;
-        dst_frame.color_primaries = src_frame.color_primaries;
-        dst_frame.color_trc = src_frame.color_trc;
+        dst_frame.ptr().colorspace = src_frame.ptr().colorspace;
+        dst_frame.ptr().color_range = src_frame.ptr().color_range;
+        dst_frame.ptr().color_primaries = src_frame.ptr().color_primaries;
+        dst_frame.ptr().color_trc = src_frame.ptr().color_trc;
     }
 };
 
