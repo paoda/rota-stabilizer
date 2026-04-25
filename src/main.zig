@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const gl = @import("gl");
 const tracy = @import("tracy");
 const zgui = @import("zgui");
@@ -63,6 +64,7 @@ pub fn main() !void {
     var ui_view: Viewport = .default;
     try ui_view.push(ui_width, ui_height);
 
+    if (builtin.mode == .Debug) c.av_log_set_level(c.AV_LOG_VERBOSE);
     try signal.setupHandler(); // NB: Has to come after SDL Init
 
     var app: App = .default;
