@@ -24,6 +24,7 @@ pub const HwDeviceType = switch (builtin.os.tag) {
         QSV = c.AV_HWDEVICE_TYPE_QSV,
         D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
         AMF = AV_HWDEVICE_TYPE_AMF,
+        VULKAN = c.AV_HWDEVICE_TYPE_VULKAN,
         Software = c.AV_HWDEVICE_TYPE_NONE,
     },
     .linux => enum(c.AVHWDeviceType) {
@@ -31,6 +32,7 @@ pub const HwDeviceType = switch (builtin.os.tag) {
         QSV = c.AV_HWDEVICE_TYPE_QSV,
         VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
         AMF = AV_HWDEVICE_TYPE_AMF,
+        VULKAN = c.AV_HWDEVICE_TYPE_VULKAN,
         Software = c.AV_HWDEVICE_TYPE_NONE,
     },
     else => unreachable,
