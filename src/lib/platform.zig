@@ -320,6 +320,9 @@ pub const gui = struct {
             _ = zgui.dockSpace("MainDockSpace", .{ 0.0, 0.0 }, .{ .passthru_central_node = true });
         }
 
+        zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
+        defer zgui.popStyleVar(.{});
+
         try drawSettings(state);
         drawVideoWindow(maybe_video);
         try drawControls(state);
