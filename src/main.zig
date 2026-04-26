@@ -112,6 +112,9 @@ pub const RenderOptions = struct {
     show_circle: bool = true,
     zoom: f32 = 1.0,
     bg_zoom: f32 = 1.0,
+
+    border_radius: f32 = 100.0,
+    show_border: bool = true,
 };
 
 pub fn render(
@@ -244,6 +247,7 @@ pub fn render(
 
         gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_border_radius"), opt.border_radius);
         gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution.width, camera.video_resolution.height);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);

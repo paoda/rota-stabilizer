@@ -7,10 +7,9 @@ uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
 
 uniform float u_ratio;
+uniform float u_border_radius;
 uniform mat3 u_colour_space;
 uniform ivec2 u_resolution;
-
-const float border_radius = 100.0;
 
 const float Y_OFFSET = 16.0 / 255.0;
 const float Y_SCALE = 255.0 / (235.0 - 16.0);
@@ -49,7 +48,7 @@ void main() {
     vec2 half_size = vec2(W, gameplay_height) / 2.0;
     vec2 pos = (uv_norm * 2.0 - 1.0) * half_size;
 
-    float dist = roundedBoxSDF(pos, half_size, border_radius);
+    float dist = roundedBoxSDF(pos, half_size, u_border_radius);
 
     float softness = fwidth(dist);
 

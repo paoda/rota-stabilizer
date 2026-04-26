@@ -410,12 +410,25 @@ pub const gui = struct {
 
             _ = zgui.checkbox("Show Circle", .{ .v = &state.render_opt.show_circle });
 
+            zgui.sameLine(.{});
+
+            {
+                zgui.beginDisabled(.{});
+                defer zgui.endDisabled();
+
+                _ = zgui.checkbox("Show Border", .{ .v = &state.render_opt.show_border });
+            }
+
+            _ = zgui.sliderFloat("Border Radius", .{ .v = &state.render_opt.border_radius, .min = 0.0, .max = 200.0, .cfmt = "%.1f" });
+
             if (zgui.inputFloat("Zoom", .{ .v = &state.render_opt.zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                state.render_opt.zoom = @max(1.0, state.render_opt.zoom);
                 state.action = .{ .SetCameraZoom = state.render_opt.zoom };
             }
 
-            _ = zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.bg_zoom, .step = 0.05, .cfmt = "%.2f" });
-            _ = zgui.text("TODO: Enable/Disable Ring, Circle, Border, etc.", .{});
+            if (zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.bg_zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                state.render_opt.bg_zoom = @max(1.0, state.render_opt.bg_zoom);
+            }
         }
 
         zgui.spacing();
