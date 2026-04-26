@@ -63,7 +63,7 @@ void main() {
 
         // transition to border smoothly
         float border_mix = smoothstep(-border_thickness - softness, -border_thickness + softness, dist);
-        vec4 border_colour = vec4(vec3(1.0), 0.7);
+        vec4 border_colour = vec4(vec3(1.0), 0.5);
 
         // Blend the video and border based on distance
         final_colour = mix(vec4(sampleTex(uv), 1.0), border_colour, border_mix);

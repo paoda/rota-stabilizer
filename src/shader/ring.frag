@@ -16,5 +16,5 @@ void main() {
     float mask = 1.0 - smoothstep(half_thick - softness, half_thick, abs(d - u_radius));
     if (mask <= 0.0) discard;
 
-    frag_colour = vec4(vec3(1.0), 0.4 * mask);
+    frag_colour = vec4(vec3(1.0), 0.3 * mask);
 }
