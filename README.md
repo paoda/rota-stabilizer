@@ -16,6 +16,7 @@ Thus, this stabilizer only requires a screen recording with [Stream Encoding V2]
 - fast video encoding 
 - auto crop for tablets 
 - pretty ui (blurred background, ring, device border)
+- customization
 
 ## Download
 
