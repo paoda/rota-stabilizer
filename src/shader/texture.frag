@@ -7,10 +7,11 @@ uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
 
 uniform float u_ratio;
+uniform float u_border_radius;
 uniform mat3 u_colour_space;
 uniform ivec2 u_resolution;
 
-const float border_radius = 100.0;
+uniform bool u_show_border;
 
 const float Y_OFFSET = 16.0 / 255.0;
 const float Y_SCALE = 255.0 / (235.0 - 16.0);
@@ -35,36 +36,39 @@ void main() {
     float W = float(u_resolution.x);
     float H = float(u_resolution.y);
 
-    float border_thickness = W * 0.005;
-
     float gameplay_height = W / u_ratio;
     float height_diff = H - gameplay_height;
     float threshold = (height_diff / 2.0) / H;
 
     if (uv.y < threshold || uv.y > (1.0 - threshold)) discard;
 
-    vec2 uv_norm = uv;
-    if (height_diff > 0.0) uv_norm.y = (uv.y - threshold) / (gameplay_height / H);
+    vec4 final_colour = vec4(sampleTex(uv), 1.0);
 
-    vec2 half_size = vec2(W, gameplay_height) / 2.0;
-    vec2 pos = (uv_norm * 2.0 - 1.0) * half_size;
+    if (u_show_border) {
+        float border_thickness = W * 0.005;
 
-    float dist = roundedBoxSDF(pos, half_size, border_radius);
+        vec2 uv_norm = uv;
+        if (height_diff > 0.0) uv_norm.y = (uv.y - threshold) / (gameplay_height / H);
 
-    float softness = fwidth(dist);
+        vec2 half_size = vec2(W, gameplay_height) / 2.0;
+        vec2 pos = (uv_norm * 2.0 - 1.0) * half_size;
 
-    // clip corners
-    float outer_alpha = 1.0 - smoothstep(-softness, softness, dist);
-    if (outer_alpha <= 0.0) discard;
+        float dist = roundedBoxSDF(pos, half_size, u_border_radius);
 
-    // transition to border smoothly
-    float border_mix = smoothstep(-border_thickness - softness, -border_thickness + softness, dist);
+        float softness = fwidth(dist);
 
-    vec4 border_colour = vec4(vec3(1.0), 0.7);
+        // clip corners
+        float outer_alpha = 1.0 - smoothstep(-softness, softness, dist);
+        if (outer_alpha <= 0.0) discard;
 
-    // Blend the video and border based on distance
-    vec4 final_colour = mix(vec4(sampleTex(uv), 1.0), border_colour, border_mix);
-    final_colour.a *= outer_alpha; // apply rounded corner cutoff
+        // transition to border smoothly
+        float border_mix = smoothstep(-border_thickness - softness, -border_thickness + softness, dist);
+        vec4 border_colour = vec4(vec3(1.0), 0.5);
+
+        // Blend the video and border based on distance
+        final_colour = mix(vec4(sampleTex(uv), 1.0), border_colour, border_mix);
+        final_colour.a *= outer_alpha; // apply rounded corner cutoff
+    }
 
     frag_color = final_colour;
 }

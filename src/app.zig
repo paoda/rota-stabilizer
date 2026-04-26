@@ -20,6 +20,8 @@ const VideoContext = @import("lib/platform.zig").gui.VideoContext;
 const Encoder = @import("lib/codec.zig").Encoder;
 const Decoder = @import("lib/codec.zig").Decoder;
 
+const RenderOptions = @import("main.zig").RenderOptions;
+
 const signal = @import("lib/platform.zig").signal;
 
 const preload = @import("main.zig").preload;
@@ -36,6 +38,12 @@ pub const Request = union(State) {
     idle: void,
     playback: []const u8,
     encode: struct { src_path: []const u8, dst_path: []const u8 },
+};
+
+pub const Action = union(enum) {
+    SetCameraZoom: f32,
+    SetVolume: f32,
+    Seek: f32,
 };
 
 const Session = union(State) {
@@ -118,7 +126,7 @@ const PlaybackSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_device, path, false);
+        decoder.* = try Decoder.init(allocator, hw_device, state.volume.value, path, false);
         errdefer decoder.deinit(allocator);
 
         const double_buffer = try allocator.create(DoubleBuffer);
@@ -150,6 +158,7 @@ const PlaybackSession = struct {
             angle_calc,
             manager,
             camera,
+            state.render_opt,
         );
         try ui.swap();
 
@@ -199,7 +208,7 @@ const PlaybackSession = struct {
         allocator.destroy(self.decoder);
     }
 
-    pub fn run(self: *PlaybackSession) !void {
+    pub fn run(self: *PlaybackSession, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.run" });
         defer zone.end();
 
@@ -298,6 +307,7 @@ const PlaybackSession = struct {
                 self.angle_calc,
                 self.manager,
                 self.camera,
+                opt,
             );
         }
     }
@@ -363,7 +373,7 @@ const EncodeSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_dec, src_path, true);
+        decoder.* = try Decoder.init(allocator, hw_dec, 0.0, src_path, true);
         errdefer decoder.deinit(allocator);
 
         const encoder = try allocator.create(Encoder);
@@ -401,7 +411,7 @@ const EncodeSession = struct {
         var fbs: FbStack = .default;
 
         _ = try preload(manager, decoder, double_buffer);
-        try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera);
+        try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render_opt);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
         const frame_estimate: usize = blk: {
@@ -451,7 +461,7 @@ const EncodeSession = struct {
         allocator.destroy(self.decoder);
     }
 
-    pub fn run(self: *EncodeSession) !void {
+    pub fn run(self: *EncodeSession, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.run" });
         defer zone.end();
 
@@ -493,7 +503,7 @@ const EncodeSession = struct {
                 uploadPlane(.y, self.manager, back, frame);
                 uploadPlane(.uv, self.manager, back, frame);
 
-                try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera);
+                try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera, opt);
                 try writeToNv12Tex(self.manager, &self.encode_view, self.fbs, self.camera);
 
                 const width, const height = self.encode_view.get();
@@ -580,18 +590,39 @@ pub const App = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.poll" });
         defer zone.end();
 
-        if (self.session == .encode) {
-            const num: f32 = @floatFromInt(self.session.encode.frame_count);
-            const den: f32 = @floatFromInt(self.session.encode.frame_total);
-            state.encode_progress = num / den;
+        switch (self.session) {
+            .encode => {
+                const num: f32 = @floatFromInt(self.session.encode.frame_count);
+                const den: f32 = @floatFromInt(self.session.encode.frame_total);
+                state.encode_progress = num / den;
 
-            if (self.session.encode.is_finished) {
-                state.request = .idle;
+                if (self.session.encode.is_finished) {
+                    state.request = .idle;
 
-                if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
-                    log.warn("encode_progress finished at {d:.2}", .{state.encode_progress});
+                    if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
+                        log.warn("encode_progress finished at {d:.2}", .{state.encode_progress});
+                    }
                 }
-            }
+            },
+            .playback => |*playback| {
+                const audio = &(playback.decoder.audio_clock orelse @panic("invariant broken"));
+
+                state.volume.value = audio.volume;
+                state.render_opt.zoom = playback.camera.zoom;
+                state.progress.timestamp = @floatCast(playback.double_buffer.back().displayTime());
+                state.progress.duration = @floatCast(self.session.playback.decoder.duration());
+
+                if (state.action) |action| {
+                    defer state.action = null;
+
+                    switch (action) {
+                        .SetCameraZoom => |zoom| playback.camera.zoom = zoom,
+                        .SetVolume => |volume| try audio.setVolume(volume),
+                        .Seek => |timestamp| log.warn("TODO: Seek to {d:.3}s", .{timestamp}),
+                    }
+                }
+            },
+            else => {},
         }
 
         const request = state.request orelse return;
@@ -618,16 +649,18 @@ pub const App = struct {
         self.session = .{ .idle = IdleSession.init() };
 
         state.encode_progress = 0.0;
+        state.progress = .default;
+
         state.request = null;
     }
 
-    pub fn run(self: *App) !void {
+    pub fn run(self: *App, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.run" });
         defer zone.end();
 
         switch (self.session) {
             .idle => {},
-            inline .playback, .encode => |*s| try s.run(),
+            inline .playback, .encode => |*s| try s.run(opt),
         }
     }
 

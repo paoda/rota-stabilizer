@@ -99,7 +99,7 @@ pub fn main() !void {
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
         try app.poll(allocator, ui, state);
-        try app.run();
+        try app.run(state.render_opt);
 
         try platform.gui.draw(state, ui_view, app.video());
 
@@ -107,12 +107,15 @@ pub fn main() !void {
     }
 }
 
-const Id = enum(usize) {
-    texture = 0,
-    ring,
-    circle,
-    background,
-    blur,
+pub const RenderOptions = struct {
+    show_ring: bool = true,
+    show_circle: bool = true,
+    show_background: bool = true,
+    show_border: bool = true,
+
+    zoom: f32 = 1.0,
+    background_zoom: f32 = 1.0,
+    border_radius: f32 = 100.0,
 };
 
 pub fn render(
@@ -120,39 +123,39 @@ pub fn render(
     fbs: *FbStack,
     front: DoubleBuffer.Buffer,
     angle_calc: AngleCalc,
-    res: *const GpuResourceManager,
+    manager: *const GpuResourceManager,
     camera: Camera,
+    opt: RenderOptions,
 ) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    try fbs.push(res.fbo.get(.out));
+    try fbs.push(manager.fbo.get(.out));
     defer fbs.pop();
 
-    const tex: Nv12Tex = .{ .y = res.tex.get(front.tex(.y)), .uv = res.tex.get(front.tex(.uv)) };
-    try angle_calc.execute(view, fbs, tex);
+    try angle_calc.execute(view, fbs, front);
 
-    {
+    if (opt.show_background) {
         const z = tracy.Zone.begin(.{ .src = @src(), .name = "background pass" });
         defer z.end();
 
-        try blur(res.blur(), res, view, fbs, tex, camera, 6);
-        const prog = res.prog.get(.bg);
+        try blur(manager, view, fbs, camera, front, 6);
+        const prog = manager.prog.get(.bg);
 
         gl.UseProgram(prog);
-        gl.BindVertexArray(res.vao.get(.tex));
+        gl.BindVertexArray(manager.vao.get(.tex));
 
         gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, res.blur().front.tex); // guaranteed to be the last modified texture
+        gl.BindTexture(gl.TEXTURE_2D, manager.blur().front.tex); // guaranteed to be the last modified texture
 
         gl.ActiveTexture(gl.TEXTURE1);
-        gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(.angle));
 
         gl.ActiveTexture(gl.TEXTURE2);
-        gl.BindTexture(gl.TEXTURE_2D, tex.y);
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(front.tex(.y)));
 
         gl.ActiveTexture(gl.TEXTURE3);
-        gl.BindTexture(gl.TEXTURE_2D, tex.uv);
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(front.tex(.uv)));
 
         const u_world_transform = camera.getBackgroundWorldTransform();
         const u_view_transform = Mat2.identity; // don't zoom in on background
@@ -161,25 +164,28 @@ pub fn render(
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
-
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 2);
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 3);
-        gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), res.meta.circle_radius * camera.scale * camera.zoom);
-        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), 1.0);
-
         gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 2);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 3);
+
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), manager.meta.circle_radius * camera.scale * camera.zoom);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), opt.background_zoom);
+
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    } else { // draw transparency in place of background
+        gl.ClearColor(0.0, 0.0, 0.0, 0.0);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
     }
 
     {
         const z = tracy.Zone.begin(.{ .src = @src(), .name = "ui pass" });
         defer z.end();
 
-        const circle_prog = res.prog.get(.circle);
-        const ring_prog = res.prog.get(.ring);
+        const circle_prog = manager.prog.get(.circle);
+        const ring_prog = manager.prog.get(.ring);
 
         const u_world_transform = camera.getUiWorldTransform();
         const u_view_transform = camera.getWorldViewTransform();
@@ -187,48 +193,48 @@ pub fn render(
 
         // Draw Transparent Puck
         gl.UseProgram(circle_prog);
-        gl.BindVertexArray(res.vao.get(.tex));
+        gl.BindVertexArray(manager.vao.get(.tex));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
 
-        gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_radius"), res.meta.circle_radius);
-        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_radius"), manager.meta.circle_radius);
+        if (opt.show_circle) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Draw Ring (matches ring in gameplay)
         gl.UseProgram(ring_prog);
-        gl.BindVertexArray(res.vao.get(.tex));
+        gl.BindVertexArray(manager.vao.get(.tex));
 
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(ring_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
 
-        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_radius"), res.meta.ring_radius);
-        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_thickness"), res.meta.ring_thickness);
-        gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_radius"), manager.meta.ring_radius);
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_thickness"), manager.meta.ring_thickness);
+        if (opt.show_ring) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     {
         const z = tracy.Zone.begin(.{ .src = @src(), .name = "video pass" });
         defer z.end();
 
-        const prog = res.prog.get(.tex);
+        const prog = manager.prog.get(.tex);
 
         gl.UseProgram(prog);
         defer gl.UseProgram(0);
 
-        gl.BindVertexArray(res.vao.get(.tex));
+        gl.BindVertexArray(manager.vao.get(.tex));
         defer gl.BindVertexArray(0);
 
         gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, tex.y);
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(front.tex(.y)));
 
         gl.ActiveTexture(gl.TEXTURE1);
-        gl.BindTexture(gl.TEXTURE_2D, tex.uv);
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(front.tex(.uv)));
 
         gl.ActiveTexture(gl.TEXTURE2);
-        gl.BindTexture(gl.TEXTURE_2D, res.tex.get(.angle));
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(.angle));
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         const u_world_transform = camera.getVideoWorldTransform();
@@ -238,13 +244,15 @@ pub fn render(
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
+        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
 
-        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_border_radius"), opt.border_radius);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_show_border"), @intFromBool(opt.show_border));
         gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution.width, camera.video_resolution.height);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -252,12 +260,11 @@ pub fn render(
 }
 
 fn blur(
-    b: BlurManager,
-    res: *const GpuResourceManager,
+    manager: *const GpuResourceManager,
     view: *Viewport,
     fbs: *FbStack,
-    src_tex: Nv12Tex,
     camera: Camera,
+    front: DoubleBuffer.Buffer,
     comptime passes: u32,
 ) !void {
     if (passes == 0) return;
@@ -267,24 +274,26 @@ fn blur(
 
     std.debug.assert(passes & 1 == 0);
 
+    const b = manager.blur();
+
     const width: c_int = @intCast(b.resolution.width);
     const height: c_int = @intCast(b.resolution.height);
-    const program = res.prog.get(.blur);
+    const program = manager.prog.get(.blur);
 
     try view.push(width, height);
     defer view.pop();
 
-    gl.BindVertexArray(res.vao.get(.blur));
+    gl.BindVertexArray(manager.vao.get(.blur));
     defer gl.BindVertexArray(0);
 
     gl.UseProgram(program);
     defer gl.UseProgram(0);
 
     gl.ActiveTexture(gl.TEXTURE1);
-    gl.BindTexture(gl.TEXTURE_2D, src_tex.y);
+    gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(front.tex(.y)));
 
     gl.ActiveTexture(gl.TEXTURE2);
-    gl.BindTexture(gl.TEXTURE_2D, src_tex.uv);
+    gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(front.tex(.uv)));
 
     gl.Uniform1i(gl.GetUniformLocation(program, "u_screen"), 0);
     gl.Uniform1i(gl.GetUniformLocation(program, "u_y_tex"), 1);
@@ -317,41 +326,39 @@ fn blur(
     gl.BindFramebuffer(gl.FRAMEBUFFER, fbs.get());
 }
 
-const Nv12Tex = struct { y: c_uint, uv: c_uint };
-
 pub const AngleCalc = struct {
-    res: *const GpuResourceManager,
+    manager: *const GpuResourceManager,
     colour_matrix: [*]const [9]f32,
 
     const log = std.log.scoped(.angle_calc);
 
-    pub fn init(res: *const GpuResourceManager, camera: Camera) !AngleCalc {
+    pub fn init(manager: *const GpuResourceManager, camera: Camera) !AngleCalc {
         return .{
-            .res = res,
+            .manager = manager,
             .colour_matrix = camera.colourSpaceMatrix(),
         };
     }
 
-    pub fn execute(self: @This(), view: *Viewport, fbs: *FbStack, tex: Nv12Tex) !void {
+    pub fn execute(self: @This(), view: *Viewport, fbs: *FbStack, front: DoubleBuffer.Buffer) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "angle calc pass" });
         defer zone.end();
-
-        const program = self.res.prog.get(.angle);
 
         try view.push(1, 1);
         defer view.pop();
 
-        gl.BindVertexArray(self.res.vao.get(.empty));
-        defer gl.BindVertexArray(0);
-
-        try fbs.push(self.res.fbo.get(.angle));
+        try fbs.push(self.manager.fbo.get(.angle));
         defer fbs.pop();
 
+        const program = self.manager.prog.get(.angle);
+
+        gl.BindVertexArray(self.manager.vao.get(.empty));
+        defer gl.BindVertexArray(0);
+
         gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, tex.y);
+        gl.BindTexture(gl.TEXTURE_2D, self.manager.tex.get(front.tex(.y)));
 
         gl.ActiveTexture(gl.TEXTURE1);
-        gl.BindTexture(gl.TEXTURE_2D, tex.uv);
+        gl.BindTexture(gl.TEXTURE_2D, self.manager.tex.get(front.tex(.uv)));
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         gl.UseProgram(program);
@@ -502,15 +509,6 @@ pub const Camera = struct {
     pub fn getViewClipTransform(self: @This()) Mat2 {
         return self.view_to_clip;
     }
-
-    pub fn adjustZoom(self: *@This(), delta: f32) void {
-        self.setZoom(self.zoom + delta);
-    }
-
-    fn setZoom(self: *@This(), new_zoom: f32) void {
-        std.log.info("zoom: {d:.2}", .{new_zoom});
-        self.zoom = @max(1.0, @min(10.0, new_zoom));
-    }
 };
 
 pub fn uploadPlane(comptime ch: DoubleBuffer.Channel, res: *const GpuResourceManager, buffer: DoubleBuffer.Buffer, frame: *c.AVFrame) void {
@@ -615,31 +613,6 @@ pub fn unmapNv12Frame(res: *const GpuResourceManager, idx: PixelBufferPool.Index
     _ = gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER);
 
     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
-}
-
-fn checkFile(maybe_path: ?[]const u8) !bool {
-    const path = maybe_path orelse return true;
-
-    var buf: [0x40]u8 = undefined;
-
-    var writer = std.fs.File.stdout().writer(buf[0..][0..0x20]);
-    var reader = std.fs.File.stdin().reader(buf[0x20..][0..0x20]);
-
-    var stdout = &writer.interface;
-    var stdin = &reader.interface;
-
-    std.fs.cwd().access(path, .{}) catch |e| switch (e) {
-        error.FileNotFound => return true,
-        else => return e,
-    };
-
-    try stdout.print("File '{s}' already exists. Overwrite? (y/n): ", .{path});
-    try stdout.flush();
-
-    const line = try stdin.takeDelimiter('\n') orelse return false;
-    const answer = std.mem.trim(u8, line, "\r\t\n");
-
-    return std.ascii.eqlIgnoreCase(answer, "y");
 }
 
 pub fn shutdown(queues: *Decoder.Queues) void {

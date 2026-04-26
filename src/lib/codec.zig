@@ -181,8 +181,6 @@ pub const audio = struct {
         /// This accounts for videos that don't start at PTS=0
         stream_start_offset: f64 = 0.0,
 
-        is_muted: bool = true,
-
         stream: *c.SDL_AudioStream,
 
         volume: f32,
@@ -236,7 +234,7 @@ pub const audio = struct {
             }
         };
 
-        pub fn init(ctx: *const dec.AvCodecContext) !@This() {
+        pub fn init(ctx: *const dec.AvCodecContext, volume: f32) !@This() {
             var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             desired.freq = ctx.inner.?.sample_rate;
             desired.format = c.SDL_AUDIO_F32;
@@ -251,7 +249,6 @@ pub const audio = struct {
             try errify(c.SDL_GetAudioDeviceFormat(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &actual, &sample_frames));
             const offset = @as(f64, @floatFromInt(sample_frames)) / @as(f64, @floatFromInt(actual.freq));
 
-            const volume: f32 = 0.5;
             try errify(c.SDL_SetAudioStreamGain(stream, volume));
 
             log.info("hw latency: {d:.2}ms ({} frames) @ {}Hz", .{ offset * std.time.ms_per_s, sample_frames, actual.freq });
@@ -269,13 +266,8 @@ pub const audio = struct {
             };
         }
 
-        pub fn mute(self: *@This()) !void {
-            self.is_muted = true;
-            try errify(c.SDL_SetAudioStreamGain(self.stream, 0.0));
-        }
-
-        pub fn unmute(self: *@This()) !void {
-            self.is_muted = false;
+        pub fn setVolume(self: *@This(), volume: f32) !void {
+            self.volume = @max(0.0, @min(1.0, volume));
             try errify(c.SDL_SetAudioStreamGain(self.stream, self.volume));
         }
 
@@ -1035,7 +1027,8 @@ pub const Decoder = struct {
         return @intCast(normalized);
     }
 
-    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, path: []const u8, headless: bool) !Decoder {
+    // TODO: DecoderOptions
+    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, volume: f32, path: []const u8, headless: bool) !Decoder {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
@@ -1112,7 +1105,7 @@ pub const Decoder = struct {
         var audio_queue = PacketQueue.init(allocator, "Audio PacketQueue");
         errdefer audio_queue.deinit(allocator);
 
-        const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx);
+        const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx, volume);
         errdefer if (audio_clock) |clock| clock.deinit();
 
         return .{
@@ -1133,6 +1126,19 @@ pub const Decoder = struct {
         };
     }
 
+    pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Decoder.deinit" });
+        defer zone.end();
+
+        if (self.audio_clock) |clock| clock.deinit();
+        self.queue.deinit(allocator);
+
+        self.audio_ctx.deinit(allocator);
+        self.video_ctx.deinit(allocator);
+
+        self.fmt_ctx.deinit();
+    }
+
     pub fn framerate(self: Decoder) c.AVRational {
         return self.fmt_ctx.ptr().streams[@intCast(self.video_ctx.stream)].*.avg_frame_rate;
     }
@@ -1148,17 +1154,11 @@ pub const Decoder = struct {
         ];
     }
 
-    pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
-        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Decoder.deinit" });
-        defer zone.end();
+    pub fn duration(self: Decoder) f64 {
+        const st = self.stream(.video);
+        const end_pts: f64 = @floatFromInt(st.start_time + st.duration);
 
-        if (self.audio_clock) |clock| clock.deinit();
-        self.queue.deinit(allocator);
-
-        self.audio_ctx.deinit(allocator);
-        self.video_ctx.deinit(allocator);
-
-        self.fmt_ctx.deinit();
+        return end_pts * c.av_q2d(st.time_base);
     }
 
     pub fn spawn(self: *Decoder, headless: bool) !Handles {

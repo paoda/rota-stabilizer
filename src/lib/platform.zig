@@ -6,8 +6,10 @@ const zgui = @import("zgui");
 const nfd = @import("nfd");
 
 const version = @import("build.zig.zon").version;
+const default_font = @embedFile("asset/Inter-Medium.ttf");
 
 const Request = @import("../app.zig").Request;
+const Action = @import("../app.zig").Action;
 const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
@@ -83,6 +85,7 @@ pub const Ui = struct {
         zgui.backend.init(window, gl_ctx);
         zgui.io.setIniFilename(null);
         zgui.io.setConfigFlags(.{ .dock_enable = true });
+        _ = zgui.io.addFontFromMemory(default_font, 16.0);
 
         log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
         log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
@@ -217,6 +220,7 @@ pub const signal = struct {
 };
 
 const startup = @import("../main.zig").startup;
+const RenderOptions = @import("../main.zig").RenderOptions;
 
 pub const gui = struct {
     pub const VideoContext = struct { tex_id: c_uint, render_view: Viewport };
@@ -224,6 +228,8 @@ pub const gui = struct {
     var built_layout: bool = false;
 
     pub const State = struct {
+        const default_volume = 0.5;
+
         input_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
         output_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
 
@@ -234,9 +240,30 @@ pub const gui = struct {
         resolution: [2]i32,
 
         encode_progress: f32 = 0.0,
-        request: ?Request = null,
+        progress: VideoProgress = .default,
 
         local_addr: std.net.Address,
+
+        request: ?Request = null, // session change
+        action: ?Action = null,
+
+        volume: VolumeState = .default,
+
+        render_opt: RenderOptions = .{},
+
+        const VideoProgress = struct {
+            pub const default: @This() = .{ .duration = null, .timestamp = 0.0 };
+
+            duration: ?f32,
+            timestamp: f32,
+        };
+
+        const VolumeState = struct {
+            pub const default: @This() = .{ .value = 0.5, .cache = 0.5 };
+
+            value: f32,
+            cache: f32,
+        };
 
         pub fn init() !State {
             const hw_dec, const hw_enc = guessHardware();
@@ -293,9 +320,12 @@ pub const gui = struct {
             _ = zgui.dockSpace("MainDockSpace", .{ 0.0, 0.0 }, .{ .passthru_central_node = true });
         }
 
+        zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
+        defer zgui.popStyleVar(.{});
+
         try drawSettings(state);
         drawVideoWindow(maybe_video);
-        try drawControls();
+        try drawControls(state);
     }
 
     fn setupDockingLayout(str_id: [:0]const u8, ui_view: Viewport) void {
@@ -306,17 +336,17 @@ pub const gui = struct {
         _ = zgui.dockBuilderAddNode(dock_id, .{});
         zgui.dockBuilderSetNodeSize(dock_id, size);
 
-        var top_id: zgui.Ident = undefined;
-        var bottom_id: zgui.Ident = undefined;
-        _ = zgui.dockBuilderSplitNode(dock_id, .down, 0.33, &bottom_id, &top_id);
+        var left_id: zgui.Ident = undefined;
+        var video_id: zgui.Ident = undefined;
+        _ = zgui.dockBuilderSplitNode(dock_id, .left, 0.25, &left_id, &video_id);
 
         var settings_id: zgui.Ident = undefined;
-        var video_id: zgui.Ident = undefined;
-        _ = zgui.dockBuilderSplitNode(top_id, .left, 0.33, &settings_id, &video_id);
+        var controls_id: zgui.Ident = undefined;
+        _ = zgui.dockBuilderSplitNode(left_id, .down, 0.33, &controls_id, &settings_id);
 
         zgui.dockBuilderDockWindow("Settings", settings_id);
         zgui.dockBuilderDockWindow("Video", video_id);
-        zgui.dockBuilderDockWindow("Controls", bottom_id);
+        zgui.dockBuilderDockWindow("Controls", controls_id);
 
         zgui.dockBuilderFinish(dock_id);
     }
@@ -339,12 +369,10 @@ pub const gui = struct {
             zgui.spacing();
 
             zgui.textDisabled("Output Settings", .{});
-            _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
-            _ = zgui.sliderInt("Target Bitrate (kbps)", .{
-                .v = &state.bit_rate,
-                .max = 100_000,
-                .min = 1000,
-            });
+            _ = zgui.inputInt2("Resolution", .{ .v = &state.resolution });
+            if (zgui.inputInt("Bitrate (kbps)", .{ .v = &state.bit_rate })) {
+                state.bit_rate = @min(100_000, @max(1000, state.bit_rate));
+            }
         }
 
         zgui.spacing();
@@ -374,7 +402,35 @@ pub const gui = struct {
         zgui.textDisabled("Configuration", .{});
 
         {
-            _ = zgui.text("TODO: Enable/Disable Ring, Circle, Border, etc.", .{});
+            _ = zgui.checkbox("Ring", .{ .v = &state.render_opt.show_ring });
+
+            zgui.sameLine(.{});
+            _ = zgui.checkbox("Circle", .{ .v = &state.render_opt.show_circle });
+
+            zgui.sameLine(.{});
+            _ = zgui.checkbox("Background", .{ .v = &state.render_opt.show_background });
+
+            zgui.sameLine(.{});
+            _ = zgui.checkbox("Border", .{ .v = &state.render_opt.show_border });
+
+            _ = zgui.sliderFloat("Border Radius", .{ .v = &state.render_opt.border_radius, .min = 0.0, .max = 200.0, .cfmt = "%.1f" });
+
+            if (zgui.inputFloat("Zoom", .{ .v = &state.render_opt.zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                state.render_opt.zoom = @max(1.0, state.render_opt.zoom);
+                state.action = .{ .SetCameraZoom = state.render_opt.zoom };
+            }
+
+            if (zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.background_zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                state.render_opt.background_zoom = @max(1.0, state.render_opt.background_zoom);
+            }
+
+            zgui.sameLine(.{});
+            zgui.textDisabled("(?)", .{});
+            if (zgui.isItemHovered(.{}) and zgui.beginTooltip()) {
+                defer zgui.endTooltip();
+
+                zgui.text("Note: Zoom of the background texture that lives within the ring", .{});
+            }
         }
 
         zgui.spacing();
@@ -383,6 +439,8 @@ pub const gui = struct {
         {
             const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
             zgui.text("Local IP: {}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
+            zgui.text("Tip: CTRL+Click to manually input a value!", .{});
+            zgui.text("Tip: For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
         }
 
         zgui.spacing();
@@ -424,17 +482,6 @@ pub const gui = struct {
             if (zgui.button("Stop", .{})) {
                 state.request = .idle;
                 state.encode_progress = 0.0;
-            }
-
-            if (state.encode_progress > 0.0) {
-                zgui.spacing();
-
-                zgui.progressBar(.{
-                    .fraction = state.encode_progress,
-                    .w = -1.0,
-                    .h = 0.0,
-                    .overlay = "Encoding...",
-                });
             }
         }
     }
@@ -479,7 +526,7 @@ pub const gui = struct {
         });
     }
 
-    fn drawControls() !void {
+    fn drawControls(state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -487,6 +534,46 @@ pub const gui = struct {
         defer zgui.end();
 
         if (!showing) return;
+
+        const is_muted = state.volume.value < std.math.floatEps(f32);
+        if (zgui.button(if (is_muted) "Unmute" else "Mute", .{})) {
+            state.action = .{ .SetVolume = if (is_muted) state.volume.cache else 0.0 };
+        }
+
+        zgui.sameLine(.{});
+
+        {
+            zgui.pushItemWidth(-1.0);
+            defer zgui.popItemWidth();
+
+            if (zgui.sliderFloat("##Volume", .{ .min = 0.0, .max = 1.0, .v = &state.volume.value })) {
+                state.volume.cache = state.volume.value;
+                state.action = .{ .SetVolume = state.volume.value };
+            }
+        }
+
+        zgui.spacing();
+
+        if (state.encode_progress > 0.0) {
+            zgui.progressBar(.{
+                .fraction = state.encode_progress,
+                .w = -1.0,
+                .overlay = "Encoding...",
+            });
+        } else {
+            zgui.pushItemWidth(-1.0);
+            defer zgui.popItemWidth();
+
+            const duration = state.progress.duration orelse 0.0;
+
+            // FIXME: until seeking impl, always disabled
+            if (duration == 0.0 or true) zgui.beginDisabled(.{});
+            defer if (duration == 0.0 or true) zgui.endDisabled();
+
+            if (zgui.sliderFloat("##Progress", .{ .min = 0.0, .max = duration, .v = &state.progress.timestamp })) {
+                state.action = .{ .Seek = state.progress.timestamp };
+            }
+        }
 
         zgui.textDisabled("TODO: add more controls here", .{});
     }
