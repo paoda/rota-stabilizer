@@ -403,9 +403,12 @@ pub const gui = struct {
         {
             _ = zgui.checkbox("Show Ring", .{ .v = &state.render_opt.show_ring });
             _ = zgui.checkbox("Show Circle", .{ .v = &state.render_opt.show_circle });
-            _ = zgui.inputFloat("FG Zoom", .{ .v = &state.render_opt.zoom, .step = 1.0 });
-            _ = zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.bg_zoom, .step = 1.0 });
 
+            if (zgui.inputFloat("Zoom", .{ .v = &state.render_opt.zoom, .step = 0.1, .cfmt = "%.2f" })) {
+                state.action = .{ .SetCameraZoom = state.render_opt.zoom };
+            }
+
+            _ = zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.bg_zoom, .step = 0.1, .cfmt = "%.2f" });
             _ = zgui.text("TODO: Enable/Disable Ring, Circle, Border, etc.", .{});
         }
 

@@ -13,7 +13,7 @@ uniform sampler2D u_uv_tex;
 uniform mat3 u_colour_space;
 uniform float u_darkness = 0.0;
 uniform float u_radius;
-uniform float u_zoom = 1.25;
+uniform float u_zoom;
 
 uniform vec3 u_tint = vec3(0.19, 0.35, 0.56); // FIXME: hardcoded vulcanus
 

@@ -500,15 +500,6 @@ pub const Camera = struct {
     pub fn getViewClipTransform(self: @This()) Mat2 {
         return self.view_to_clip;
     }
-
-    pub fn adjustZoom(self: *@This(), delta: f32) void {
-        self.setZoom(self.zoom + delta);
-    }
-
-    fn setZoom(self: *@This(), new_zoom: f32) void {
-        std.log.info("zoom: {d:.2}", .{new_zoom});
-        self.zoom = @max(1.0, @min(10.0, new_zoom));
-    }
 };
 
 pub fn uploadPlane(comptime ch: DoubleBuffer.Channel, res: *const GpuResourceManager, buffer: DoubleBuffer.Buffer, frame: *c.AVFrame) void {

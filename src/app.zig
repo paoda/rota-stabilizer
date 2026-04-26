@@ -41,6 +41,7 @@ pub const Request = union(State) {
 };
 
 pub const Action = union(enum) {
+    SetCameraZoom: f32,
     SetVolume: f32,
     Seek: f32,
 };
@@ -603,7 +604,7 @@ pub const App = struct {
                     }
                 }
             },
-            .playback => |playback| {
+            .playback => |*playback| {
                 const audio = &(playback.decoder.audio_clock orelse @panic("invariant broken"));
                 state.volume.value = audio.volume;
 
@@ -616,6 +617,7 @@ pub const App = struct {
                     defer state.action = null;
 
                     switch (action) {
+                        .SetCameraZoom => |zoom| playback.camera.zoom = zoom,
                         .SetVolume => |volume| try audio.setVolume(volume),
                         .Seek => |timestamp| log.warn("TODO: Seek to {d:.3}s", .{timestamp}),
                     }
