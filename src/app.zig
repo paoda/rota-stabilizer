@@ -606,12 +606,11 @@ pub const App = struct {
             },
             .playback => |*playback| {
                 const audio = &(playback.decoder.audio_clock orelse @panic("invariant broken"));
-                state.volume.value = audio.volume;
 
-                state.progress = .{
-                    .timestamp = @floatCast(playback.double_buffer.back().displayTime()),
-                    .end_timestamp = @floatCast(self.session.playback.decoder.duration()),
-                };
+                state.volume.value = audio.volume;
+                state.render_opt.zoom = playback.camera.zoom;
+                state.progress.timestamp = @floatCast(playback.double_buffer.back().displayTime());
+                state.progress.duration = @floatCast(self.session.playback.decoder.duration());
 
                 if (state.action) |action| {
                     defer state.action = null;

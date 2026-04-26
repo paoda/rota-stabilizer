@@ -252,9 +252,9 @@ pub const gui = struct {
         render_opt: RenderOptions = .{},
 
         const VideoProgress = struct {
-            pub const default: @This() = .{ .end_timestamp = null, .timestamp = 0.0 };
+            pub const default: @This() = .{ .duration = null, .timestamp = 0.0 };
 
-            end_timestamp: ?f32,
+            duration: ?f32,
             timestamp: f32,
         };
 
@@ -541,7 +541,7 @@ pub const gui = struct {
             zgui.pushItemWidth(-1.0);
             defer zgui.popItemWidth();
 
-            const duration = state.progress.end_timestamp orelse 0.0;
+            const duration = state.progress.duration orelse 0.0;
 
             // FIXME: until seeking impl, always disabled
             if (duration == 0.0 or true) zgui.beginDisabled(.{});
