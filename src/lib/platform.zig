@@ -405,21 +405,13 @@ pub const gui = struct {
             _ = zgui.checkbox("Ring", .{ .v = &state.render_opt.show_ring });
 
             zgui.sameLine(.{});
-
             _ = zgui.checkbox("Circle", .{ .v = &state.render_opt.show_circle });
 
             zgui.sameLine(.{});
-
             _ = zgui.checkbox("Background", .{ .v = &state.render_opt.show_background });
 
             zgui.sameLine(.{});
-
-            {
-                zgui.beginDisabled(.{});
-                defer zgui.endDisabled();
-
-                _ = zgui.checkbox("Border", .{ .v = &state.render_opt.show_border });
-            }
+            _ = zgui.checkbox("Border", .{ .v = &state.render_opt.show_border });
 
             _ = zgui.sliderFloat("Border Radius", .{ .v = &state.render_opt.border_radius, .min = 0.0, .max = 200.0, .cfmt = "%.1f" });
 
@@ -433,7 +425,6 @@ pub const gui = struct {
             }
 
             zgui.sameLine(.{});
-
             zgui.textDisabled("(?)", .{});
             if (zgui.isItemHovered(.{}) and zgui.beginTooltip()) {
                 defer zgui.endTooltip();

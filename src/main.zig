@@ -164,15 +164,15 @@ pub fn render(
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
-        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
+        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_blur"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 1);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 2);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 3);
+
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), manager.meta.circle_radius * camera.scale * camera.zoom);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), opt.background_zoom);
-
-        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else { // draw transparency in place of background
@@ -244,14 +244,15 @@ pub fn render(
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_world_transform"), 1, gl.FALSE, &.{u_world_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_view_transform"), 1, gl.FALSE, &.{u_view_transform.m});
         gl.UniformMatrix2fv(gl.GetUniformLocation(prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
+        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 1);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_angle"), 2);
 
-        gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_border_radius"), opt.border_radius);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_show_border"), @intFromBool(opt.show_border));
         gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution.width, camera.video_resolution.height);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
