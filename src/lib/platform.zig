@@ -437,6 +437,8 @@ pub const gui = struct {
         {
             const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
             zgui.text("Local IP: {}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
+            zgui.text("Tip: CTRL+Click to manually input a value!", .{});
+            zgui.text("Tip: For Youtube, I reccomend 3840x2160 @ 60_000kbps", .{});
         }
 
         zgui.spacing();
