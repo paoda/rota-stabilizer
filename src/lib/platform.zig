@@ -369,12 +369,10 @@ pub const gui = struct {
             zgui.spacing();
 
             zgui.textDisabled("Output Settings", .{});
-            _ = zgui.dragInt2("Resolution", .{ .v = &state.resolution });
-            _ = zgui.sliderInt("Bitrate (kbps)", .{
-                .v = &state.bit_rate,
-                .max = 100_000,
-                .min = 1000,
-            });
+            _ = zgui.inputInt2("Resolution", .{ .v = &state.resolution });
+            if (zgui.inputInt("Bitrate (kbps)", .{ .v = &state.bit_rate })) {
+                state.bit_rate = @min(100_000, @max(1000, state.bit_rate));
+            }
         }
 
         zgui.spacing();
