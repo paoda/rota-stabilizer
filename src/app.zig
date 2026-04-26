@@ -20,6 +20,8 @@ const VideoContext = @import("lib/platform.zig").gui.VideoContext;
 const Encoder = @import("lib/codec.zig").Encoder;
 const Decoder = @import("lib/codec.zig").Decoder;
 
+const RenderOptions = @import("main.zig").RenderOptions;
+
 const signal = @import("lib/platform.zig").signal;
 
 const preload = @import("main.zig").preload;
@@ -155,6 +157,7 @@ const PlaybackSession = struct {
             angle_calc,
             manager,
             camera,
+            state.render_opt,
         );
         try ui.swap();
 
@@ -204,7 +207,7 @@ const PlaybackSession = struct {
         allocator.destroy(self.decoder);
     }
 
-    pub fn run(self: *PlaybackSession) !void {
+    pub fn run(self: *PlaybackSession, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.run" });
         defer zone.end();
 
@@ -303,6 +306,7 @@ const PlaybackSession = struct {
                 self.angle_calc,
                 self.manager,
                 self.camera,
+                opt,
             );
         }
     }
@@ -406,7 +410,7 @@ const EncodeSession = struct {
         var fbs: FbStack = .default;
 
         _ = try preload(manager, decoder, double_buffer);
-        try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera);
+        try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render_opt);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
         const frame_estimate: usize = blk: {
@@ -456,7 +460,7 @@ const EncodeSession = struct {
         allocator.destroy(self.decoder);
     }
 
-    pub fn run(self: *EncodeSession) !void {
+    pub fn run(self: *EncodeSession, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.run" });
         defer zone.end();
 
@@ -498,7 +502,7 @@ const EncodeSession = struct {
                 uploadPlane(.y, self.manager, back, frame);
                 uploadPlane(.uv, self.manager, back, frame);
 
-                try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera);
+                try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera, opt);
                 try writeToNv12Tex(self.manager, &self.encode_view, self.fbs, self.camera);
 
                 const width, const height = self.encode_view.get();
@@ -649,13 +653,13 @@ pub const App = struct {
         state.request = null;
     }
 
-    pub fn run(self: *App) !void {
+    pub fn run(self: *App, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.run" });
         defer zone.end();
 
         switch (self.session) {
             .idle => {},
-            inline .playback, .encode => |*s| try s.run(),
+            inline .playback, .encode => |*s| try s.run(opt),
         }
     }
 

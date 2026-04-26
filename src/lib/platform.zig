@@ -220,6 +220,7 @@ pub const signal = struct {
 };
 
 const startup = @import("../main.zig").startup;
+const RenderOptions = @import("../main.zig").RenderOptions;
 
 pub const gui = struct {
     pub const VideoContext = struct { tex_id: c_uint, render_view: Viewport };
@@ -247,6 +248,8 @@ pub const gui = struct {
         action: ?Action = null,
 
         volume: VolumeState = .default,
+
+        render_opt: RenderOptions = .{},
 
         const VideoProgress = struct {
             pub const default: @This() = .{ .end_timestamp = null, .timestamp = 0.0 };
@@ -398,6 +401,11 @@ pub const gui = struct {
         zgui.textDisabled("Configuration", .{});
 
         {
+            _ = zgui.checkbox("Show Ring", .{ .v = &state.render_opt.show_ring });
+            _ = zgui.checkbox("Show Circle", .{ .v = &state.render_opt.show_circle });
+            _ = zgui.inputFloat("FG Zoom", .{ .v = &state.render_opt.zoom, .step = 1.0 });
+            _ = zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.bg_zoom, .step = 1.0 });
+
             _ = zgui.text("TODO: Enable/Disable Ring, Circle, Border, etc.", .{});
         }
 
