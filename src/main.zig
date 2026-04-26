@@ -110,11 +110,12 @@ pub fn main() !void {
 pub const RenderOptions = struct {
     show_ring: bool = true,
     show_circle: bool = true,
-    zoom: f32 = 1.0,
-    bg_zoom: f32 = 1.0,
-
-    border_radius: f32 = 100.0,
+    show_background: bool = true,
     show_border: bool = true,
+
+    zoom: f32 = 1.0,
+    background_zoom: f32 = 1.0,
+    border_radius: f32 = 100.0,
 };
 
 pub fn render(
@@ -134,7 +135,7 @@ pub fn render(
 
     try angle_calc.execute(view, fbs, front);
 
-    {
+    if (opt.show_background) {
         const z = tracy.Zone.begin(.{ .src = @src(), .name = "background pass" });
         defer z.end();
 
@@ -169,11 +170,14 @@ pub fn render(
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_y_tex"), 2);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_uv_tex"), 3);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), manager.meta.circle_radius * camera.scale * camera.zoom);
-        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), opt.bg_zoom);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), opt.background_zoom);
 
         gl.UniformMatrix3fv(gl.GetUniformLocation(prog, "u_colour_space"), 1, gl.FALSE, camera.colourSpaceMatrix());
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    } else { // draw transparency in place of background
+        gl.ClearColor(0.0, 0.0, 0.0, 0.0);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
     }
 
     {

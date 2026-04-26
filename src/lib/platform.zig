@@ -402,11 +402,15 @@ pub const gui = struct {
         zgui.textDisabled("Configuration", .{});
 
         {
-            _ = zgui.checkbox("Show Ring", .{ .v = &state.render_opt.show_ring });
+            _ = zgui.checkbox("Ring", .{ .v = &state.render_opt.show_ring });
 
             zgui.sameLine(.{});
 
-            _ = zgui.checkbox("Show Circle", .{ .v = &state.render_opt.show_circle });
+            _ = zgui.checkbox("Circle", .{ .v = &state.render_opt.show_circle });
+
+            zgui.sameLine(.{});
+
+            _ = zgui.checkbox("Background", .{ .v = &state.render_opt.show_background });
 
             zgui.sameLine(.{});
 
@@ -414,7 +418,7 @@ pub const gui = struct {
                 zgui.beginDisabled(.{});
                 defer zgui.endDisabled();
 
-                _ = zgui.checkbox("Show Border", .{ .v = &state.render_opt.show_border });
+                _ = zgui.checkbox("Border", .{ .v = &state.render_opt.show_border });
             }
 
             _ = zgui.sliderFloat("Border Radius", .{ .v = &state.render_opt.border_radius, .min = 0.0, .max = 200.0, .cfmt = "%.1f" });
@@ -424,8 +428,8 @@ pub const gui = struct {
                 state.action = .{ .SetCameraZoom = state.render_opt.zoom };
             }
 
-            if (zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.bg_zoom, .step = 0.05, .cfmt = "%.2f" })) {
-                state.render_opt.bg_zoom = @max(1.0, state.render_opt.bg_zoom);
+            if (zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.background_zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                state.render_opt.background_zoom = @max(1.0, state.render_opt.background_zoom);
             }
 
             zgui.sameLine(.{});
