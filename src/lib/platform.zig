@@ -427,6 +427,15 @@ pub const gui = struct {
             if (zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.bg_zoom, .step = 0.05, .cfmt = "%.2f" })) {
                 state.render_opt.bg_zoom = @max(1.0, state.render_opt.bg_zoom);
             }
+
+            zgui.sameLine(.{});
+
+            zgui.textDisabled("(?)", .{});
+            if (zgui.isItemHovered(.{}) and zgui.beginTooltip()) {
+                defer zgui.endTooltip();
+
+                zgui.text("Note: Zoom of the background texture that lives within the ring", .{});
+            }
         }
 
         zgui.spacing();
