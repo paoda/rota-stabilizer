@@ -11,11 +11,11 @@ uniform sampler2D u_y_tex;
 uniform sampler2D u_uv_tex;
 
 uniform mat3 u_colour_space;
-uniform float u_darkness = 0.0;
+uniform float u_intensity;
 uniform float u_radius;
 uniform float u_zoom;
 
-uniform vec3 u_tint = vec3(0.19, 0.35, 0.56); // FIXME: hardcoded vulcanus
+uniform vec3 u_tint;
 
 const float Y_OFFSET = 16.0 / 255.0;
 const float Y_SCALE = 255.0 / (235.0 - 16.0);
@@ -41,7 +41,7 @@ void main() {
     float d = length(view_pos);
     float mask = smoothstep(u_radius - fwidth(d), u_radius, d);
 
-    vec3 outer = texture(u_blur, uv).rgb; // * u_tint;
+    vec3 outer = mix(texture(u_blur, uv).rgb, u_tint, u_intensity);
     // vec3 inner = sampleTex(zoom_uv); // zoom_uv is only for inside u_radius
     vec3 inner = texture(u_blur, zoom_uv).rgb; // zoom_uv is only for inside u_radius
 

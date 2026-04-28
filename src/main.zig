@@ -114,6 +114,9 @@ pub const RenderOptions = struct {
     ring_opacity: f32 = 0.3,
     circle_opacity: f32 = 0.1,
 
+    tint: [3]f32 = [_]f32{0.0} ** 3,
+    tint_intensity: f32 = 0.0,
+
     zoom: f32 = 1.0,
     background_zoom: f32 = 1.0,
     border_radius: f32 = 100.0,
@@ -174,6 +177,8 @@ pub fn render(
 
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_radius"), manager.meta.circle_radius * camera.scale * camera.zoom);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), opt.background_zoom);
+        gl.Uniform3fv(gl.GetUniformLocation(prog, "u_tint"), 1, &.{opt.tint});
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_intensity"), opt.tint_intensity);
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else { // draw transparency in place of background

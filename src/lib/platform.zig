@@ -435,6 +435,11 @@ pub const gui = struct {
             _ = zgui.sliderFloat("Border Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
             _ = zgui.sliderFloat("Ring Opacity", .{ .v = &state.render.ring_opacity, .min = 0.0, .max = 1.0 });
             _ = zgui.sliderFloat("Circle Opacity", .{ .v = &state.render.circle_opacity, .min = 0.0, .max = 1.0 });
+
+            _ = zgui.sliderFloat("##TintIntensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
+
+            zgui.sameLine(.{});
+            _ = zgui.colorEdit3("Tint", .{ .col = &state.render.tint, .flags = .{ .no_inputs = true } });
         }
 
         zgui.spacing();
