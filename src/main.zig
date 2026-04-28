@@ -30,8 +30,6 @@ const vec2 = @import("lib/math.zig").vec2;
 
 const sleep = @import("lib.zig").sleep;
 
-const RGB24_BPP = @import("lib.zig").RGB24_BPP;
-
 const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 

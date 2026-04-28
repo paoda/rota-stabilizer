@@ -20,7 +20,7 @@ pub const enc = struct {
 
         pub fn findSoftware(codec_id: c.AVCodecID) AvCodec {
             const codec = c.avcodec_find_encoder(codec_id);
-            const ideal_fmt = c.AV_PIX_FMT_RGB24;
+            const ideal_fmt = c.AV_PIX_FMT_RGBA;
 
             const pix_fmts: [*]const c.AVPixelFormat = @as(?[*]const c.AVPixelFormat, codec.*.pix_fmts) orelse @panic("FIXME: no supported sw encode pix fmt?");
 
