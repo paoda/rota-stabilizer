@@ -85,7 +85,11 @@ pub const Ui = struct {
         zgui.backend.init(window, gl_ctx);
         zgui.io.setIniFilename(null);
         zgui.io.setConfigFlags(.{ .dock_enable = true });
-        _ = zgui.io.addFontFromMemory(default_font, 16.0);
+
+        var config = zgui.FontConfig.init();
+
+        config.name[0..12].* = "Inter Medium".*;
+        _ = zgui.io.addFontFromMemoryWithConfig(default_font, 16, config, null);
 
         log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
         log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
@@ -360,96 +364,196 @@ pub const gui = struct {
 
         if (!showing) return;
 
-        zgui.textDisabled("Hardware Acceleration", .{});
-
-        {
-            _ = zgui.comboFromEnum("Decoder", &state.hw_dec);
-            _ = zgui.comboFromEnum("Encoder", &state.hw_enc);
-
-            zgui.spacing();
-
-            zgui.textDisabled("Output Settings", .{});
-            _ = zgui.inputInt2("Resolution", .{ .v = &state.resolution });
-            if (zgui.inputInt("Bitrate (kbps)", .{ .v = &state.bit_rate })) {
-                state.bit_rate = @min(100_000, @max(1000, state.bit_rate));
-            }
-        }
+        try drawMediaSettings(state);
 
         zgui.spacing();
-        zgui.textDisabled("Media Files", .{});
 
-        {
-            const filter = "mp4,mkv,mov,webm";
-
-            if (zgui.button("Browse...##input", .{})) {
-                const maybe_path = try nfd.openFileDialog(filter, null);
-                if (maybe_path) |path| setPath(&state.input_path, path);
-            }
-
-            zgui.sameLine(.{});
-            _ = zgui.inputText("Input", .{ .buf = &state.input_path });
-
-            if (zgui.button("Browse...##output", .{})) {
-                const maybe_path = try nfd.saveFileDialog(filter, null);
-                if (maybe_path) |path| setPath(&state.output_path, path);
-            }
-
-            zgui.sameLine(.{});
-            _ = zgui.inputTextWithHint("Output", .{ .hint = "output.mp4", .buf = &state.output_path });
-        }
+        drawActionButtons(state);
 
         zgui.spacing();
-        zgui.textDisabled("Configuration", .{});
+        zgui.separator();
+        zgui.spacing();
+
+        if (zgui.beginTabBar("ConfigTabs", .{})) {
+            defer zgui.endTabBar();
+
+            if (zgui.beginTabItem("Render", .{})) {
+                defer zgui.endTabItem();
+
+                zgui.spacing();
+                drawRenderSettings(state);
+            }
+
+            if (zgui.beginTabItem("Hardware & Output", .{})) {
+                defer zgui.endTabItem();
+
+                zgui.spacing();
+                drawHardwareSettings(state);
+            }
+
+            if (zgui.beginTabItem("Info", .{})) {
+                defer zgui.endTabItem();
+
+                zgui.spacing();
+                drawInfoPanel(state);
+            }
+        }
+    }
+
+    fn drawMediaSettings(state: *State) !void {
+        const filter = "mp4,mkv,mov,webm";
+
+        zgui.pushItemWidth(-zgui.calcTextSize("Browse...", .{})[0] - 20.0);
+        defer zgui.popItemWidth();
+
+        _ = zgui.inputTextWithHint("##Input", .{ .hint = "Input Video Path...", .buf = &state.input_path });
+
+        zgui.sameLine(.{});
+        if (zgui.button("Browse...##input", .{})) {
+            if (try nfd.openFileDialog(filter, null)) |path| setPath(&state.input_path, path);
+        }
+
+        _ = zgui.inputTextWithHint("##Output", .{ .hint = "Output Video Path (Optional)...", .buf = &state.output_path });
+
+        zgui.sameLine(.{});
+        if (zgui.button("Browse...##output", .{})) {
+            if (try nfd.saveFileDialog(filter, null)) |path| setPath(&state.output_path, path);
+        }
+    }
+
+    fn drawActionButtons(state: *State) void {
+        const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
+        const is_possible = input_path.len != 0;
+
+        if (!is_possible) zgui.beginDisabled(.{});
+        defer if (!is_possible) zgui.endDisabled();
+
+        // center the cursor
+        const w = 80;
+        const spacing = zgui.getStyle().item_spacing[0];
+        const width = (w * 3.0) + (spacing * 2.0);
+
+        const avail_width = zgui.getContentRegionAvail()[0];
+        zgui.setCursorPosX((avail_width - width) / 2.0);
+
+        if (zgui.button("\u{25ba} Play", .{ .w = 80, .h = 30 })) {
+            state.request = .{ .playback = input_path };
+        }
+
+        zgui.sameLine(.{});
+
+        if (zgui.button("\u{25cf} Encode", .{ .w = 80, .h = 30 })) {
+            const path = blk: {
+                const str = std.mem.sliceTo(state.output_path[0..], 0);
+                if (str.len == 0) setPath(&state.output_path, "output.mp4");
+
+                break :blk std.mem.sliceTo(state.output_path[0..], 0);
+            };
+
+            state.request = .{ .encode = .{ .src_path = input_path, .dst_path = path } };
+            state.encode_progress = 0.0; // FIXME: don't set this here
+        }
+
+        zgui.sameLine(.{});
+
+        if (zgui.button("\u{25a0} Stop", .{ .w = 80, .h = 30 })) {
+            state.request = .idle;
+            state.encode_progress = 0.0; // FIXME: don't set this here
+        }
+    }
+
+    fn drawHardwareSettings(state: *State) void {
+        if (zgui.beginTable("HardwareForm", .{ .column = 2 })) {
+            defer zgui.endTable();
+
+            zgui.tableSetupColumn("Label", .{ .flags = .{ .width_fixed = true } });
+            zgui.tableSetupColumn("Input", .{ .flags = .{ .width_stretch = true } });
+
+            _ = zgui.tableNextColumn();
+            zgui.alignTextToFramePadding();
+            zgui.text("Decoder", .{});
+
+            _ = zgui.tableNextColumn();
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                _ = zgui.comboFromEnum("##Decoder", &state.hw_dec);
+            }
+
+            _ = zgui.tableNextColumn();
+            zgui.alignTextToFramePadding();
+            zgui.text("Encoder", .{});
+
+            _ = zgui.tableNextColumn();
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                _ = zgui.comboFromEnum("##Encoder", &state.hw_enc);
+            }
+
+            _ = zgui.tableNextColumn();
+            zgui.alignTextToFramePadding();
+            zgui.text("Resolution", .{});
+
+            _ = zgui.tableNextColumn();
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                _ = zgui.inputInt2("##Resolution", .{ .v = &state.resolution });
+            }
+
+            _ = zgui.tableNextColumn();
+            zgui.alignTextToFramePadding();
+            zgui.text("Bitrate (kbps)", .{});
+
+            _ = zgui.tableNextColumn();
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                if (zgui.inputInt("##Bitrate", .{ .v = &state.bit_rate })) {
+                    state.bit_rate = @min(100_000, @max(1000, state.bit_rate));
+                }
+            }
+        }
+    }
+
+    fn drawRenderSettings(state: *State) void {
+        // Push a negative width so all sliders and inputs stretch consistently,
+        // leaving a uniform margin on the right side.
+        zgui.pushItemWidth(-100.0);
+        defer zgui.popItemWidth();
 
         {
-            _ = zgui.checkbox("Ring", .{ .v = &state.render.show_ring });
+            zgui.textDisabled("Background", .{});
+            _ = zgui.checkbox("##BackgroundEnabled", .{ .v = &state.render.show_background });
+
+            if (!state.render.show_background) zgui.beginDisabled(.{});
+            defer if (!state.render.show_background) zgui.endDisabled();
 
             zgui.sameLine(.{});
-            _ = zgui.checkbox("Circle", .{ .v = &state.render.show_circle });
+            zgui.text("Zoom", .{});
 
-            zgui.sameLine(.{});
-            _ = zgui.checkbox("Background", .{ .v = &state.render.show_background });
-
-            zgui.sameLine(.{});
-            _ = zgui.checkbox("Border", .{ .v = &state.render.show_border });
-
-            _ = zgui.sliderFloat("Border Radius", .{ .v = &state.render.border_radius, .min = 0.0, .max = 200.0, .cfmt = "%.1f" });
-
-            if (zgui.inputFloat("Zoom", .{ .v = &state.render.zoom, .step = 0.05, .cfmt = "%.2f" })) {
-                state.render.zoom = @max(1.0, state.render.zoom);
-                state.action = .{ .SetCameraZoom = state.render.zoom };
-            }
-
-            if (zgui.inputFloat("BG Zoom", .{ .v = &state.render.background_zoom, .step = 0.05, .cfmt = "%.2f" })) {
-                state.render.background_zoom = @max(1.0, state.render.background_zoom);
-            }
-
-            zgui.sameLine(.{});
+            zgui.sameLine(.{ .spacing = 2 });
             zgui.textDisabled("(?)", .{});
             if (zgui.isItemHovered(.{}) and zgui.beginTooltip()) {
                 defer zgui.endTooltip();
-
-                zgui.text("Note: Zoom of the background texture that lives within the ring", .{});
+                zgui.text("Zoom of the background texture that lives within the ring", .{});
             }
 
-            _ = zgui.sliderFloat("Border Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
-            _ = zgui.sliderFloat("Ring Opacity", .{ .v = &state.render.ring_opacity, .min = 0.0, .max = 1.0 });
-            _ = zgui.sliderFloat("Circle Opacity", .{ .v = &state.render.circle_opacity, .min = 0.0, .max = 1.0 });
-
-            _ = zgui.sliderFloat("##TintIntensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
-
             zgui.sameLine(.{});
-            _ = zgui.colorEdit3("Tint", .{ .col = &state.render.tint, .flags = .{ .no_inputs = true } });
-        }
 
-        zgui.spacing();
-        zgui.textDisabled("Information", .{});
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
 
-        {
-            const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
-            zgui.text("Local IP: {}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
-            zgui.text("Tip: CTRL+Click to manually input a value!", .{});
-            zgui.text("Tip: For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
+                if (zgui.inputFloat("##BackgroundZoom", .{ .v = &state.render.background_zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                    state.render.background_zoom = @max(1.0, state.render.background_zoom);
+                }
+            }
         }
 
         zgui.spacing();
@@ -457,42 +561,143 @@ pub const gui = struct {
         zgui.spacing();
 
         {
-            const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
-            const is_possible = input_path.len != 0;
+            zgui.textDisabled("Border", .{});
 
-            {
-                if (!is_possible) zgui.beginDisabled(.{});
-                defer if (!is_possible) zgui.endDisabled();
+            if (zgui.beginTable("BorderOptions", .{ .column = 5 })) {
+                defer zgui.endTable();
 
-                if (zgui.button("Play", .{})) state.request = .{ .playback = input_path };
+                zgui.tableSetupColumn("Enabled", .{ .flags = .{ .width_fixed = true } });
+                zgui.tableSetupColumn("Opacity", .{ .flags = .{ .width_fixed = true } });
+                zgui.tableSetupColumn("Slider1", .{ .flags = .{ .width_stretch = true } });
+                zgui.tableSetupColumn("Radius", .{ .flags = .{ .width_fixed = true } });
+                zgui.tableSetupColumn("Slider2", .{ .flags = .{ .width_stretch = true } });
+
+                _ = zgui.tableNextColumn();
+                _ = zgui.checkbox("##BorderEnabled", .{ .v = &state.render.show_border });
+
+                if (!state.render.show_border) zgui.beginDisabled(.{});
+                defer if (!state.render.show_border) zgui.endDisabled();
+
+                _ = zgui.tableNextColumn();
+                zgui.text("Opacity", .{});
+
+                _ = zgui.tableNextColumn();
+                {
+                    zgui.pushItemWidth(-1.0);
+                    defer zgui.popItemWidth();
+
+                    _ = zgui.sliderFloat("##Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
+                }
+
+                _ = zgui.tableNextColumn();
+                zgui.text("Radius", .{});
+
+                _ = zgui.tableNextColumn();
+                {
+                    zgui.pushItemWidth(-1.0);
+                    defer zgui.popItemWidth();
+
+                    _ = zgui.sliderFloat("##Radius", .{ .v = &state.render.border_radius, .min = 0.0, .max = 200.0 });
+                }
             }
+        }
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
+
+        {
+            zgui.textDisabled("Ring", .{});
+            _ = zgui.checkbox("##RingEnabled", .{ .v = &state.render.show_ring });
 
             zgui.sameLine(.{});
 
+            if (!state.render.show_ring) zgui.beginDisabled(.{});
+            defer if (!state.render.show_ring) zgui.endDisabled();
+
+            zgui.text("Opacity", .{});
+
+            zgui.sameLine(.{});
             {
-                if (!is_possible) zgui.beginDisabled(.{});
-                defer if (!is_possible) zgui.endDisabled();
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
 
-                if (zgui.button("Start Encode", .{})) {
-                    const output_path = blk: {
-                        const str = std.mem.sliceTo(state.output_path[0..], 0);
-                        if (str.len == 0) setPath(&state.output_path, "output.mp4");
+                _ = zgui.sliderFloat("##RingOpacity", .{ .v = &state.render.ring_opacity, .min = 0.0, .max = 1.0 });
+            }
+        }
 
-                        break :blk std.mem.sliceTo(state.output_path[0..], 0);
-                    };
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
 
-                    state.request = .{ .encode = .{ .src_path = input_path, .dst_path = output_path } };
-                    state.encode_progress = 0.0;
+        {
+            zgui.textDisabled("Circle", .{});
+            _ = zgui.checkbox("##CircleEnabled", .{ .v = &state.render.show_circle });
+
+            zgui.sameLine(.{});
+
+            if (!state.render.show_circle) zgui.beginDisabled(.{});
+            defer if (!state.render.show_circle) zgui.endDisabled();
+
+            zgui.text("Opacity", .{});
+
+            zgui.sameLine(.{});
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                _ = zgui.sliderFloat("##CircleOpacity", .{ .v = &state.render.circle_opacity, .min = 0.0, .max = 1.0 });
+            }
+        }
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
+
+        {
+            zgui.textDisabled("Global View", .{});
+
+            zgui.alignTextToFramePadding();
+            zgui.text("Zoom", .{});
+
+            zgui.sameLine(.{});
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                if (zgui.inputFloat("##Zoom", .{ .v = &state.render.zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                    state.render.zoom = @max(1.0, state.render.zoom);
+                    state.action = .{ .SetCameraZoom = state.render.zoom };
                 }
             }
 
-            zgui.sameLine(.{});
+            zgui.spacing();
 
-            if (zgui.button("Stop", .{})) {
-                state.request = .idle;
-                state.encode_progress = 0.0;
+            zgui.alignTextToFramePadding();
+            zgui.text("Tint", .{});
+
+            zgui.sameLine(.{});
+            _ = zgui.colorEdit3("##Tint", .{ .col = &state.render.tint, .flags = .{ .no_inputs = true } });
+
+            zgui.sameLine(.{});
+            zgui.text("Intensity", .{});
+
+            zgui.sameLine(.{});
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                _ = zgui.sliderFloat("##Intensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
             }
         }
+    }
+
+    fn drawInfoPanel(state: *State) void {
+        const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
+        zgui.text("Local IP: {d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] });
+
+        zgui.bulletText("CTRL+Click to manually input a value!", .{});
+        zgui.bulletText("For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
     }
 
     fn drawVideoWindow(maybe_video: ?VideoContext) void {
