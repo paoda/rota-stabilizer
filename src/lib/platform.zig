@@ -249,7 +249,7 @@ pub const gui = struct {
 
         volume: VolumeState = .default,
 
-        render_opt: RenderOptions = .{},
+        render: RenderOptions = .{},
 
         const VideoProgress = struct {
             pub const default: @This() = .{ .duration = null, .timestamp = 0.0 };
@@ -402,26 +402,26 @@ pub const gui = struct {
         zgui.textDisabled("Configuration", .{});
 
         {
-            _ = zgui.checkbox("Ring", .{ .v = &state.render_opt.show_ring });
+            _ = zgui.checkbox("Ring", .{ .v = &state.render.show_ring });
 
             zgui.sameLine(.{});
-            _ = zgui.checkbox("Circle", .{ .v = &state.render_opt.show_circle });
+            _ = zgui.checkbox("Circle", .{ .v = &state.render.show_circle });
 
             zgui.sameLine(.{});
-            _ = zgui.checkbox("Background", .{ .v = &state.render_opt.show_background });
+            _ = zgui.checkbox("Background", .{ .v = &state.render.show_background });
 
             zgui.sameLine(.{});
-            _ = zgui.checkbox("Border", .{ .v = &state.render_opt.show_border });
+            _ = zgui.checkbox("Border", .{ .v = &state.render.show_border });
 
-            _ = zgui.sliderFloat("Border Radius", .{ .v = &state.render_opt.border_radius, .min = 0.0, .max = 200.0, .cfmt = "%.1f" });
+            _ = zgui.sliderFloat("Border Radius", .{ .v = &state.render.border_radius, .min = 0.0, .max = 200.0, .cfmt = "%.1f" });
 
-            if (zgui.inputFloat("Zoom", .{ .v = &state.render_opt.zoom, .step = 0.05, .cfmt = "%.2f" })) {
-                state.render_opt.zoom = @max(1.0, state.render_opt.zoom);
-                state.action = .{ .SetCameraZoom = state.render_opt.zoom };
+            if (zgui.inputFloat("Zoom", .{ .v = &state.render.zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                state.render.zoom = @max(1.0, state.render.zoom);
+                state.action = .{ .SetCameraZoom = state.render.zoom };
             }
 
-            if (zgui.inputFloat("BG Zoom", .{ .v = &state.render_opt.background_zoom, .step = 0.05, .cfmt = "%.2f" })) {
-                state.render_opt.background_zoom = @max(1.0, state.render_opt.background_zoom);
+            if (zgui.inputFloat("BG Zoom", .{ .v = &state.render.background_zoom, .step = 0.05, .cfmt = "%.2f" })) {
+                state.render.background_zoom = @max(1.0, state.render.background_zoom);
             }
 
             zgui.sameLine(.{});
@@ -431,6 +431,10 @@ pub const gui = struct {
 
                 zgui.text("Note: Zoom of the background texture that lives within the ring", .{});
             }
+
+            _ = zgui.sliderFloat("Border Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
+            _ = zgui.sliderFloat("Ring Opacity", .{ .v = &state.render.ring_opacity, .min = 0.0, .max = 1.0 });
+            _ = zgui.sliderFloat("Circle Opacity", .{ .v = &state.render.circle_opacity, .min = 0.0, .max = 1.0 });
         }
 
         zgui.spacing();

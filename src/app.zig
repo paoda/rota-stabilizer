@@ -158,7 +158,7 @@ const PlaybackSession = struct {
             angle_calc,
             manager,
             camera,
-            state.render_opt,
+            state.render,
         );
         try ui.swap();
 
@@ -411,7 +411,7 @@ const EncodeSession = struct {
         var fbs: FbStack = .default;
 
         _ = try preload(manager, decoder, double_buffer);
-        try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render_opt);
+        try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
         const frame_estimate: usize = blk: {
@@ -608,7 +608,7 @@ pub const App = struct {
                 const audio = &(playback.decoder.audio_clock orelse @panic("invariant broken"));
 
                 state.volume.value = audio.volume;
-                state.render_opt.zoom = playback.camera.zoom;
+                state.render.zoom = playback.camera.zoom;
                 state.progress.timestamp = @floatCast(playback.double_buffer.back().displayTime());
                 state.progress.duration = @floatCast(self.session.playback.decoder.duration());
 

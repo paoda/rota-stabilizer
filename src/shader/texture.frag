@@ -8,6 +8,7 @@ uniform sampler2D u_uv_tex;
 
 uniform float u_ratio;
 uniform float u_border_radius;
+uniform float u_opacity;
 uniform mat3 u_colour_space;
 uniform ivec2 u_resolution;
 
@@ -63,7 +64,7 @@ void main() {
 
         // transition to border smoothly
         float border_mix = smoothstep(-border_thickness - softness, -border_thickness + softness, dist);
-        vec4 border_colour = vec4(vec3(1.0), 0.5);
+        vec4 border_colour = vec4(vec3(1.0), u_opacity);
 
         // Blend the video and border based on distance
         final_colour = mix(vec4(sampleTex(uv), 1.0), border_colour, border_mix);

@@ -4,6 +4,7 @@ in vec2 uv;
 out vec4 frag_colour;
 
 uniform float u_radius;
+uniform float u_opacity;
 
 void main() {
     vec2 pos = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -12,5 +13,5 @@ void main() {
     float mask = 1.0 - smoothstep(u_radius - fwidth(d), u_radius, d);
     if (mask <= 0.0) discard;
 
-    frag_colour = vec4(0.0, 0.0, 0.0, 0.1 * mask);
+    frag_colour = vec4(0.0, 0.0, 0.0, u_opacity * mask);
 }

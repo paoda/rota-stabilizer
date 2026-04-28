@@ -96,7 +96,7 @@ pub fn main() !void {
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
         try app.poll(allocator, ui, state);
-        try app.run(state.render_opt);
+        try app.run(state.render);
 
         try platform.gui.draw(state, ui_view, app.video());
 
@@ -109,6 +109,10 @@ pub const RenderOptions = struct {
     show_circle: bool = true,
     show_background: bool = true,
     show_border: bool = true,
+
+    border_opacity: f32 = 0.5,
+    ring_opacity: f32 = 0.3,
+    circle_opacity: f32 = 0.1,
 
     zoom: f32 = 1.0,
     background_zoom: f32 = 1.0,
@@ -197,6 +201,7 @@ pub fn render(
         gl.UniformMatrix2fv(gl.GetUniformLocation(circle_prog, "u_clip_transform"), 1, gl.FALSE, &.{u_clip_transform.m});
 
         gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_radius"), manager.meta.circle_radius);
+        gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_opacity"), opt.circle_opacity);
         if (opt.show_circle) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Draw Ring (matches ring in gameplay)
@@ -209,6 +214,7 @@ pub fn render(
 
         gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_radius"), manager.meta.ring_radius);
         gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_thickness"), manager.meta.ring_thickness);
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_opacity"), opt.ring_opacity);
         if (opt.show_ring) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
@@ -249,6 +255,7 @@ pub fn render(
 
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_border_radius"), opt.border_radius);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_opacity"), opt.border_opacity);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_show_border"), @intFromBool(opt.show_border));
         gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution.width, camera.video_resolution.height);
 
