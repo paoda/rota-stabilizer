@@ -364,11 +364,11 @@ pub const gui = struct {
 
         if (!showing) return;
 
-        try drawMediaSettings(state);
+        drawActionButtons(state);
 
         zgui.spacing();
 
-        drawActionButtons(state);
+        try drawMediaSettings(state);
 
         zgui.spacing();
         zgui.separator();
