@@ -749,24 +749,36 @@ pub const gui = struct {
 
         if (!showing) return;
 
-        const is_muted = state.volume.value < std.math.floatEps(f32);
-        if (zgui.button(if (is_muted) "Unmute" else "Mute", .{})) {
-            state.action = .{ .SetVolume = if (is_muted) state.volume.cache else 0.0 };
-        }
+        if (zgui.beginTable("VolumeControl", .{ .column = 3 })) {
+            defer zgui.endTable();
 
-        zgui.sameLine(.{});
+            zgui.tableSetupColumn("Label", .{ .flags = .{ .width_fixed = true } });
+            zgui.tableSetupColumn("Slider", .{ .flags = .{ .width_stretch = true } });
+            zgui.tableSetupColumn("Button", .{ .flags = .{ .width_fixed = true } });
 
-        {
-            zgui.pushItemWidth(-1.0);
-            defer zgui.popItemWidth();
+            _ = zgui.tableNextColumn();
+            zgui.alignTextToFramePadding();
+            zgui.text("Volume", .{});
 
-            if (zgui.sliderFloat("##Volume", .{ .min = 0.0, .max = 1.0, .v = &state.volume.value })) {
-                state.volume.cache = state.volume.value;
-                state.action = .{ .SetVolume = state.volume.value };
+            _ = zgui.tableNextColumn();
+            {
+                zgui.pushItemWidth(-1.0);
+                defer zgui.popItemWidth();
+
+                if (zgui.sliderFloat("##Volume", .{ .min = 0.0, .max = 1.0, .v = &state.volume.value })) {
+                    state.volume.cache = state.volume.value;
+                    state.action = .{ .SetVolume = state.volume.value };
+                }
+            }
+
+            _ = zgui.tableNextColumn();
+
+            const w = zgui.calcTextSize("Unmute", .{})[0] + 2 * zgui.getStyle().frame_padding[0];
+            const is_muted = state.volume.value < std.math.floatEps(f32);
+            if (zgui.button(if (is_muted) "Unmute" else "Mute", .{ .w = w })) {
+                state.action = .{ .SetVolume = if (is_muted) state.volume.cache else 0.0 };
             }
         }
-
-        zgui.spacing();
 
         if (state.encode_progress > 0.0) {
             zgui.progressBar(.{
