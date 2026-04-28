@@ -265,14 +265,14 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init() !State {
+        pub fn init(render_target: Resolution) !State {
             const hw_dec, const hw_enc = guessHardware();
 
             return .{
                 .local_addr = try getLocalIpAddress(),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
-                .resolution = .{ startup.render_target.width, startup.render_target.height },
+                .resolution = .{ render_target.width, render_target.height },
             };
         }
 

@@ -37,7 +37,6 @@ const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 
 pub const startup = struct {
     pub const ui_window: Resolution = .{ .width = 1600, .height = 900 };
-    pub const encode_target: Resolution = .{ .width = 1920, .height = 1080 };
     pub const render_target: Resolution = .{ .width = 1920, .height = 1080 };
 };
 
@@ -71,7 +70,7 @@ pub fn main() !void {
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    state.* = try .init();
+    state.* = try .init(startup.render_target);
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
