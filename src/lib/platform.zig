@@ -82,7 +82,11 @@ pub const Ui = struct {
         errdefer gl.makeProcTableCurrent(null);
 
         zgui.init(allocator);
+        errdefer zgui.deinit();
+
         zgui.backend.init(window, gl_ctx);
+        errdefer zgui.backend.deinit();
+
         zgui.io.setIniFilename(null);
         zgui.io.setConfigFlags(.{ .dock_enable = true });
 
