@@ -36,7 +36,7 @@ const UV_BPP = @import("lib.zig").UV_BPP;
 const magic_aspect_ratio = @import("lib.zig").magic_aspect_ratio;
 
 pub const startup = struct {
-    pub const ui_window: Resolution = .{ .width = 1600, .height = 900 };
+    pub const ui_window: Resolution = .{ .width = 1280, .height = 720 };
     pub const render_target: Resolution = .{ .width = 1920, .height = 1080 };
 };
 
