@@ -238,8 +238,8 @@ pub const gui = struct {
     pub const State = struct {
         const default_volume = 0.5;
 
-        input_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
-        output_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
+        input_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
+        output_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
 
         hw_dec: HwDeviceType,
         hw_enc: HwDeviceType,

@@ -661,7 +661,7 @@ pub const UploadBuffer = struct {
 
     pub const default: @This() = .{
         .id = std.meta.tags(PixelBufferPool.Index).*,
-        .pts = [_]?i64{null} ** len,
+        .pts = @splat(null),
         .idx = 0,
     };
 

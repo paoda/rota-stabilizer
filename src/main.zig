@@ -116,7 +116,7 @@ pub const RenderOptions = struct {
     ring_opacity: f32 = 0.3,
     circle_opacity: f32 = 0.1,
 
-    tint: [3]f32 = [_]f32{0.0} ** 3,
+    tint: [3]f32 = @splat(0.0),
     tint_intensity: f32 = 0.0,
 
     zoom: f32 = 1.0,
