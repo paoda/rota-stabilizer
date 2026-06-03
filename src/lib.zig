@@ -26,7 +26,7 @@ pub const c = @cImport({
 });
 
 // bytes per pixel, i know... sorry
-pub const RGBA_BPP = 4;
+pub const RGB24_BPP = 3;
 pub const Y_BPP = 1;
 pub const UV_BPP = 2;
 
@@ -171,12 +171,12 @@ pub const GpuResourceManager = struct {
         const Index = enum(usize) {
             /// 1x1 texture that stores the calculated angle of the frame
             angle,
-            // DoubleBuffer Related
+            // DoubleBuffer related
             y_front,
             y_back,
             uv_front,
             uv_back,
-            // Blur Related
+            // Blur related
             blur_front,
             blur_back,
             out,
@@ -289,7 +289,7 @@ pub const GpuResourceManager = struct {
         gl.BindTexture(gl.TEXTURE_2D, out_tex);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGB8, width, height, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
@@ -442,11 +442,11 @@ pub const GpuResourceManager = struct {
             gl.TexImage2D(
                 gl.TEXTURE_2D,
                 0,
-                gl.RGBA16F,
+                gl.RGB16F,
                 @intCast(width),
                 @intCast(height),
                 0,
-                gl.RGBA,
+                gl.RGB,
                 gl.HALF_FLOAT,
                 null,
             );
@@ -639,14 +639,14 @@ pub fn Linesize(comptime fmt: c.AVPixelFormat) type {
                 };
             }
         },
-        c.AV_PIX_FMT_RGBA => struct {
-            rgba: c_int,
+        c.AV_PIX_FMT_RGB24 => struct {
+            rgb: c_int,
 
             pub fn init(frame: AvFrame) @This() {
                 std.debug.assert(frame.ptr().format == fmt);
 
                 return .{
-                    .rgba = frame.ptr().linesize[0],
+                    .rgb = frame.ptr().linesize[0],
                 };
             }
         },
