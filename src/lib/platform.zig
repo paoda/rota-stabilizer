@@ -534,7 +534,10 @@ pub const gui = struct {
                 zgui.pushItemWidth(-1.0);
                 defer zgui.popItemWidth();
 
-                _ = zgui.inputInt2("##Resolution", .{ .v = &state.resolution });
+                if (zgui.inputInt2("##Resolution", .{ .v = &state.resolution })) {
+                    state.resolution[0] = @max(1, state.resolution[0]);
+                    state.resolution[1] = @max(1, state.resolution[1]);
+                }
             }
 
             _ = zgui.tableNextColumn();
