@@ -8,6 +8,8 @@ const KBPS_TO_BPS = 1000;
 
 const Resolution = @import("../lib.zig").Resolution;
 
+pub const Error = error{ffmpeg_error};
+
 pub const enc = struct {
     const log = std.log.scoped(.encode);
 
@@ -231,6 +233,9 @@ pub const dec = struct {
         const Kind = enum { video, audio };
         const Options = struct { dev_type: c.AVHWDeviceType = c.AV_HWDEVICE_TYPE_NONE };
 
+        const InitError = Error;
+        const HardwareInitError = Error || error{missing_decoder};
+
         inner: ?*c.AVCodecContext,
         stream: c_int,
 
@@ -239,21 +244,16 @@ pub const dec = struct {
         const log = std.log.scoped(.dec_codec);
 
         // FIXME: why is this heap allocated?
-        pub fn init(allocator: std.mem.Allocator, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) !*AvCodecContext {
-            const self = try allocator.create(@This());
-
+        pub fn init(self: *AvCodecContext, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) InitError!void {
             if (kind == .video) blk: {
                 if (opt.dev_type == c.AV_HWDEVICE_TYPE_NONE) break :blk;
 
                 self.initHardware(fmt_ctx, opt.dev_type) catch {
                     break :blk log.err("failed to set up hardware device, defaulting to software", .{});
                 };
-
-                return self;
             }
 
             try self.initSoftware(kind, fmt_ctx);
-            return self;
         }
 
         // TODO: dump audio information as well?
@@ -277,14 +277,12 @@ pub const dec = struct {
             log.debug("colour range: {s}", .{c.av_color_range_name(inner.color_range)});
         }
 
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *@This()) void {
             if (self.device) |*dev| dev.deinit();
             c.avcodec_free_context(&self.inner);
-
-            allocator.destroy(self);
         }
 
-        fn initSoftware(self: *@This(), comptime kind: Kind, fmt_ctx: AvFormatContext) !void {
+        fn initSoftware(self: *@This(), comptime kind: Kind, fmt_ctx: AvFormatContext) InitError!void {
             const media_type = switch (kind) {
                 .video => c.AVMEDIA_TYPE_VIDEO,
                 .audio => c.AVMEDIA_TYPE_AUDIO,
@@ -305,7 +303,7 @@ pub const dec = struct {
             self.* = .{ .inner = ctx_ptr, .stream = stream };
         }
 
-        fn initHardware(self: *@This(), fmt_ctx: AvFormatContext, device_type: c.AVHWDeviceType) !void {
+        fn initHardware(self: *@This(), fmt_ctx: AvFormatContext, device_type: c.AVHWDeviceType) HardwareInitError!void {
             var codec_ptr: ?*const c.AVCodec = null;
             const stream = try err(c.av_find_best_stream(fmt_ctx.ptr(), c.AVMEDIA_TYPE_VIDEO, -1, -1, &codec_ptr, 0));
 
@@ -330,7 +328,7 @@ pub const dec = struct {
                     const config: ?*const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec_ptr.?, i);
                     if (config == null) {
                         log.err("no hardware {s} decoder found in {s} device", .{ codec_ptr.?.name, c.av_hwdevice_get_type_name(device_type) });
-                        return error.unsupported_codec;
+                        return error.missing_decoder;
                     }
 
                     if (config.?.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;

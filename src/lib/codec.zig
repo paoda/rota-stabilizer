@@ -187,6 +187,9 @@ pub const audio = struct {
 
         volume: f32,
 
+        // TODO(paoda): this needs to be an import from sdl.Error or something
+        pub const InitError = error{sdl_error};
+
         const log = std.log.scoped(.audio);
 
         const AudioPll = struct {
@@ -236,7 +239,7 @@ pub const audio = struct {
             }
         };
 
-        pub fn init(ctx: *const dec.AvCodecContext, volume: f32) !@This() {
+        pub fn init(ctx: *const dec.AvCodecContext, volume: f32) InitError!@This() {
             var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             desired.freq = ctx.inner.?.sample_rate;
             desired.format = c.SDL_AUDIO_F32;
@@ -788,13 +791,14 @@ pub const FrameQueue = struct {
 
     const Slot = struct { frame: []c.AVFrame, state: []State };
     const State = enum { empty, in_use, ready_to_reuse, writing };
-    const Error = error{ ffmpeg_error, invalid_size, early_exit } || std.mem.Allocator.Error;
+    const Error = error{ invalid_size, early_exit };
+    pub const InitError = std.mem.Allocator.Error || libav.Error;
 
     pub const capacity = 0x20;
 
     // INVARIANT: This is an SPSC Queue
 
-    pub fn init(allocator: std.mem.Allocator, opt: Resolution) Error!FrameQueue {
+    pub fn init(allocator: std.mem.Allocator, opt: Resolution) InitError!FrameQueue {
         comptime std.debug.assert(std.math.isPowerOfTwo(capacity));
 
         const frames = try allocator.alloc(c.AVFrame, capacity);
@@ -975,6 +979,13 @@ pub const Decoder = struct {
     const PacketQueue = packet.Queue;
     const AudioClock = audio.Clock;
 
+    const InitError = error{
+        ffmpeg_error,
+        unsupported_display_matrix,
+        unsupported_colour_depth,
+        unsupported_orientation,
+    } || std.mem.Allocator.Error || FrameQueue.InitError || AudioClock.InitError;
+
     fmt_ctx: dec.AvFormatContext,
 
     video_ctx: *dec.AvCodecContext,
@@ -1035,19 +1046,25 @@ pub const Decoder = struct {
     }
 
     // TODO: DecoderOptions
-    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, volume: f32, path: []const u8, headless: bool) !Decoder {
+    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, volume: f32, path: []const u8, headless: bool) InitError!Decoder {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
         fmt_ctx.dump();
 
-        var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
-        errdefer video_ctx.deinit(allocator);
+        const video_ctx = try allocator.create(dec.AvCodecContext);
+        errdefer allocator.destroy(video_ctx);
+
+        try video_ctx.init(.video, fmt_ctx, .{ .dev_type = hw_device });
+        errdefer video_ctx.deinit();
 
         video_ctx.dump();
 
-        var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
-        errdefer audio_ctx.deinit(allocator);
+        const audio_ctx = try allocator.create(dec.AvCodecContext);
+        errdefer allocator.destroy(audio_ctx);
+
+        try audio_ctx.init(.audio, fmt_ctx, .{});
+        errdefer audio_ctx.deinit();
 
         var display_rotation: i16 = 0;
 
@@ -1140,8 +1157,11 @@ pub const Decoder = struct {
         if (self.audio_clock) |clock| clock.deinit();
         self.queue.deinit(allocator);
 
-        self.audio_ctx.deinit(allocator);
-        self.video_ctx.deinit(allocator);
+        self.audio_ctx.deinit();
+        allocator.destroy(self.audio_ctx);
+
+        self.video_ctx.deinit();
+        allocator.destroy(self.video_ctx);
 
         self.fmt_ctx.deinit();
     }
