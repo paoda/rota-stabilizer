@@ -17,6 +17,8 @@ const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
 const AV_HWDEVICE_TYPE_AMF: c_int = if (@hasDecl(c, "AV_HWDEVICE_TYPE_AMF")) c.AV_HWDEVICE_TYPE_AMF else 13;
 
+const errors = &@import("../lib.zig").errors;
+
 pub const HwDeviceType = switch (builtin.os.tag) {
     .macos => enum(c.AVHWDeviceType) {
         VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
@@ -46,6 +48,8 @@ const c = @import("../lib.zig").c;
 pub var gl_procs: gl.ProcTable = undefined;
 
 pub const Ui = struct {
+    const title: [:0]const u8 = "Rotaeno Stabilizer";
+
     window: *c.SDL_Window,
     gl_ctx: c.SDL_GLContext,
 
@@ -60,7 +64,7 @@ pub const Ui = struct {
         try errify(c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO));
         errdefer c.SDL_Quit();
 
-        try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", version, "moe.paoda.rota-stabilizer"));
+        try errify(c.SDL_SetAppMetadata(title, version, "moe.paoda.rota-stabilizer"));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, gl.info.version_minor));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
@@ -68,14 +72,14 @@ pub const Ui = struct {
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_ALPHA_SIZE, 8));
 
         const window_flags: c.SDL_WindowFlags = c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE;
-        const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", width, height, window_flags));
+        const window: *c.SDL_Window = try errify(c.SDL_CreateWindow(title, width, height, window_flags));
         errdefer c.SDL_DestroyWindow(window);
 
         const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
-        errdefer errify(c.SDL_GL_DestroyContext(gl_ctx)) catch {};
+        errdefer _ = c.SDL_GL_DestroyContext(gl_ctx);
 
         try errify(c.SDL_GL_MakeCurrent(window, gl_ctx));
-        errdefer errify(c.SDL_GL_MakeCurrent(window, null)) catch {};
+        errdefer _ = c.SDL_GL_MakeCurrent(window, null);
 
         if (!gl_procs.init(c.SDL_GL_GetProcAddress)) return error.gl_init_failed;
 
@@ -92,8 +96,8 @@ pub const Ui = struct {
         zgui.io.setConfigFlags(.{ .dock_enable = true });
 
         var config = zgui.FontConfig.init();
+        @memcpy(config.name[0..12], "Inter Medium");
 
-        config.name[0..12].* = "Inter Medium".*;
         _ = zgui.io.addFontFromMemoryWithConfig(default_font, 16, config, null);
 
         log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
@@ -131,14 +135,6 @@ pub const Ui = struct {
         const mode = try errify(c.SDL_GetCurrentDisplayMode(id));
 
         return mode.*.refresh_rate;
-    }
-
-    pub fn toggleFullscreen(self: @This()) !void {
-        if (c.SDL_GetWindowFlags(self.window) & c.SDL_WINDOW_FULLSCREEN != 0) {
-            try errify(c.SDL_SetWindowFullscreen(self.window, false));
-        } else {
-            try errify(c.SDL_SetWindowFullscreen(self.window, true));
-        }
     }
 
     pub fn swap(self: @This()) !void {
@@ -204,10 +200,19 @@ pub const signal = struct {
 
     pub var should_quit: AtomicBool = .init(false); // should be global
 
-    pub fn setupHandler() !void {
+    pub fn setupHandler() void {
         switch (builtin.os.tag) {
-            .windows => try std.os.windows.SetConsoleCtrlHandler(windowsHandler, true),
-            else => std.posix.sigaction(std.posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = std.posix.sigemptyset(), .flags = 0 }, null),
+            .windows => {
+                std.os.windows.SetConsoleCtrlHandler(windowsHandler, true) catch |e| {
+                    errors.add_win_signal_handler_err(e);
+                    // but then ignore the error
+                };
+            },
+            else => std.posix.sigaction(
+                std.posix.SIG.INT,
+                &.{ .handler = .{ .handler = posixHandler }, .mask = std.posix.sigemptyset(), .flags = 0 },
+                null,
+            ),
         }
 
         log.debug("setup {s} CTRL-C signal handler", .{@tagName(builtin.os.tag)});
@@ -274,11 +279,11 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init(errors: *Errors, render_target: Resolution) !State {
+        pub fn init(self: *State, render_target: Resolution) void {
             const hw_dec, const hw_enc = guessHardware();
 
-            return .{
-                .local_addr = getLocalIpAddress(errors),
+            self.* = .{
+                .local_addr = getLocalIpAddress(),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
@@ -859,7 +864,7 @@ pub const gui = struct {
 };
 
 /// dummy udp connection to maybe figure out what the active local ip is
-fn getLocalIpAddress(errors: *Errors) ?std.net.Address {
+fn getLocalIpAddress() ?std.net.Address {
     const target = std.net.Address.parseIp4("8.8.8.8", 53) catch return null;
 
     const sock = std.posix.socket(
@@ -870,7 +875,7 @@ fn getLocalIpAddress(errors: *Errors) ?std.net.Address {
     defer std.posix.close(sock);
 
     std.posix.connect(sock, &target.any, target.getOsSockLen()) catch |e| {
-        errors.add_local_ip_error(e);
+        errors.add_local_ip_err(e);
         return null;
     };
 

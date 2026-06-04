@@ -46,9 +46,13 @@ pub const startup = struct {
 pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
 pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
 
+const errors = &@import("lib.zig").errors;
+
 pub fn main() !void {
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
+
+    errors.init();
 
     var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -65,20 +69,15 @@ pub fn main() !void {
     try ui_view.push(ui_width, ui_height);
 
     if (builtin.mode == .Debug) c.av_log_set_level(c.AV_LOG_VERBOSE);
-    try signal.setupHandler(); // NB: Has to come after SDL Init
+    signal.setupHandler(); // NB: Has to come after SDL Init
 
     var app: App = .default;
     defer app.deinit(allocator);
 
-    const errors = try allocator.create(Errors);
-    defer allocator.destroy(errors);
-
-    errors.init();
-
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    state.* = try .init(errors, startup.render_target);
+    state.init(startup.render_target);
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });

@@ -7,6 +7,8 @@ const gl = @import("gl");
 
 const AvFrame = @import("lib/libav.zig").AvFrame;
 
+pub var errors: Errors = undefined;
+
 pub const c = @cImport({
     @cDefine("SDL_DISABLE_OLD_NAMES", {});
     @cDefine("SDL_MAIN_HANDLED", {});
@@ -884,19 +886,22 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
 //
 // Errors is a method that reports errors and their context
 pub const Errors = struct {
-    pub const default: @This() = .{ .count = 0 };
     count: usize,
 
     pub fn init(self: *Errors) void {
-        self.* = .default;
+        self.* = .{ .count = 0 };
     }
 
-    pub fn add_local_ip_error(self: *Errors, e: std.posix.ConnectError) void {
+    pub fn add_local_ip_err(self: *Errors, e: std.posix.ConnectError) void {
         self.print("failed to determine local ip: {}\n", .{e});
     }
 
-    pub fn add_sdl_error(self: *Errors) void {
-        self.print("SDL: {s}", .{c.SDL_GetError()});
+    pub fn add_win_signal_handler_err(self: *Errors, e: std.posix.ConnectError) void {
+        self.print("failed to setup windows CTRL-C signal handler: {}\n", .{e});
+    }
+
+    pub fn add_sdl_err(self: *Errors) void {
+        self.print("SDL: {s}\n", .{c.SDL_GetError()});
     }
 
     // TODO(paoda): maybe add a scope thing here?
@@ -904,6 +909,12 @@ pub const Errors = struct {
         std.debug.assert(fmt[fmt.len - 1] == '\n');
 
         self.count += 1;
-        std.debug.print("err: " ++ fmt, args);
+
+        if (tracy.enabled) {
+            var buf: [0x80]u8 = undefined;
+            tracy.message(.{ .text = std.fmt.bufPrint(&buf, "err: " ++ fmt, args) catch unreachable });
+        } else {
+            std.debug.print("err: " ++ fmt, args);
+        }
     }
 };
