@@ -102,7 +102,7 @@ pub fn main() !void {
         gl.ClearColor(0, 0, 0, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
-        try app.poll(allocator, ui, state);
+        app.poll(allocator, ui, state);
         try app.run(state.render);
 
         try platform.gui.draw(state, ui_view, app.video());

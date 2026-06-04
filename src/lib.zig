@@ -900,8 +900,8 @@ pub const Errors = struct {
         self.print("failed to setup windows CTRL-C signal handler: {}\n", .{e});
     }
 
-    pub fn add_sdl_err(self: *Errors) void {
-        self.print("SDL: {s}\n", .{c.SDL_GetError()});
+    pub fn add_set_volume_err(self: *Errors, volume: f32) void {
+        self.print("failed to set device gain to {d:.2}: {s}\n", .{ volume, c.SDL_GetError() });
     }
 
     // TODO(paoda): maybe add a scope thing here?

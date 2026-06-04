@@ -586,18 +586,19 @@ pub const App = struct {
 
     const log = std.log.scoped(.app);
 
-    pub fn poll(self: *App, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) !void {
+    pub fn poll(self: *App, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.poll" });
         defer zone.end();
 
         switch (self.session) {
             .encode => {
+                // update progress
                 const num: f32 = @floatFromInt(self.session.encode.frame_count);
                 const den: f32 = @floatFromInt(self.session.encode.frame_total);
                 state.encode_progress = num / den;
 
                 if (self.session.encode.is_finished) {
-                    state.request = .idle;
+                    state.request = .idle; // reset to idle when encoding is complete
 
                     if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
                         log.warn("encode_progress finished at {d:.2}", .{state.encode_progress});
@@ -605,8 +606,9 @@ pub const App = struct {
                 }
             },
             .playback => |*playback| {
-                const audio = &(playback.decoder.audio_clock orelse @panic("invariant broken"));
+                const audio = &playback.decoder.audio_clock.?;
 
+                // update ui to reflect current state
                 state.volume.value = audio.volume;
                 state.render.zoom = playback.camera.zoom;
                 state.progress.timestamp = @floatCast(playback.double_buffer.back().displayTime());
@@ -617,7 +619,7 @@ pub const App = struct {
 
                     switch (action) {
                         .SetCameraZoom => |zoom| playback.camera.zoom = zoom,
-                        .SetVolume => |volume| try audio.setVolume(volume),
+                        .SetVolume => |volume| audio.setVolume(volume),
                         .Seek => |timestamp| log.warn("TODO: Seek to {d:.3}s", .{timestamp}),
                     }
                 }
@@ -631,11 +633,15 @@ pub const App = struct {
         switch (request) {
             .idle => {}, // already idle
             .encode => |paths| {
-                const session = try EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path);
+
+                // TODO(paoda): record the error that prevented us from starting an EncodeSession
+                const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch return;
                 self.session = .{ .encode = session };
             },
             .playback => |path| {
-                const session = try PlaybackSession.init(allocator, state, ui, path);
+
+                // TODO(paoda): record the error that prevented us from starting a PlaybackSession
+                const session = PlaybackSession.init(allocator, state, ui, path) catch return;
                 self.session = .{ .playback = session };
             },
         }

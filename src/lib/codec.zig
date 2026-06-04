@@ -18,6 +18,8 @@ const AvFrame = @import("libav.zig").AvFrame;
 const Viewport = @import("../lib.zig").Viewport;
 const Resolution = @import("../lib.zig").Resolution;
 
+const errors = &@import("../lib.zig").errors;
+
 // TODO: some universal thread sync primitive
 
 pub const packet = struct {
@@ -266,9 +268,14 @@ pub const audio = struct {
             };
         }
 
-        pub fn setVolume(self: *@This(), volume: f32) !void {
-            self.volume = @max(0.0, @min(1.0, volume));
-            try errify(c.SDL_SetAudioStreamGain(self.stream, self.volume));
+        pub fn setVolume(self: *@This(), volume: f32) void {
+            const next = @max(0.0, @min(1.0, volume));
+
+            if (!c.SDL_SetAudioStreamGain(self.stream, next)) {
+                return errors.add_set_volume_err(next);
+            }
+
+            self.volume = next;
         }
 
         pub fn deinit(self: @This()) void {
