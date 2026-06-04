@@ -20,6 +20,7 @@ const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const PixelBufferPool = GpuResourceManager.PixelBufferPool;
 const Ui = @import("lib/platform.zig").Ui;
 const App = @import("app.zig").App;
+const Errors = @import("lib.zig").Errors;
 
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
@@ -69,10 +70,15 @@ pub fn main() !void {
     var app: App = .default;
     defer app.deinit(allocator);
 
+    const errors = try allocator.create(Errors);
+    defer allocator.destroy(errors);
+
+    errors.init();
+
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    state.* = try .init(startup.render_target);
+    state.* = try .init(errors, startup.render_target);
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });

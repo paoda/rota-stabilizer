@@ -12,6 +12,7 @@ const Request = @import("../app.zig").Request;
 const Action = @import("../app.zig").Action;
 const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
+const Errors = @import("../lib.zig").Errors;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
 const AV_HWDEVICE_TYPE_AMF: c_int = if (@hasDecl(c, "AV_HWDEVICE_TYPE_AMF")) c.AV_HWDEVICE_TYPE_AMF else 13;
@@ -250,7 +251,7 @@ pub const gui = struct {
         encode_progress: f32 = 0.0,
         progress: VideoProgress = .default,
 
-        local_addr: std.net.Address,
+        local_addr: ?std.net.Address,
 
         request: ?Request = null, // session change
         action: ?Action = null,
@@ -273,11 +274,11 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init(render_target: Resolution) !State {
+        pub fn init(errors: *Errors, render_target: Resolution) !State {
             const hw_dec, const hw_enc = guessHardware();
 
             return .{
-                .local_addr = try getLocalIpAddress(),
+                .local_addr = getLocalIpAddress(errors),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
@@ -725,8 +726,14 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
-        zgui.text("Local IP: {d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] });
+        const ip_str = if (state.local_addr) |address| blk: {
+            const addr = std.mem.toBytes(address.in.sa.addr);
+
+            var buf: [0xF]u8 = undefined;
+            break :blk std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] }) catch unreachable;
+        } else "Unknown";
+
+        zgui.text("Local IP: {s}", .{ip_str});
 
         zgui.bulletText("CTRL+Click to manually input a value!", .{});
         zgui.bulletText("For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
@@ -851,19 +858,25 @@ pub const gui = struct {
     }
 };
 
-/// dummy udp connection to figure out what the active local ip is
-/// FIXME(paoda): make this an optional, program shouldn't crash on no LAN
-fn getLocalIpAddress() !std.net.Address {
-    const target = try std.net.Address.parseIp4("8.8.8.8", 53);
+/// dummy udp connection to maybe figure out what the active local ip is
+fn getLocalIpAddress(errors: *Errors) ?std.net.Address {
+    const target = std.net.Address.parseIp4("8.8.8.8", 53) catch return null;
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
+    const sock = std.posix.socket(
+        std.posix.AF.INET,
+        std.posix.SOCK.DGRAM,
+        std.posix.IPPROTO.UDP,
+    ) catch return null;
     defer std.posix.close(sock);
 
-    try std.posix.connect(sock, &target.any, target.getOsSockLen());
+    std.posix.connect(sock, &target.any, target.getOsSockLen()) catch |e| {
+        errors.add_local_ip_error(e);
+        return null;
+    };
 
     var local_addr: std.net.Address = undefined;
     var addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(local_addr.any));
-    try std.posix.getsockname(sock, &local_addr.any, &addr_len);
+    std.posix.getsockname(sock, &local_addr.any, &addr_len) catch return null;
 
     return local_addr;
 }

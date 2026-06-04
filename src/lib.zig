@@ -873,3 +873,37 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
     if (kind == c.AV_PIX_FMT_NONE) return "none";
     return std.mem.span(c.av_get_pix_fmt_name(kind));
 }
+
+// Error Policy:
+// ---
+// Errors are broken into two categories:
+// 1. Recoverable, these errors must be gracefully handled and displayed to the user
+// 2. Irrecoverable. These errors are allowed to crash the program if unhandled
+//
+// The way this program should work more or less, is that as soon as we have DearImgui drawing, all errors must more or less be treated as recoverable.
+//
+// Errors is a method that reports errors and their context
+pub const Errors = struct {
+    pub const default: @This() = .{ .count = 0 };
+    count: usize,
+
+    pub fn init(self: *Errors) void {
+        self.* = .default;
+    }
+
+    pub fn add_local_ip_error(self: *Errors, e: std.posix.ConnectError) void {
+        self.print("failed to determine local ip: {}\n", .{e});
+    }
+
+    pub fn add_sdl_error(self: *Errors) void {
+        self.print("SDL: {s}", .{c.SDL_GetError()});
+    }
+
+    // TODO(paoda): maybe add a scope thing here?
+    fn print(self: *Errors, comptime fmt: []const u8, args: anytype) void {
+        std.debug.assert(fmt[fmt.len - 1] == '\n');
+
+        self.count += 1;
+        std.debug.print("err: " ++ fmt, args);
+    }
+};
