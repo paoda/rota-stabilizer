@@ -295,8 +295,18 @@ pub const gui = struct {
 
         const width, const height = ui_view.get();
 
-        zgui.backend.newFrame(@intCast(width), @intCast(height));
-        defer zgui.backend.draw();
+        {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.newFrame" });
+            defer z.end();
+
+            zgui.backend.newFrame(@intCast(width), @intCast(height));
+        }
+        defer {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.draw" });
+            defer z.end();
+
+            zgui.backend.draw();
+        }
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
@@ -337,6 +347,9 @@ pub const gui = struct {
     }
 
     fn setupDockingLayout(str_id: [:0]const u8, ui_view: Viewport) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         const view_size = ui_view.get();
         const dock_id = zgui.getStrIdZ(str_id);
         const size: [2]f32 = .{ @floatFromInt(view_size[0]), @floatFromInt(view_size[1]) };
@@ -405,6 +418,9 @@ pub const gui = struct {
     }
 
     fn drawMediaSettings(state: *State) !void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         const filter = "mp4,mkv,mov,webm";
 
         zgui.pushItemWidth(-zgui.calcTextSize("Browse...", .{})[0] - 20.0);
@@ -426,6 +442,9 @@ pub const gui = struct {
     }
 
     fn drawActionButtons(state: *State) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
         const is_possible = input_path.len != 0;
 
@@ -467,6 +486,9 @@ pub const gui = struct {
     }
 
     fn drawHardwareSettings(state: *State) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         if (zgui.beginTable("HardwareForm", .{ .column = 2 })) {
             defer zgui.endTable();
 
@@ -526,6 +548,9 @@ pub const gui = struct {
     }
 
     fn drawRenderSettings(state: *State) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         // Push a negative width so all sliders and inputs stretch consistently,
         // leaving a uniform margin on the right side.
         zgui.pushItemWidth(-100.0);
@@ -697,6 +722,9 @@ pub const gui = struct {
     }
 
     fn drawInfoPanel(state: *State) void {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+
         const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
         zgui.text("Local IP: {d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] });
 
@@ -818,6 +846,7 @@ pub const gui = struct {
 };
 
 /// dummy udp connection to figure out what the active local ip is
+/// FIXME(paoda): make this an optional, program shouldn't crash on no LAN
 fn getLocalIpAddress() !std.net.Address {
     const target = try std.net.Address.parseIp4("8.8.8.8", 53);
 
