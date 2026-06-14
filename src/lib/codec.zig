@@ -1359,7 +1359,11 @@ pub const Encoder = struct {
     }
 
     fn initHardware(opt: Options, device_type: c.AVHWDeviceType, codec_id: c.AVCodecID, path: []const u8) !Encoder {
-        const codec = enc.AvCodec.findHardware(device_type, codec_id) orelse return initSoftware(opt, codec_id, path);
+        const codec = enc.AvCodec.findHardware(device_type, codec_id) orelse {
+            errors.add_encoding_fallback_err(device_type, codec_id);
+
+            return initSoftware(opt, codec_id, path);
+        };
         return initShared(opt, codec, c.AV_PIX_FMT_NV12, path);
     }
 

@@ -936,6 +936,13 @@ pub const Errors = struct {
         }
     }
 
+    pub fn add_encoding_fallback_err(self: *Errors, device: c.AVHWDeviceType, codec_id: c.AVCodecID) void {
+        const device_name = c.av_hwdevice_get_type_name(device);
+        const codec_name = c.avcodec_get_name(codec_id);
+
+        self.print("failed to find {s} encoder for {s}. Defaulting to software (will be slow!)", .{ codec_name, device_name });
+    }
+
     pub fn add_ffmpeg_err(self: *Errors, errno: c_int) void {
         std.debug.assert(errno < 0);
         var buf: [c.AV_ERROR_MAX_STRING_SIZE]u8 = undefined;
