@@ -979,12 +979,12 @@ pub const Decoder = struct {
     const PacketQueue = packet.Queue;
     const AudioClock = audio.Clock;
 
-    const InitError = error{
+    pub const InitError = error{
         ffmpeg_error,
         unsupported_display_matrix,
         unsupported_colour_depth,
         unsupported_orientation,
-    } || std.mem.Allocator.Error || FrameQueue.InitError || AudioClock.InitError;
+    } || std.mem.Allocator.Error || FrameQueue.InitError || AudioClock.InitError || std.Thread.SpawnError;
 
     fmt_ctx: dec.AvFormatContext,
 
@@ -1188,7 +1188,7 @@ pub const Decoder = struct {
         return end_pts * c.av_q2d(st.time_base);
     }
 
-    pub fn spawn(self: *Decoder, headless: bool) !Handles {
+    pub fn spawn(self: *Decoder, headless: bool) std.Thread.SpawnError!Handles {
         const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{self});
         const video_handle = try std.Thread.spawn(.{}, video.decode, .{self});
         const audio_handle = if (headless) null else try std.Thread.spawn(.{}, audio.decode, .{self});

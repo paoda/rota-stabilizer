@@ -649,7 +649,7 @@ pub fn shutdown(queues: *Decoder.Queues) void {
     queues.frame.interrupt();
 }
 
-pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) !f64 {
+pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) ?f64 {
     const FrameQueue = @import("lib/codec.zig").FrameQueue;
 
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -657,7 +657,7 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
 
     const frame = decoder.queue.frame.pop() orelse {
         shutdown(&decoder.queue);
-        return error.early_exit;
+        return null;
     };
     defer decoder.queue.frame.recycle(frame);
 

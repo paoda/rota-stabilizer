@@ -238,7 +238,10 @@ pub const GpuResourceManager = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, render_view: Viewport, dimensions: Resolution) !*GpuResourceManager {
+    pub const InitError = error{} || SetupError || std.mem.Allocator.Error || opengl_impl.Error;
+    const SetupError = error{framebuffer_check_failed};
+
+    pub fn init(allocator: std.mem.Allocator, render_view: Viewport, dimensions: Resolution) InitError!*GpuResourceManager {
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
 
@@ -283,7 +286,7 @@ pub const GpuResourceManager = struct {
         allocator.destroy(self);
     }
 
-    pub fn setupOffscreenTarget(self: GpuResourceManager, render_view: Viewport) error{setup_error}!void {
+    pub fn setupOffscreenTarget(self: GpuResourceManager, render_view: Viewport) SetupError!void {
         const out_tex = self.tex.get(.out);
         const out_fbo = self.fbo.get(.out);
         const width, const height = render_view.get();
@@ -299,7 +302,7 @@ pub const GpuResourceManager = struct {
         defer gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
 
         gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out_tex, 0);
-        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
+        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.framebuffer_check_failed;
     }
 
     pub fn blur(self: GpuResourceManager) BlurManager {
@@ -315,7 +318,7 @@ pub const GpuResourceManager = struct {
         };
     }
 
-    pub fn setupAngleCalc(self: GpuResourceManager) error{setup_error}!void {
+    pub fn setupAngleCalc(self: GpuResourceManager) SetupError!void {
         const fbo_id = self.fbo.get(.angle);
         const tex_id = self.tex.get(.angle);
         const width, const height = .{ 1, 1 }; // 1x1
@@ -333,7 +336,7 @@ pub const GpuResourceManager = struct {
         gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex_id, 0);
 
         const ret = gl.CheckFramebufferStatus(gl.FRAMEBUFFER);
-        if (ret != gl.FRAMEBUFFER_COMPLETE) return error.setup_error;
+        if (ret != gl.FRAMEBUFFER_COMPLETE) return error.framebuffer_check_failed;
     }
 
     pub fn setupEncodingTargets(self: *const GpuResourceManager, encode_view: Viewport, frame: AvFrame) error{setup_error}!void {
@@ -533,7 +536,9 @@ pub fn sleep(duration: u64) void {
 const opengl_impl = struct {
     const log = std.log.scoped(.shader);
 
-    fn program(comptime vert_path: []const u8, comptime frag_path: []const u8) !c_uint {
+    const Error = error{ vert_compile_error, frag_compile_error };
+
+    fn program(comptime vert_path: []const u8, comptime frag_path: []const u8) Error!c_uint {
         const vert_shader: [1][*]const u8 = .{@embedFile(vert_path)[0..].ptr};
         const frag_shader: [1][*]const u8 = .{@embedFile(frag_path)[0..].ptr};
 
@@ -544,7 +549,7 @@ const opengl_impl = struct {
         gl.ShaderSource(vs, 1, vert_shader[0..], null);
         gl.CompileShader(vs);
 
-        if (!shader.didCompile(vs)) return error.VertexCompileError;
+        if (!shader.didCompile(vs)) return error.vert_compile_error;
 
         const fs = gl.CreateShader(gl.FRAGMENT_SHADER);
         defer gl.DeleteShader(fs);
@@ -553,7 +558,7 @@ const opengl_impl = struct {
         gl.ShaderSource(fs, 1, frag_shader[0..], null);
         gl.CompileShader(fs);
 
-        if (!shader.didCompile(fs)) return error.FragmentCompileError;
+        if (!shader.didCompile(fs)) return error.frag_compile_error;
 
         const prog = gl.CreateProgram();
         gl.AttachShader(prog, vs);
@@ -819,6 +824,8 @@ pub const Viewport = struct {
     const cap = 5;
     pub const default: @This() = .{ .width = undefined, .height = undefined, .idx = 0 };
 
+    pub const Error = error{stack_overflow};
+
     width: [cap]c_int,
     height: [cap]c_int,
 
@@ -826,7 +833,7 @@ pub const Viewport = struct {
 
     const log = std.log.scoped(.viewport);
 
-    pub fn push(self: *Viewport, width: c_int, height: c_int) !void {
+    pub fn push(self: *Viewport, width: c_int, height: c_int) Error!void {
         if (self.idx >= cap) return error.stack_overflow;
 
         self.width[self.idx] = width;

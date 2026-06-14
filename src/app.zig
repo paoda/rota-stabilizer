@@ -99,6 +99,7 @@ const PlaybackSession = struct {
 
     next_frame: ?*c.AVFrame = null,
 
+    const InitError = error{preload_fail} || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError;
     const log = std.log.scoped(.playback_session);
 
     fn stop(self: *const @This()) void {
@@ -116,7 +117,7 @@ const PlaybackSession = struct {
         self.decoder.queue.frame.interrupt();
     }
 
-    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, path: []const u8) !PlaybackSession {
+    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, path: []const u8) InitError!PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
 
@@ -146,7 +147,7 @@ const PlaybackSession = struct {
         const camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
         const angle_calc = try AngleCalc.init(manager, camera);
 
-        const start_time = try preload(manager, decoder, double_buffer);
+        const start_time = preload(manager, decoder, double_buffer) orelse return error.preload_fail;
         log.debug("video start time: {d}s", .{start_time});
 
         var fbs: FbStack = .default;
@@ -410,7 +411,7 @@ const EncodeSession = struct {
 
         var fbs: FbStack = .default;
 
-        _ = try preload(manager, decoder, double_buffer);
+        _ = preload(manager, decoder, double_buffer) orelse return error.preload_fail;
         try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
