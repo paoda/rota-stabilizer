@@ -730,6 +730,12 @@ pub const gui = struct {
 
         zgui.bulletText("CTRL+Click to manually input a value!", .{});
         zgui.bulletText("For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
+
+        zgui.text("rota-stabilizer v{s}", .{version});
     }
 
     fn drawVideoWindow(maybe_video: ?VideoContext) void {
