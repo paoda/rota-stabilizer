@@ -24,11 +24,9 @@ The most recent successful CI run in the [Actions](<https://github.com/paoda/rot
 
 Alternatively: 
 
-[Windows (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-windows-latest.zip>)
+[Windows (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-windows-latest.zip.zip>)
 
-[Linux Flatpak (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-flatpak.zip>)
-
-[macOS (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-macos-latest.zip>)
+[macOS (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-macos-latest.zip.zip>)
 
 
 ## How to Use
