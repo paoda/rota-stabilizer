@@ -365,6 +365,10 @@ pub const gui = struct {
             const message = state.err_message orelse errors.messages.pop().?;
             zgui.text("{s}", .{message});
 
+            zgui.spacing();
+            zgui.spacing();
+            zgui.separator();
+
             if (zgui.button("OK", .{ .w = -1.0 })) {
                 errors.allocator.free(message); // FIXME(paoda): use an arena?
                 state.err_message = null;

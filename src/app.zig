@@ -23,6 +23,7 @@ const Decoder = @import("lib/codec.zig").Decoder;
 const RenderOptions = @import("main.zig").RenderOptions;
 
 const signal = @import("lib/platform.zig").signal;
+const errors = &@import("lib.zig").errors;
 
 const preload = @import("main.zig").preload;
 const render = @import("main.zig").render;
@@ -633,15 +634,20 @@ pub const App = struct {
         switch (request) {
             .idle => {}, // already idle
             .encode => |paths| {
+                const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch |e| switch (e) {
+                    error.ffmpeg_error => return, // reporting handled already
+                    error.missing_file => return errors.add_missing_file(paths.src_path, paths.dst_path),
+                    else => return errors.add_unknown_err(e),
+                };
 
-                // TODO(paoda): record the error that prevented us from starting an EncodeSession
-                const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch return;
                 self.session = .{ .encode = session };
             },
             .playback => |path| {
-
-                // TODO(paoda): record the error that prevented us from starting a PlaybackSession
-                const session = PlaybackSession.init(allocator, state, ui, path) catch return;
+                const session = PlaybackSession.init(allocator, state, ui, path) catch |e| switch (e) {
+                    error.ffmpeg_error => return, // reporting handled already
+                    error.missing_file => return errors.add_missing_file(path, null),
+                    else => return errors.add_unknown_err(e),
+                };
                 self.session = .{ .playback = session };
             },
         }

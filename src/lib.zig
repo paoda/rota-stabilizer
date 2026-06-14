@@ -914,6 +914,8 @@ pub const Errors = struct {
         self.messages.deinit(self.allocator);
     }
 
+    // TODO(paoda): introduce tiers of errors
+
     pub fn add_local_ip_err(self: *Errors, e: std.posix.ConnectError) void {
         self.print("failed to determine local ip: {}\n", .{e});
     }
@@ -926,14 +928,24 @@ pub const Errors = struct {
         self.print("failed to set device gain to {d:.2}: {s}\n", .{ volume, c.SDL_GetError() });
     }
 
+    pub fn add_missing_file(self: *Errors, src_file: []const u8, dst_file: ?[]const u8) void {
+        if (dst_file) |file| {
+            self.print("failed to start with paths '{s}' and '{s}'\n", .{ src_file, file });
+        } else {
+            self.print("failed to start with path '{s}'\n", .{src_file});
+        }
+    }
+
     pub fn add_ffmpeg_err(self: *Errors, errno: c_int) void {
         std.debug.assert(errno < 0);
-        var buf: [0x100]u8 = undefined;
+        var buf: [c.AV_ERROR_MAX_STRING_SIZE]u8 = undefined;
 
-        const ret = c.av_strerror(errno, &buf, buf.len);
-        if (ret < 0) @panic("TODO: add error for crash in errors");
+        const str = std.mem.sliceTo(c.av_make_error_string(&buf, buf.len, errno), 0);
+        self.print("{s} ({})\n", .{ str, errno });
+    }
 
-        self.print("{s} ({})\n", .{ std.mem.sliceTo(&buf, 0), errno });
+    pub fn add_unknown_err(self: *Errors, e: anyerror) void {
+        self.print("unhandled err: {}\n", .{e});
     }
 
     // TODO(paoda): maybe add a scope thing here?
@@ -941,11 +953,11 @@ pub const Errors = struct {
         std.debug.assert(fmt[fmt.len - 1] == '\n');
         self.count += 1;
 
-        const text = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("oom in error handler");
+        const text = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("oom in error reporter (it's over)");
 
         if (tracy.enabled) tracy.message(.{ .text = text });
         if (@import("builtin").mode == .Debug) std.debug.print("err: {s}", .{text});
 
-        self.messages.append(self.allocator, text) catch @panic("oom in error handler ArrayList");
+        self.messages.append(self.allocator, text) catch @panic("oom in error reporter ArrayList (it's over)");
     }
 };
