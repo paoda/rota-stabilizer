@@ -463,10 +463,13 @@ pub const Camera = struct {
     }
 
     fn defaultZoom(window_aspect: f32) f32 {
-        if (@abs(window_aspect - 1.0) <= std.math.floatEps(f32)) return 1.0;
-        if (window_aspect > 1.0) return 1.45; // landscape
+        const target_aspect = 16.0 / 9.0;
+        const tolerance = 0.01; // FIXME(paoda): is this reasonable?
 
-        return 1.0; // portrait
+        // NB: nice default for 16:9 video
+        if (@abs(window_aspect - target_aspect) <= tolerance) return 1.45;
+
+        return 1.0;
     }
 
     pub fn updateWindow(self: *@This(), width: c_int, height: c_int) void {
