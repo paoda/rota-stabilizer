@@ -928,19 +928,15 @@ pub const Errors = struct {
         self.print("failed to set device gain to {d:.2}: {s}\n", .{ volume, c.SDL_GetError() });
     }
 
-    pub fn add_missing_file(self: *Errors, src_file: []const u8, dst_file: ?[]const u8) void {
-        if (dst_file) |file| {
-            self.print("failed to start with paths '{s}' and '{s}'\n", .{ src_file, file });
-        } else {
-            self.print("failed to start with path '{s}'\n", .{src_file});
-        }
+    pub fn add_missing_file(self: *Errors, path: []const u8) void {
+        self.print("unable to access '{s}'\n", .{path});
     }
 
     pub fn add_encoding_fallback_err(self: *Errors, device: c.AVHWDeviceType, codec_id: c.AVCodecID) void {
         const device_name = c.av_hwdevice_get_type_name(device);
         const codec_name = c.avcodec_get_name(codec_id);
 
-        self.print("failed to find {s} encoder for {s}. Defaulting to software (will be slow!)", .{ codec_name, device_name });
+        self.print("failed to find {s} encoder for {s}. Defaulting to software (will be slow!)\n", .{ codec_name, device_name });
     }
 
     pub fn add_ffmpeg_err(self: *Errors, errno: c_int) void {

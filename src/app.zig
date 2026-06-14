@@ -128,7 +128,13 @@ const PlaybackSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_device, state.volume.value, path, false);
+        decoder.* = Decoder.init(allocator, hw_device, state.volume.value, path, false) catch |e| switch (e) {
+            error.missing_file => {
+                errors.add_missing_file(path);
+                return error.ffmpeg_error; // generic now that its been reported
+            },
+            else => return e,
+        };
         errdefer decoder.deinit(allocator);
 
         const double_buffer = try allocator.create(DoubleBuffer);
@@ -374,21 +380,25 @@ const EncodeSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_dec, 0.0, src_path, true);
+        decoder.* = Decoder.init(allocator, hw_dec, 0.0, src_path, true) catch |e| switch (e) {
+            error.missing_file => {
+                errors.add_missing_file(src_path);
+                return error.ffmpeg_error; // TODO(paoda): write something here
+            },
+            else => return e,
+        };
         errdefer decoder.deinit(allocator);
 
         const encoder = try allocator.create(Encoder);
         errdefer allocator.destroy(encoder);
 
-        encoder.* = try Encoder.init(
-            .{
-                .encode_view = encode_view,
-                .decoder = decoder,
-                .bit_rate = state.bit_rate,
+        encoder.* = Encoder.init(.{ .encode_view = encode_view, .decoder = decoder, .bit_rate = state.bit_rate }, hw_enc, dst_path) catch |e| switch (e) {
+            error.missing_file => {
+                errors.add_missing_file(dst_path);
+                return error.ffmpeg_error;
             },
-            hw_enc,
-            dst_path,
-        );
+            else => return e,
+        };
         errdefer encoder.deinit();
 
         const double_buffer = try allocator.create(DoubleBuffer);
@@ -636,7 +646,6 @@ pub const App = struct {
             .encode => |paths| {
                 const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch |e| switch (e) {
                     error.ffmpeg_error => return, // reporting handled already
-                    error.missing_file => return errors.add_missing_file(paths.src_path, paths.dst_path),
                     else => return errors.add_unknown_err(e),
                 };
 
@@ -645,7 +654,6 @@ pub const App = struct {
             .playback => |path| {
                 const session = PlaybackSession.init(allocator, state, ui, path) catch |e| switch (e) {
                     error.ffmpeg_error => return, // reporting handled already
-                    error.missing_file => return errors.add_missing_file(path, null),
                     else => return errors.add_unknown_err(e),
                 };
                 self.session = .{ .playback = session };
