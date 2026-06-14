@@ -362,8 +362,7 @@ const EncodeSession = struct {
 
         const hw_dec: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
         const hw_enc: c.AVHWDeviceType = @intFromEnum(state.hw_enc);
-        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_dec)});
-        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_enc)});
+        log.debug("dec using {s}, enc using {s}", .{ getHwDeviceName(hw_dec), getHwDeviceName(hw_enc) });
 
         var render_view: Viewport = .default;
         try render_view.push(state.resolution[0], state.resolution[1]);

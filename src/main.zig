@@ -52,13 +52,14 @@ pub fn main() !void {
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
-    errors.init();
-
     var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
 
     var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
     const allocator = tracy_alloc.allocator();
+
+    errors.init(allocator);
+    defer errors.deinit();
 
     const ui = try Ui.init(allocator, startup.ui_window);
     defer ui.deinit();
@@ -78,6 +79,7 @@ pub fn main() !void {
     defer allocator.destroy(state);
 
     state.init(startup.render_target);
+    defer state.deinit();
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });

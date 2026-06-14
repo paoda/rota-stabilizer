@@ -894,9 +894,24 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
 // Errors is a method that reports errors and their context
 pub const Errors = struct {
     count: usize,
+    messages: std.ArrayList([]const u8),
 
-    pub fn init(self: *Errors) void {
-        self.* = .{ .count = 0 };
+    allocator: std.mem.Allocator,
+
+    pub fn init(self: *Errors, allocator: std.mem.Allocator) void {
+        self.* = .{
+            .count = 0,
+            .allocator = allocator,
+            .messages = .empty,
+        };
+    }
+
+    pub fn deinit(self: *Errors) void {
+        for (self.messages.items) |message| {
+            self.allocator.free(message);
+        }
+
+        self.messages.deinit(self.allocator);
     }
 
     pub fn add_local_ip_err(self: *Errors, e: std.posix.ConnectError) void {
@@ -911,17 +926,26 @@ pub const Errors = struct {
         self.print("failed to set device gain to {d:.2}: {s}\n", .{ volume, c.SDL_GetError() });
     }
 
+    pub fn add_ffmpeg_err(self: *Errors, errno: c_int) void {
+        std.debug.assert(errno < 0);
+        var buf: [0x100]u8 = undefined;
+
+        const ret = c.av_strerror(errno, &buf, buf.len);
+        if (ret < 0) @panic("TODO: add error for crash in errors");
+
+        self.print("{s} ({})\n", .{ std.mem.sliceTo(&buf, 0), errno });
+    }
+
     // TODO(paoda): maybe add a scope thing here?
     fn print(self: *Errors, comptime fmt: []const u8, args: anytype) void {
         std.debug.assert(fmt[fmt.len - 1] == '\n');
-
         self.count += 1;
 
-        if (tracy.enabled) {
-            var buf: [0x80]u8 = undefined;
-            tracy.message(.{ .text = std.fmt.bufPrint(&buf, "err: " ++ fmt, args) catch unreachable });
-        } else {
-            std.debug.print("err: " ++ fmt, args);
-        }
+        const text = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("oom in error handler");
+
+        if (tracy.enabled) tracy.message(.{ .text = text });
+        if (@import("builtin").mode == .Debug) std.debug.print("err: {s}", .{text});
+
+        self.messages.append(self.allocator, text) catch @panic("oom in error handler ArrayList");
     }
 };

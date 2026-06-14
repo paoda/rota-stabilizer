@@ -265,6 +265,8 @@ pub const gui = struct {
 
         render: RenderOptions = .{},
 
+        err_message: ?[]const u8 = null,
+
         const VideoProgress = struct {
             pub const default: @This() = .{ .duration = null, .timestamp = 0.0 };
 
@@ -288,6 +290,10 @@ pub const gui = struct {
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
             };
+        }
+
+        pub fn deinit(self: State) void {
+            if (self.err_message) |message| errors.allocator.free(message);
         }
 
         pub fn defaultHardware(self: *State) void {
@@ -350,6 +356,24 @@ pub const gui = struct {
         try drawSettings(state);
         drawVideoWindow(maybe_video);
         try drawControls(state);
+
+        if (errors.messages.items.len != 0) zgui.openPopup("Error", .{});
+
+        if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
+            defer zgui.endPopup();
+
+            const message = state.err_message orelse errors.messages.pop().?;
+            zgui.text("{s}", .{message});
+
+            if (zgui.button("OK", .{ .w = -1.0 })) {
+                errors.allocator.free(message); // FIXME(paoda): use an arena?
+                state.err_message = null;
+
+                zgui.closeCurrentPopup();
+            } else {
+                state.err_message = message;
+            }
+        }
     }
 
     fn setupDockingLayout(str_id: [:0]const u8, ui_view: Viewport) void {

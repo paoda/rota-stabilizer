@@ -4,6 +4,7 @@ const tracy = @import("tracy");
 const c = @import("../lib.zig").c;
 
 const getPixelFormatName = @import("../lib.zig").getPixelFormatName;
+const errors = &@import("../lib.zig").errors;
 const KBPS_TO_BPS = 1000;
 
 const Resolution = @import("../lib.zig").Resolution;
@@ -504,11 +505,7 @@ pub const AvFrame = struct {
 
 pub inline fn err(value: c_int) error{ffmpeg_error}!c_int {
     if (value >= 0) return value;
-    var buf: [0x100]u8 = undefined;
-    const ret = c.av_strerror(value, &buf, buf.len);
+    errors.add_ffmpeg_err(value);
 
-    if (ret < 0) std.debug.panic("paniced in ffmpeg error handler: {}", .{value});
-
-    std.debug.print("ffmpeg err: {s}\n", .{std.mem.sliceTo(&buf, 0)});
     return error.ffmpeg_error;
 }
