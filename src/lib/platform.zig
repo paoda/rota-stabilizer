@@ -12,9 +12,12 @@ const Request = @import("../app.zig").Request;
 const Action = @import("../app.zig").Action;
 const Resolution = @import("../lib.zig").Resolution;
 const Viewport = @import("../lib.zig").Viewport;
+const Errors = @import("../lib.zig").Errors;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
 
 const AV_HWDEVICE_TYPE_AMF: c_int = if (@hasDecl(c, "AV_HWDEVICE_TYPE_AMF")) c.AV_HWDEVICE_TYPE_AMF else 13;
+
+const errors = &@import("../lib.zig").errors;
 
 pub const HwDeviceType = switch (builtin.os.tag) {
     .macos => enum(c.AVHWDeviceType) {
@@ -45,6 +48,8 @@ const c = @import("../lib.zig").c;
 pub var gl_procs: gl.ProcTable = undefined;
 
 pub const Ui = struct {
+    const title: [:0]const u8 = "Rotaeno Stabilizer";
+
     window: *c.SDL_Window,
     gl_ctx: c.SDL_GLContext,
 
@@ -59,7 +64,7 @@ pub const Ui = struct {
         try errify(c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO));
         errdefer c.SDL_Quit();
 
-        try errify(c.SDL_SetAppMetadata("Rotaeno Stabilizer", version, "moe.paoda.rota-stabilizer"));
+        try errify(c.SDL_SetAppMetadata(title, version, "moe.paoda.rota-stabilizer"));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, gl.info.version_major));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, gl.info.version_minor));
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE));
@@ -67,14 +72,14 @@ pub const Ui = struct {
         try errify(c.SDL_GL_SetAttribute(c.SDL_GL_ALPHA_SIZE, 8));
 
         const window_flags: c.SDL_WindowFlags = c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE;
-        const window: *c.SDL_Window = try errify(c.SDL_CreateWindow("Rotaeno Stabilizer", width, height, window_flags));
+        const window: *c.SDL_Window = try errify(c.SDL_CreateWindow(title, width, height, window_flags));
         errdefer c.SDL_DestroyWindow(window);
 
         const gl_ctx = try errify(c.SDL_GL_CreateContext(window));
-        errdefer errify(c.SDL_GL_DestroyContext(gl_ctx)) catch {};
+        errdefer _ = c.SDL_GL_DestroyContext(gl_ctx);
 
         try errify(c.SDL_GL_MakeCurrent(window, gl_ctx));
-        errdefer errify(c.SDL_GL_MakeCurrent(window, null)) catch {};
+        errdefer _ = c.SDL_GL_MakeCurrent(window, null);
 
         if (!gl_procs.init(c.SDL_GL_GetProcAddress)) return error.gl_init_failed;
 
@@ -91,8 +96,8 @@ pub const Ui = struct {
         zgui.io.setConfigFlags(.{ .dock_enable = true });
 
         var config = zgui.FontConfig.init();
+        @memcpy(config.name[0..12], "Inter Medium");
 
-        config.name[0..12].* = "Inter Medium".*;
         _ = zgui.io.addFontFromMemoryWithConfig(default_font, 16, config, null);
 
         log.info("OpenGL device: {?s}", .{gl.GetString(gl.RENDERER)});
@@ -130,14 +135,6 @@ pub const Ui = struct {
         const mode = try errify(c.SDL_GetCurrentDisplayMode(id));
 
         return mode.*.refresh_rate;
-    }
-
-    pub fn toggleFullscreen(self: @This()) !void {
-        if (c.SDL_GetWindowFlags(self.window) & c.SDL_WINDOW_FULLSCREEN != 0) {
-            try errify(c.SDL_SetWindowFullscreen(self.window, false));
-        } else {
-            try errify(c.SDL_SetWindowFullscreen(self.window, true));
-        }
     }
 
     pub fn swap(self: @This()) !void {
@@ -203,10 +200,19 @@ pub const signal = struct {
 
     pub var should_quit: AtomicBool = .init(false); // should be global
 
-    pub fn setupHandler() !void {
+    pub fn setupHandler() void {
         switch (builtin.os.tag) {
-            .windows => try std.os.windows.SetConsoleCtrlHandler(windowsHandler, true),
-            else => std.posix.sigaction(std.posix.SIG.INT, &.{ .handler = .{ .handler = posixHandler }, .mask = std.posix.sigemptyset(), .flags = 0 }, null),
+            .windows => {
+                std.os.windows.SetConsoleCtrlHandler(windowsHandler, true) catch |e| {
+                    errors.add_win_signal_handler_err(e);
+                    // but then ignore the error
+                };
+            },
+            else => std.posix.sigaction(
+                std.posix.SIG.INT,
+                &.{ .handler = .{ .handler = posixHandler }, .mask = std.posix.sigemptyset(), .flags = 0 },
+                null,
+            ),
         }
 
         log.debug("setup {s} CTRL-C signal handler", .{@tagName(builtin.os.tag)});
@@ -238,8 +244,8 @@ pub const gui = struct {
     pub const State = struct {
         const default_volume = 0.5;
 
-        input_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
-        output_path: [std.fs.max_path_bytes:0]u8 = [_:0]u8{0} ** std.fs.max_path_bytes,
+        input_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
+        output_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
 
         hw_dec: HwDeviceType,
         hw_enc: HwDeviceType,
@@ -250,7 +256,7 @@ pub const gui = struct {
         encode_progress: f32 = 0.0,
         progress: VideoProgress = .default,
 
-        local_addr: std.net.Address,
+        local_addr: ?std.net.Address,
 
         request: ?Request = null, // session change
         action: ?Action = null,
@@ -258,6 +264,8 @@ pub const gui = struct {
         volume: VolumeState = .default,
 
         render: RenderOptions = .{},
+
+        err_message: ?[]const u8 = null,
 
         const VideoProgress = struct {
             pub const default: @This() = .{ .duration = null, .timestamp = 0.0 };
@@ -273,15 +281,19 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init(render_target: Resolution) !State {
+        pub fn init(self: *State, render_target: Resolution) void {
             const hw_dec, const hw_enc = guessHardware();
 
-            return .{
-                .local_addr = try getLocalIpAddress(),
+            self.* = .{
+                .local_addr = getLocalIpAddress(),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
             };
+        }
+
+        pub fn deinit(self: State) void {
+            if (self.err_message) |message| errors.allocator.free(message);
         }
 
         pub fn defaultHardware(self: *State) void {
@@ -344,6 +356,28 @@ pub const gui = struct {
         try drawSettings(state);
         drawVideoWindow(maybe_video);
         try drawControls(state);
+
+        if (errors.messages.items.len != 0) zgui.openPopup("Error", .{});
+
+        if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
+            defer zgui.endPopup();
+
+            const message = state.err_message orelse errors.messages.pop().?;
+            zgui.text("{s}", .{message});
+
+            zgui.spacing();
+            zgui.spacing();
+            zgui.separator();
+
+            if (zgui.button("OK", .{ .w = -1.0 })) {
+                errors.allocator.free(message); // FIXME(paoda): use an arena?
+                state.err_message = null;
+
+                zgui.closeCurrentPopup();
+            } else {
+                state.err_message = message;
+            }
+        }
     }
 
     fn setupDockingLayout(str_id: [:0]const u8, ui_view: Viewport) void {
@@ -528,7 +562,10 @@ pub const gui = struct {
                 zgui.pushItemWidth(-1.0);
                 defer zgui.popItemWidth();
 
-                _ = zgui.inputInt2("##Resolution", .{ .v = &state.resolution });
+                if (zgui.inputInt2("##Resolution", .{ .v = &state.resolution })) {
+                    state.resolution[0] = @max(1, state.resolution[0]);
+                    state.resolution[1] = @max(1, state.resolution[1]);
+                }
             }
 
             _ = zgui.tableNextColumn();
@@ -725,11 +762,23 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const addr = std.mem.toBytes(state.local_addr.in.sa.addr);
-        zgui.text("Local IP: {d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] });
+        const ip_str = if (state.local_addr) |address| blk: {
+            const addr = std.mem.toBytes(address.in.sa.addr);
+
+            var buf: [0xF]u8 = undefined;
+            break :blk std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] }) catch unreachable;
+        } else "Unknown";
+
+        zgui.text("Local IP: {s}", .{ip_str});
 
         zgui.bulletText("CTRL+Click to manually input a value!", .{});
         zgui.bulletText("For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
+
+        zgui.text("rota-stabilizer v{s}", .{version});
     }
 
     fn drawVideoWindow(maybe_video: ?VideoContext) void {
@@ -845,19 +894,25 @@ pub const gui = struct {
     }
 };
 
-/// dummy udp connection to figure out what the active local ip is
-/// FIXME(paoda): make this an optional, program shouldn't crash on no LAN
-fn getLocalIpAddress() !std.net.Address {
-    const target = try std.net.Address.parseIp4("8.8.8.8", 53);
+/// dummy udp connection to maybe figure out what the active local ip is
+fn getLocalIpAddress() ?std.net.Address {
+    const target = std.net.Address.parseIp4("8.8.8.8", 53) catch return null;
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
+    const sock = std.posix.socket(
+        std.posix.AF.INET,
+        std.posix.SOCK.DGRAM,
+        std.posix.IPPROTO.UDP,
+    ) catch return null;
     defer std.posix.close(sock);
 
-    try std.posix.connect(sock, &target.any, target.getOsSockLen());
+    std.posix.connect(sock, &target.any, target.getOsSockLen()) catch |e| {
+        errors.add_local_ip_err(e);
+        return null;
+    };
 
     var local_addr: std.net.Address = undefined;
     var addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(local_addr.any));
-    try std.posix.getsockname(sock, &local_addr.any, &addr_len);
+    std.posix.getsockname(sock, &local_addr.any, &addr_len) catch return null;
 
     return local_addr;
 }

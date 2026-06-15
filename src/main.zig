@@ -20,6 +20,7 @@ const GpuResourceManager = @import("lib.zig").GpuResourceManager;
 const PixelBufferPool = GpuResourceManager.PixelBufferPool;
 const Ui = @import("lib/platform.zig").Ui;
 const App = @import("app.zig").App;
+const Errors = @import("lib.zig").Errors;
 
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
@@ -45,6 +46,8 @@ pub const startup = struct {
 pub const tracy_impl = @import("tracy_impl"); // configured from build.zig
 pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
 
+const errors = &@import("lib.zig").errors;
+
 pub fn main() !void {
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
@@ -55,6 +58,9 @@ pub fn main() !void {
     var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
     const allocator = tracy_alloc.allocator();
 
+    errors.init(allocator);
+    defer errors.deinit();
+
     const ui = try Ui.init(allocator, startup.ui_window);
     defer ui.deinit();
 
@@ -64,7 +70,7 @@ pub fn main() !void {
     try ui_view.push(ui_width, ui_height);
 
     if (builtin.mode == .Debug) c.av_log_set_level(c.AV_LOG_VERBOSE);
-    try signal.setupHandler(); // NB: Has to come after SDL Init
+    signal.setupHandler(); // NB: Has to come after SDL Init
 
     var app: App = .default;
     defer app.deinit(allocator);
@@ -72,7 +78,8 @@ pub fn main() !void {
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    state.* = try .init(startup.render_target);
+    state.init(startup.render_target);
+    defer state.deinit();
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
@@ -97,7 +104,7 @@ pub fn main() !void {
         gl.ClearColor(0, 0, 0, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
-        try app.poll(allocator, ui, state);
+        app.poll(allocator, ui, state);
         try app.run(state.render);
 
         try platform.gui.draw(state, ui_view, app.video());
@@ -116,7 +123,7 @@ pub const RenderOptions = struct {
     ring_opacity: f32 = 0.3,
     circle_opacity: f32 = 0.1,
 
-    tint: [3]f32 = [_]f32{0.0} ** 3,
+    tint: [3]f32 = @splat(0.0),
     tint_intensity: f32 = 0.0,
 
     zoom: f32 = 1.0,
@@ -463,10 +470,13 @@ pub const Camera = struct {
     }
 
     fn defaultZoom(window_aspect: f32) f32 {
-        if (@abs(window_aspect - 1.0) <= std.math.floatEps(f32)) return 1.0;
-        if (window_aspect > 1.0) return 1.45; // landscape
+        const target_aspect = 16.0 / 9.0;
+        const tolerance = 0.01; // FIXME(paoda): is this reasonable?
 
-        return 1.0; // portrait
+        // NB: nice default for 16:9 video
+        if (@abs(window_aspect - target_aspect) <= tolerance) return 1.45;
+
+        return 1.0;
     }
 
     pub fn updateWindow(self: *@This(), width: c_int, height: c_int) void {
@@ -641,7 +651,7 @@ pub fn shutdown(queues: *Decoder.Queues) void {
     queues.frame.interrupt();
 }
 
-pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) !f64 {
+pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) ?f64 {
     const FrameQueue = @import("lib/codec.zig").FrameQueue;
 
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -649,7 +659,7 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
 
     const frame = decoder.queue.frame.pop() orelse {
         shutdown(&decoder.queue);
-        return error.early_exit;
+        return null;
     };
     defer decoder.queue.frame.recycle(frame);
 

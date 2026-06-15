@@ -23,6 +23,7 @@ const Decoder = @import("lib/codec.zig").Decoder;
 const RenderOptions = @import("main.zig").RenderOptions;
 
 const signal = @import("lib/platform.zig").signal;
+const errors = &@import("lib.zig").errors;
 
 const preload = @import("main.zig").preload;
 const render = @import("main.zig").render;
@@ -99,6 +100,7 @@ const PlaybackSession = struct {
 
     next_frame: ?*c.AVFrame = null,
 
+    const InitError = error{preload_fail} || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError;
     const log = std.log.scoped(.playback_session);
 
     fn stop(self: *const @This()) void {
@@ -116,7 +118,7 @@ const PlaybackSession = struct {
         self.decoder.queue.frame.interrupt();
     }
 
-    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, path: []const u8) !PlaybackSession {
+    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, path: []const u8) InitError!PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
 
@@ -126,7 +128,13 @@ const PlaybackSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_device, state.volume.value, path, false);
+        decoder.init(allocator, hw_device, state.volume.value, path, false) catch |e| switch (e) {
+            error.missing_file => {
+                errors.add_missing_file(path);
+                return error.ffmpeg_error; // generic now that its been reported
+            },
+            else => return e,
+        };
         errdefer decoder.deinit(allocator);
 
         const double_buffer = try allocator.create(DoubleBuffer);
@@ -146,7 +154,7 @@ const PlaybackSession = struct {
         const camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
         const angle_calc = try AngleCalc.init(manager, camera);
 
-        const start_time = try preload(manager, decoder, double_buffer);
+        const start_time = preload(manager, decoder, double_buffer) orelse return error.preload_fail;
         log.debug("video start time: {d}s", .{start_time});
 
         var fbs: FbStack = .default;
@@ -361,8 +369,7 @@ const EncodeSession = struct {
 
         const hw_dec: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
         const hw_enc: c.AVHWDeviceType = @intFromEnum(state.hw_enc);
-        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_dec)});
-        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_enc)});
+        log.debug("dec using {s}, enc using {s}", .{ getHwDeviceName(hw_dec), getHwDeviceName(hw_enc) });
 
         var render_view: Viewport = .default;
         try render_view.push(state.resolution[0], state.resolution[1]);
@@ -373,21 +380,25 @@ const EncodeSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = try Decoder.init(allocator, hw_dec, 0.0, src_path, true);
+        decoder.init(allocator, hw_dec, 0.0, src_path, true) catch |e| switch (e) {
+            error.missing_file => {
+                errors.add_missing_file(src_path);
+                return error.ffmpeg_error; // TODO(paoda): write something here
+            },
+            else => return e,
+        };
         errdefer decoder.deinit(allocator);
 
         const encoder = try allocator.create(Encoder);
         errdefer allocator.destroy(encoder);
 
-        encoder.* = try Encoder.init(
-            .{
-                .encode_view = encode_view,
-                .decoder = decoder,
-                .bit_rate = state.bit_rate,
+        encoder.init(.{ .encode_view = encode_view, .decoder = decoder, .bit_rate = state.bit_rate }, hw_enc, dst_path) catch |e| switch (e) {
+            error.missing_file => {
+                errors.add_missing_file(dst_path);
+                return error.ffmpeg_error;
             },
-            hw_enc,
-            dst_path,
-        );
+            else => return e,
+        };
         errdefer encoder.deinit();
 
         const double_buffer = try allocator.create(DoubleBuffer);
@@ -410,7 +421,7 @@ const EncodeSession = struct {
 
         var fbs: FbStack = .default;
 
-        _ = try preload(manager, decoder, double_buffer);
+        _ = preload(manager, decoder, double_buffer) orelse return error.preload_fail;
         try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
@@ -586,18 +597,19 @@ pub const App = struct {
 
     const log = std.log.scoped(.app);
 
-    pub fn poll(self: *App, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) !void {
+    pub fn poll(self: *App, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.poll" });
         defer zone.end();
 
         switch (self.session) {
             .encode => {
+                // update progress
                 const num: f32 = @floatFromInt(self.session.encode.frame_count);
                 const den: f32 = @floatFromInt(self.session.encode.frame_total);
                 state.encode_progress = num / den;
 
                 if (self.session.encode.is_finished) {
-                    state.request = .idle;
+                    state.request = .idle; // reset to idle when encoding is complete
 
                     if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
                         log.warn("encode_progress finished at {d:.2}", .{state.encode_progress});
@@ -605,8 +617,9 @@ pub const App = struct {
                 }
             },
             .playback => |*playback| {
-                const audio = &(playback.decoder.audio_clock orelse @panic("invariant broken"));
+                const audio = &playback.decoder.audio_clock.?;
 
+                // update ui to reflect current state
                 state.volume.value = audio.volume;
                 state.render.zoom = playback.camera.zoom;
                 state.progress.timestamp = @floatCast(playback.double_buffer.back().displayTime());
@@ -617,7 +630,7 @@ pub const App = struct {
 
                     switch (action) {
                         .SetCameraZoom => |zoom| playback.camera.zoom = zoom,
-                        .SetVolume => |volume| try audio.setVolume(volume),
+                        .SetVolume => |volume| audio.setVolume(volume),
                         .Seek => |timestamp| log.warn("TODO: Seek to {d:.3}s", .{timestamp}),
                     }
                 }
@@ -631,11 +644,18 @@ pub const App = struct {
         switch (request) {
             .idle => {}, // already idle
             .encode => |paths| {
-                const session = try EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path);
+                const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch |e| switch (e) {
+                    error.ffmpeg_error => return, // reporting handled already
+                    else => return errors.add_unknown_err(e),
+                };
+
                 self.session = .{ .encode = session };
             },
             .playback => |path| {
-                const session = try PlaybackSession.init(allocator, state, ui, path);
+                const session = PlaybackSession.init(allocator, state, ui, path) catch |e| switch (e) {
+                    error.ffmpeg_error => return, // reporting handled already
+                    else => return errors.add_unknown_err(e),
+                };
                 self.session = .{ .playback = session };
             },
         }

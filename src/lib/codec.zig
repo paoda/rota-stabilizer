@@ -18,6 +18,8 @@ const AvFrame = @import("libav.zig").AvFrame;
 const Viewport = @import("../lib.zig").Viewport;
 const Resolution = @import("../lib.zig").Resolution;
 
+const errors = &@import("../lib.zig").errors;
+
 // TODO: some universal thread sync primitive
 
 pub const packet = struct {
@@ -185,6 +187,9 @@ pub const audio = struct {
 
         volume: f32,
 
+        // TODO(paoda): this needs to be an import from sdl.Error or something
+        pub const InitError = error{sdl_error};
+
         const log = std.log.scoped(.audio);
 
         const AudioPll = struct {
@@ -234,7 +239,7 @@ pub const audio = struct {
             }
         };
 
-        pub fn init(ctx: *const dec.AvCodecContext, volume: f32) !@This() {
+        pub fn init(ctx: *const dec.AvCodecContext, volume: f32) InitError!@This() {
             var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             desired.freq = ctx.inner.?.sample_rate;
             desired.format = c.SDL_AUDIO_F32;
@@ -266,9 +271,14 @@ pub const audio = struct {
             };
         }
 
-        pub fn setVolume(self: *@This(), volume: f32) !void {
-            self.volume = @max(0.0, @min(1.0, volume));
-            try errify(c.SDL_SetAudioStreamGain(self.stream, self.volume));
+        pub fn setVolume(self: *@This(), volume: f32) void {
+            const next = @max(0.0, @min(1.0, volume));
+
+            if (!c.SDL_SetAudioStreamGain(self.stream, next)) {
+                return errors.add_set_volume_err(next);
+            }
+
+            self.volume = next;
         }
 
         pub fn deinit(self: @This()) void {
@@ -781,13 +791,14 @@ pub const FrameQueue = struct {
 
     const Slot = struct { frame: []c.AVFrame, state: []State };
     const State = enum { empty, in_use, ready_to_reuse, writing };
-    const Error = error{ ffmpeg_error, invalid_size, early_exit } || std.mem.Allocator.Error;
+    const Error = error{ invalid_size, early_exit };
+    pub const InitError = std.mem.Allocator.Error || libav.Error;
 
     pub const capacity = 0x20;
 
     // INVARIANT: This is an SPSC Queue
 
-    pub fn init(allocator: std.mem.Allocator, opt: Resolution) Error!FrameQueue {
+    pub fn init(allocator: std.mem.Allocator, opt: Resolution) InitError!FrameQueue {
         comptime std.debug.assert(std.math.isPowerOfTwo(capacity));
 
         const frames = try allocator.alloc(c.AVFrame, capacity);
@@ -968,6 +979,13 @@ pub const Decoder = struct {
     const PacketQueue = packet.Queue;
     const AudioClock = audio.Clock;
 
+    pub const InitError = error{
+        ffmpeg_error,
+        unsupported_display_matrix,
+        unsupported_colour_depth,
+        unsupported_orientation,
+    } || std.mem.Allocator.Error || FrameQueue.InitError || AudioClock.InitError || std.Thread.SpawnError;
+
     fmt_ctx: dec.AvFormatContext,
 
     video_ctx: *dec.AvCodecContext,
@@ -1028,19 +1046,25 @@ pub const Decoder = struct {
     }
 
     // TODO: DecoderOptions
-    pub fn init(allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, volume: f32, path: []const u8, headless: bool) !Decoder {
+    pub fn init(self: *Decoder, allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, volume: f32, path: []const u8, headless: bool) InitError!void {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
         fmt_ctx.dump();
 
-        var video_ctx = try dec.AvCodecContext.init(allocator, .video, fmt_ctx, .{ .dev_type = hw_device });
-        errdefer video_ctx.deinit(allocator);
+        const video_ctx = try allocator.create(dec.AvCodecContext);
+        errdefer allocator.destroy(video_ctx);
+
+        try video_ctx.init(.video, fmt_ctx, .{ .dev_type = hw_device });
+        errdefer video_ctx.deinit();
 
         video_ctx.dump();
 
-        var audio_ctx = try dec.AvCodecContext.init(allocator, .audio, fmt_ctx, .{});
-        errdefer audio_ctx.deinit(allocator);
+        const audio_ctx = try allocator.create(dec.AvCodecContext);
+        errdefer allocator.destroy(audio_ctx);
+
+        try audio_ctx.init(.audio, fmt_ctx, .{});
+        errdefer audio_ctx.deinit();
 
         var display_rotation: i16 = 0;
 
@@ -1108,7 +1132,7 @@ pub const Decoder = struct {
         const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx, volume);
         errdefer if (audio_clock) |clock| clock.deinit();
 
-        return .{
+        self.* = .{
             .fmt_ctx = fmt_ctx,
             .video_ctx = video_ctx,
             .audio_ctx = audio_ctx,
@@ -1133,8 +1157,11 @@ pub const Decoder = struct {
         if (self.audio_clock) |clock| clock.deinit();
         self.queue.deinit(allocator);
 
-        self.audio_ctx.deinit(allocator);
-        self.video_ctx.deinit(allocator);
+        self.audio_ctx.deinit();
+        allocator.destroy(self.audio_ctx);
+
+        self.video_ctx.deinit();
+        allocator.destroy(self.video_ctx);
 
         self.fmt_ctx.deinit();
     }
@@ -1161,7 +1188,7 @@ pub const Decoder = struct {
         return end_pts * c.av_q2d(st.time_base);
     }
 
-    pub fn spawn(self: *Decoder, headless: bool) !Handles {
+    pub fn spawn(self: *Decoder, headless: bool) std.Thread.SpawnError!Handles {
         const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{self});
         const video_handle = try std.Thread.spawn(.{}, video.decode, .{self});
         const audio_handle = if (headless) null else try std.Thread.spawn(.{}, audio.decode, .{self});
@@ -1202,17 +1229,19 @@ pub const Encoder = struct {
         decoder: *const Decoder,
     };
 
-    pub fn init(opt: Options, device_type: ?c.AVHWDeviceType, path: []const u8) !Encoder {
-        const codec_id = c.AV_CODEC_ID_HEVC;
+    pub fn init(self: *Encoder, opt: Options, device_type: ?c.AVHWDeviceType, path: []const u8) !void {
+        const codec_id = c.AV_CODEC_ID_HEVC; // FIXME(paoda): support H.264
 
         if (device_type) |dev| {
-            return initHardware(opt, dev, codec_id, path) catch blk: {
-                log.err("failed to set up hardware device, defaulting to software", .{});
-                break :blk initSoftware(opt, codec_id, path);
+            self.initHardware(opt, dev, codec_id, path) catch {
+                errors.add_encoding_fallback_err(dev, codec_id);
+                try self.initSoftware(opt, codec_id, path);
             };
+
+            return;
         }
 
-        return initSoftware(opt, codec_id, path);
+        try self.initSoftware(opt, codec_id, path);
     }
 
     pub fn deinit(self: *Encoder) void {
@@ -1231,7 +1260,7 @@ pub const Encoder = struct {
         self.* = undefined;
     }
 
-    fn initShared(opt: Options, codec: enc.AvCodec, sw_pix_fmt: c.AVPixelFormat, path: []const u8) !Encoder {
+    fn initShared(self: *Encoder, opt: Options, codec: enc.AvCodec, sw_pix_fmt: c.AVPixelFormat, path: []const u8) !void {
         var fmt_ctx = try enc.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
@@ -1266,7 +1295,7 @@ pub const Encoder = struct {
         _ = try libav.err(c.avio_open(&fmt_ctx.ptr().pb, path.ptr, c.AVIO_FLAG_WRITE));
         _ = try libav.err(c.avformat_write_header(fmt_ctx.ptr(), null));
 
-        return .{
+        self.* = .{
             .resolution = encode_resolution,
             .codec_ctx = codec_ctx,
             .fmt_ctx = fmt_ctx,
@@ -1331,14 +1360,14 @@ pub const Encoder = struct {
         };
     }
 
-    fn initHardware(opt: Options, device_type: c.AVHWDeviceType, codec_id: c.AVCodecID, path: []const u8) !Encoder {
-        const codec = enc.AvCodec.findHardware(device_type, codec_id) orelse return initSoftware(opt, codec_id, path);
-        return initShared(opt, codec, c.AV_PIX_FMT_NV12, path);
+    fn initHardware(self: *Encoder, opt: Options, device_type: c.AVHWDeviceType, codec_id: c.AVCodecID, path: []const u8) !void {
+        const codec = enc.AvCodec.findHardware(device_type, codec_id) orelse return error.missing_encoder;
+        try self.initShared(opt, codec, c.AV_PIX_FMT_NV12, path);
     }
 
-    fn initSoftware(opt: Options, codec_id: c.AVCodecID, path: []const u8) !Encoder {
+    fn initSoftware(self: *Encoder, opt: Options, codec_id: c.AVCodecID, path: []const u8) !void {
         const codec = enc.AvCodec.findSoftware(codec_id);
-        return initShared(opt, codec, codec.pix_fmt, path);
+        try self.initShared(opt, codec, codec.pix_fmt, path);
     }
 
     pub fn encodeNv12Frame(self: *Encoder, y_buf: []const u8, uv_buf: []const u8, frame_pts: i64) !void {
