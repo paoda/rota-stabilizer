@@ -128,7 +128,7 @@ const PlaybackSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = Decoder.init(allocator, hw_device, state.volume.value, path, false) catch |e| switch (e) {
+        decoder.init(allocator, hw_device, state.volume.value, path, false) catch |e| switch (e) {
             error.missing_file => {
                 errors.add_missing_file(path);
                 return error.ffmpeg_error; // generic now that its been reported
@@ -380,7 +380,7 @@ const EncodeSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        decoder.* = Decoder.init(allocator, hw_dec, 0.0, src_path, true) catch |e| switch (e) {
+        decoder.init(allocator, hw_dec, 0.0, src_path, true) catch |e| switch (e) {
             error.missing_file => {
                 errors.add_missing_file(src_path);
                 return error.ffmpeg_error; // TODO(paoda): write something here
@@ -392,7 +392,7 @@ const EncodeSession = struct {
         const encoder = try allocator.create(Encoder);
         errdefer allocator.destroy(encoder);
 
-        encoder.* = Encoder.init(.{ .encode_view = encode_view, .decoder = decoder, .bit_rate = state.bit_rate }, hw_enc, dst_path) catch |e| switch (e) {
+        encoder.init(.{ .encode_view = encode_view, .decoder = decoder, .bit_rate = state.bit_rate }, hw_enc, dst_path) catch |e| switch (e) {
             error.missing_file => {
                 errors.add_missing_file(dst_path);
                 return error.ffmpeg_error;
