@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) !void {
     const sdl_lib = sdl.artifact("SDL3");
     exe_mod.linkLibrary(sdl_lib);
 
-    const zgui = b.dependency("zgui", .{ .shared = false, .backend = .sdl3_opengl3 });
+    const zgui = b.dependency("zgui", .{ .target = target, .optimize = optimize, .shared = false, .backend = .sdl3_opengl3 });
     exe_mod.addImport("zgui", zgui.module("root"));
 
     const zgui_lib = zgui.artifact("imgui");
