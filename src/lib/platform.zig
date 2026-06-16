@@ -4,6 +4,7 @@ const gl = @import("gl");
 const tracy = @import("tracy");
 const zgui = @import("zgui");
 const nfd = @import("znfde");
+const known_folders = @import("known-folders");
 
 const version = @import("build.zig.zon").version;
 const default_font = @embedFile("asset/Inter-Medium.ttf");
@@ -420,7 +421,7 @@ pub const gui = struct {
 
         if (!showing) return;
 
-        drawActionButtons(state);
+        try drawActionButtons(allocator, state);
 
         zgui.spacing();
 
@@ -481,9 +482,12 @@ pub const gui = struct {
 
         zgui.sameLine(.{});
         if (zgui.button("Browse...##output", .{})) {
+            const default_path = try getVideoDirectory(allocator);
+            defer if (default_path) |path| allocator.free(path);
+
             const maybe_path = try nfd.saveFileDialog(allocator, &.{
                 .{ .name = "Screen Recordings", .spec = "mp4,mkv,mov,webm" },
-            }, null, "output.mp4");
+            }, default_path, "output.mp4");
 
             if (maybe_path) |path| {
                 setPath(&state.output_path, path);
@@ -492,7 +496,7 @@ pub const gui = struct {
         }
     }
 
-    fn drawActionButtons(state: *State) void {
+    fn drawActionButtons(allocator: std.mem.Allocator, state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -519,7 +523,17 @@ pub const gui = struct {
         if (zgui.button("\u{25cf} Encode", .{ .w = 80, .h = 30 })) {
             const path = blk: {
                 const str = std.mem.sliceTo(state.output_path[0..], 0);
-                if (str.len == 0) setPath(&state.output_path, "output.mp4");
+
+                if (str.len == 0) {
+                    if (try getVideoDirectory(allocator)) |video_path| {
+                        defer allocator.free(video_path);
+
+                        const file_path = try std.fs.path.joinZ(allocator, &.{ video_path, "output.mp4" });
+                        defer allocator.free(file_path);
+
+                        setPath(&state.output_path, file_path);
+                    }
+                }
 
                 break :blk std.mem.sliceTo(state.output_path[0..], 0);
             };
@@ -932,4 +946,14 @@ fn getLocalIpAddress() ?std.net.Address {
     std.posix.getsockname(sock, &local_addr.any, &addr_len) catch return null;
 
     return local_addr;
+}
+
+fn getVideoDirectory(allocator: std.mem.Allocator) !?[:0]const u8 {
+    const base_path = try known_folders.getPath(allocator, .videos) orelse return null;
+    defer allocator.free(base_path);
+
+    const path = try std.fs.path.joinZ(allocator, &.{ base_path, "rota-stabilizer" });
+    std.fs.makeDirAbsolute(path) catch |e| if (e != error.PathAlreadyExists) return e;
+
+    return path;
 }

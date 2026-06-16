@@ -61,6 +61,10 @@
             .url = "git+https://codeberg.org/cyberegoorg/znfde#1e43e2b609d5f8c2008964615b8a0843e59aea5f",
             .hash = "znfde-0.2.0-yqA0PjceBgCK2rdhlZFoaPJTwYiY5EkSTutZgM-iZV-H",
         },
+        .known_folders = .{
+            .url = "git+https://github.com/ziglibs/known-folders#83d39161eac2ed6f37ad3cb4d9dd518696ce90bb",
+            .hash = "known_folders-0.0.0-Fy-PJv3LAAABBRVoZWVrKZdyLoUfl5VRY5fqRRRdnF5L",
+        },
     },
     .paths = .{
         "build.zig",

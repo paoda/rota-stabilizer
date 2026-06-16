@@ -45,6 +45,9 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addImport("znfde", znfde.module("root"));
     exe_mod.linkLibrary(znfde.artifact("nfde"));
 
+    const known_folders = b.dependency("known_folders", .{ .target = target, .optimize = optimize });
+    exe_mod.addImport("known-folders", known_folders.module("known-folders"));
+
     const sdl = switch (target.result.os.tag) {
         .macos => blk: {
             const result = try std.process.Child.run(.{
