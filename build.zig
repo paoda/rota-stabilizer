@@ -41,8 +41,9 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addAnonymousImport("build.zig.zon", .{ .root_source_file = b.path("build.zig.zon") });
     exe_mod.addAnonymousImport("asset/Inter-Medium.ttf", .{ .root_source_file = b.path("asset/Inter-Medium.ttf") });
 
-    const nfd = b.dependency("nfd", .{ .target = target, .optimize = optimize });
-    exe_mod.addImport("nfd", nfd.module("nfd"));
+    const znfde = b.dependency("znfde", .{ .target = target, .optimize = optimize, .with_portal = true });
+    exe_mod.addImport("znfde", znfde.module("root"));
+    exe_mod.linkLibrary(znfde.artifact("nfde"));
 
     const sdl = switch (target.result.os.tag) {
         .macos => blk: {
