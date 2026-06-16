@@ -3,7 +3,8 @@ const builtin = @import("builtin");
 const gl = @import("gl");
 const tracy = @import("tracy");
 const zgui = @import("zgui");
-const nfd = @import("nfd");
+const nfd = @import("znfde");
+const known_folders = @import("known-folders");
 
 const version = @import("build.zig.zon").version;
 const default_font = @embedFile("asset/Inter-Medium.ttf");
@@ -108,10 +109,15 @@ pub const Ui = struct {
         gl.Disable(gl.FRAMEBUFFER_SRGB);
         _ = c.SDL_GL_SetSwapInterval(1);
 
+        try nfd.init();
+        errdefer nfd.deinit();
+
         return .{ .window = window, .gl_ctx = gl_ctx };
     }
 
     pub fn deinit(self: @This()) void {
+        nfd.deinit();
+
         zgui.backend.deinit();
         zgui.deinit();
 
@@ -301,7 +307,7 @@ pub const gui = struct {
         }
     };
 
-    pub fn draw(state: *State, ui_view: Viewport, maybe_video: ?VideoContext) !void {
+    pub fn draw(allocator: std.mem.Allocator, state: *State, ui_view: Viewport, maybe_video: ?VideoContext) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -353,7 +359,7 @@ pub const gui = struct {
         zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
         defer zgui.popStyleVar(.{});
 
-        try drawSettings(state);
+        try drawSettings(allocator, state);
         drawVideoWindow(maybe_video);
         try drawControls(state);
 
@@ -406,7 +412,7 @@ pub const gui = struct {
         zgui.dockBuilderFinish(dock_id);
     }
 
-    fn drawSettings(state: *State) !void {
+    fn drawSettings(allocator: std.mem.Allocator, state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -415,11 +421,11 @@ pub const gui = struct {
 
         if (!showing) return;
 
-        drawActionButtons(state);
+        try drawActionButtons(allocator, state);
 
         zgui.spacing();
 
-        try drawMediaSettings(state);
+        try drawMediaSettings(allocator, state);
 
         zgui.spacing();
         zgui.separator();
@@ -451,11 +457,9 @@ pub const gui = struct {
         }
     }
 
-    fn drawMediaSettings(state: *State) !void {
+    fn drawMediaSettings(allocator: std.mem.Allocator, state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
-
-        const filter = "mp4,mkv,mov,webm";
 
         zgui.pushItemWidth(-zgui.calcTextSize("Browse...", .{})[0] - 20.0);
         defer zgui.popItemWidth();
@@ -464,18 +468,35 @@ pub const gui = struct {
 
         zgui.sameLine(.{});
         if (zgui.button("Browse...##input", .{})) {
-            if (try nfd.openFileDialog(filter, null)) |path| setPath(&state.input_path, path);
+            const maybe_path = try nfd.openFileDialog(allocator, &.{
+                .{ .name = "Screen Recordings", .spec = "mp4,mkv,mov,webm" },
+            }, null);
+
+            if (maybe_path) |path| {
+                setPath(&state.input_path, path);
+                allocator.free(path);
+            }
         }
 
         _ = zgui.inputTextWithHint("##Output", .{ .hint = "Output Video Path (Optional)...", .buf = &state.output_path });
 
         zgui.sameLine(.{});
         if (zgui.button("Browse...##output", .{})) {
-            if (try nfd.saveFileDialog(filter, null)) |path| setPath(&state.output_path, path);
+            const default_path = try getVideoDirectory(allocator);
+            defer if (default_path) |path| allocator.free(path);
+
+            const maybe_path = try nfd.saveFileDialog(allocator, &.{
+                .{ .name = "Screen Recordings", .spec = "mp4,mkv,mov,webm" },
+            }, default_path, "output.mp4");
+
+            if (maybe_path) |path| {
+                setPath(&state.output_path, path);
+                allocator.free(path);
+            }
         }
     }
 
-    fn drawActionButtons(state: *State) void {
+    fn drawActionButtons(allocator: std.mem.Allocator, state: *State) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -502,7 +523,17 @@ pub const gui = struct {
         if (zgui.button("\u{25cf} Encode", .{ .w = 80, .h = 30 })) {
             const path = blk: {
                 const str = std.mem.sliceTo(state.output_path[0..], 0);
-                if (str.len == 0) setPath(&state.output_path, "output.mp4");
+
+                if (str.len == 0) {
+                    if (try getVideoDirectory(allocator)) |video_path| {
+                        defer allocator.free(video_path);
+
+                        const file_path = try std.fs.path.joinZ(allocator, &.{ video_path, "output.mp4" });
+                        defer allocator.free(file_path);
+
+                        setPath(&state.output_path, file_path);
+                    }
+                }
 
                 break :blk std.mem.sliceTo(state.output_path[0..], 0);
             };
@@ -915,4 +946,14 @@ fn getLocalIpAddress() ?std.net.Address {
     std.posix.getsockname(sock, &local_addr.any, &addr_len) catch return null;
 
     return local_addr;
+}
+
+fn getVideoDirectory(allocator: std.mem.Allocator) !?[:0]const u8 {
+    const base_path = try known_folders.getPath(allocator, .videos) orelse return null;
+    defer allocator.free(base_path);
+
+    const path = try std.fs.path.joinZ(allocator, &.{ base_path, "rota-stabilizer" });
+    std.fs.makeDirAbsolute(path) catch |e| if (e != error.PathAlreadyExists) return e;
+
+    return path;
 }

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Rota Stabilizer
+Comment=Rotaeno Screen Recording Stabilizer
+Exec=rota-stabilizer
+Icon=moe.paoda.rota-stabilizer
+# TODO(paoda): set this false eventually?
+Terminal=true
+Type=Application
+Categories=AudioVideoEditing;ImageProcessing;

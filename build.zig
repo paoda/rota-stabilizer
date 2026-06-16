@@ -41,8 +41,12 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addAnonymousImport("build.zig.zon", .{ .root_source_file = b.path("build.zig.zon") });
     exe_mod.addAnonymousImport("asset/Inter-Medium.ttf", .{ .root_source_file = b.path("asset/Inter-Medium.ttf") });
 
-    const nfd = b.dependency("nfd", .{ .target = target, .optimize = optimize });
-    exe_mod.addImport("nfd", nfd.module("nfd"));
+    const znfde = b.dependency("znfde", .{ .target = target, .optimize = optimize, .with_portal = true });
+    exe_mod.addImport("znfde", znfde.module("root"));
+    exe_mod.linkLibrary(znfde.artifact("nfde"));
+
+    const known_folders = b.dependency("known_folders", .{ .target = target, .optimize = optimize });
+    exe_mod.addImport("known-folders", known_folders.module("known-folders"));
 
     const sdl = switch (target.result.os.tag) {
         .macos => blk: {
@@ -68,7 +72,7 @@ pub fn build(b: *std.Build) !void {
     const sdl_lib = sdl.artifact("SDL3");
     exe_mod.linkLibrary(sdl_lib);
 
-    const zgui = b.dependency("zgui", .{ .shared = false, .backend = .sdl3_opengl3 });
+    const zgui = b.dependency("zgui", .{ .target = target, .optimize = optimize, .shared = false, .backend = .sdl3_opengl3 });
     exe_mod.addImport("zgui", zgui.module("root"));
 
     const zgui_lib = zgui.artifact("imgui");

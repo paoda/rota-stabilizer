@@ -107,7 +107,7 @@ pub fn main() !void {
         app.poll(allocator, ui, state);
         try app.run(state.render);
 
-        try platform.gui.draw(state, ui_view, app.video());
+        try platform.gui.draw(allocator, state, ui_view, app.video());
 
         try ui.swap();
     }

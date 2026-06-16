@@ -57,9 +57,13 @@
             .url = "git+https://github.com/zig-gamedev/zgui#d6c4f53c2fbd54673790dc2a5208160a3586ef29",
             .hash = "zgui-0.6.0-dev--L6sZCJKbgBZGCzVMcwD0bNGmpK6yO-UoIESHX5JiRet",
         },
-        .nfd = .{
-            .url = "git+https://github.com/fabioarnold/nfd-zig#031b6b08c28b4c209fde1d7cfc2387aa956febb2",
-            .hash = "nfd-0.1.0-y82kbsSLBgBgSEauGFsHxH7RmcL4AEOqZEqOvA8-NEFq",
+        .znfde = .{
+            .url = "git+https://codeberg.org/cyberegoorg/znfde#1e43e2b609d5f8c2008964615b8a0843e59aea5f",
+            .hash = "znfde-0.2.0-yqA0PjceBgCK2rdhlZFoaPJTwYiY5EkSTutZgM-iZV-H",
+        },
+        .known_folders = .{
+            .url = "git+https://github.com/ziglibs/known-folders#83d39161eac2ed6f37ad3cb4d9dd518696ce90bb",
+            .hash = "known_folders-0.0.0-Fy-PJv3LAAABBRVoZWVrKZdyLoUfl5VRY5fqRRRdnF5L",
         },
     },
     .paths = .{
