@@ -33,6 +33,7 @@ modules:
         ZIG_GLOBAL_CACHE_DIR: .zig-cache
     build-commands:
       - zig build -Doptimize=ReleaseSafe -Dcpu=x86_64_v3 install -p /app
+      - install -Dm644 moe.paoda.rota-stabilizer.desktop -t /app/share/applications/
     sources:
       - type: dir
         path: .
