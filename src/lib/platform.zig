@@ -313,41 +313,29 @@ pub const gui = struct {
 
         const width, const height = ui_view.get();
 
-        {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.newFrame" });
-            defer z.end();
-
-            zgui.backend.newFrame(@intCast(width), @intCast(height));
-        }
-        defer {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.draw" });
-            defer z.end();
-
-            zgui.backend.draw();
-        }
+        zgui.backend.newFrame(@intCast(width), @intCast(height));
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
-        const view_pos = zgui.getMainViewport().getWorkPos();
+        {
+            const view_pos = zgui.getMainViewport().getWorkPos();
+            zgui.setNextWindowPos(.{ .x = view_pos[0], .y = view_pos[1], .cond = .always });
+            zgui.setNextWindowSize(.{ .w = @floatFromInt(width), .h = @floatFromInt(height), .cond = .always });
 
-        zgui.setNextWindowPos(.{ .x = view_pos[0], .y = view_pos[1], .cond = .always });
-        zgui.setNextWindowSize(.{ .w = @floatFromInt(width), .h = @floatFromInt(height), .cond = .always });
+            _ = zgui.begin("MainDockSpace", .{
+                .flags = .{
+                    .no_title_bar = true,
+                    .no_move = true,
+                    .no_resize = true,
+                    .no_collapse = true,
+                    .no_bring_to_front_on_focus = true,
+                    .no_nav_focus = true,
+                    .no_docking = true,
+                    .no_background = true,
+                },
+            });
+            defer zgui.end();
 
-        const show_dockspace = zgui.begin("MainDockSpace", .{
-            .flags = .{
-                .no_title_bar = true,
-                .no_move = true,
-                .no_resize = true,
-                .no_collapse = true,
-                .no_bring_to_front_on_focus = true,
-                .no_nav_focus = true,
-                .no_docking = true,
-                .no_background = true,
-            },
-        });
-        defer zgui.end();
-
-        if (show_dockspace) {
             if (!built_layout) {
                 setupDockingLayout("MainDockSpace", ui_view);
                 built_layout = true;
@@ -356,33 +344,42 @@ pub const gui = struct {
             _ = zgui.dockSpace("MainDockSpace", .{ 0.0, 0.0 }, .{ .passthru_central_node = true });
         }
 
-        zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
-        defer zgui.popStyleVar(.{});
+        {
+            zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
+            defer zgui.popStyleVar(.{});
 
-        try drawSettings(allocator, state);
-        drawVideoWindow(maybe_video);
-        try drawControls(state);
+            try drawSettings(allocator, state);
+            drawVideoWindow(maybe_video);
+            drawControls(state);
 
-        if (errors.messages.items.len != 0) zgui.openPopup("Error", .{});
+            if (errors.messages.items.len != 0) zgui.openPopup("Error", .{});
 
-        if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
-            defer zgui.endPopup();
+            if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
+                defer zgui.endPopup();
 
-            const message = state.err_message orelse errors.messages.pop().?;
-            zgui.text("{s}", .{message});
+                const message = state.err_message orelse errors.messages.pop().?;
+                zgui.text("{s}", .{message});
 
-            zgui.spacing();
-            zgui.spacing();
-            zgui.separator();
+                zgui.spacing();
+                zgui.spacing();
+                zgui.separator();
 
-            if (zgui.button("OK", .{ .w = -1.0 })) {
-                errors.allocator.free(message); // FIXME(paoda): use an arena?
-                state.err_message = null;
+                if (zgui.button("OK", .{ .w = -1.0 })) {
+                    errors.allocator.free(message); // FIXME(paoda): use an arena?
+                    state.err_message = null;
 
-                zgui.closeCurrentPopup();
-            } else {
-                state.err_message = message;
+                    zgui.closeCurrentPopup();
+                } else {
+                    state.err_message = message;
+                }
             }
+        }
+
+        {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.draw" });
+            defer z.end();
+
+            zgui.backend.draw();
         }
     }
 
@@ -852,7 +849,7 @@ pub const gui = struct {
         });
     }
 
-    fn drawControls(state: *State) !void {
+    fn drawControls(state: *State) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
