@@ -3,14 +3,6 @@ const uploadBtn = document.getElementById('uploadBtn');
 const MAX_RETRIES = 4;
 const BASE_DELAY_MS = 500;
 
-
-/** 
- * @callback retryCallback
- * @param {} attempt
- * @param {} max
- *
- */
-
 /** 
  * @param {number} ms  
  * @returns {Promise<number>}
@@ -19,9 +11,17 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/** 
+ * @callback retryCallback
+ * @param {number} attempt - current attempt
+ * @param {number} max - max attempt
+ * @param {number} delay - ms delay before next retry
+ * @returns {void}
+ */
+
 /**
- * @param {} chunk 
- * @param {} file
+ * @param {Blob} chunk 
+ * @param {File} file
  * @param {number} index
  * @param {number} totalChunks
  * @param {retryCallback} onRetry 
@@ -42,30 +42,25 @@ async function uploadChunkWithRetry(chunk, file, index, totalChunks, onRetry) {
       });
 
       if (response.ok) return response;
-
-      if (response.status >= 400 && response.status < 500) {
-        throw new Error(`Chunk ${index} rejected: HTTP ${response.status}`);
-      }
-
-      // 5xx / other non-ok: treat as retryable below.
       throw new Error(`Chunk ${index} failed: HTTP ${response.status}`);
     } catch (error) {
       if (attempt === MAX_RETRIES) throw error;
 
-      const delay = BASE_DELAY_MS * 2 ** attempt + Math.random() * 200;
-      onRetry?.(attempt + 1, MAX_RETRIES, delay);
+      const delay_ms = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 200;
+      onRetry(attempt + 1, MAX_RETRIES, delay_ms);
 
-      await sleep(delay);
+      await sleep(delay_ms);
     }
   }
 }
 
 uploadBtn.addEventListener('click', async () => {
+  /** @type {HTMLInputElement | null} */
   const fileInput = document.getElementById('videoInput');
-  if (!fileInput)  throw new Error('missing <input id="videoInput" />')
+  if (!fileInput) throw new Error('missing <input id="videoInput" />')
 
   const statusText = document.getElementById('status');
-  if (!statusText) throw new Error()
+  if (!statusText) throw new Error('missing <p id="status" />');
 
   if (fileInput.files.length === 0) return;
 
@@ -76,10 +71,7 @@ uploadBtn.addEventListener('click', async () => {
   const totalChunks = Math.ceil(file.size / chunkSize);
 
   // TODO(paoda): encodeURIComponent file name
-
   statusText.innerText = 'Uploading...';
-
-  await acquireWakeLock();
 
   try {
     for (let i = 0; i < totalChunks; i++) {
@@ -102,7 +94,5 @@ uploadBtn.addEventListener('click', async () => {
     console.error(error);
   } finally {
     uploadBtn.disabled = false;
-    await releaseWakeLock();
   }
-
 });

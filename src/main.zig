@@ -755,25 +755,18 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
 fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
     const log = std.log.scoped(.http_req);
 
-    const html_file = @embedFile("web/index.html");
-    const js_file = @embedFile("web/upload.js");
-
     var req = try server.receiveHead();
     log.debug("[{t}] {s}", .{ req.head.method, req.head.target });
 
     switch (req.head.method) {
         .GET => {
             if (std.mem.eql(u8, req.head.target, "/")) {
-                try req.respond(html_file, .{
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/html" },
-                    },
+                try req.respond(@embedFile("web/index.html"), .{
+                    .extra_headers = &.{.{ .name = "content-type", .value = "text/html" }},
                 });
             } else if (std.mem.eql(u8, req.head.target, "/upload.js")) {
-                try req.respond(js_file, .{
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "application/javascript" },
-                    },
+                try req.respond(@embedFile("web/upload.js"), .{
+                    .extra_headers = &.{.{ .name = "content-type", .value = "application/javascript" }},
                 });
             } else {
                 try req.respond("Not Found", .{ .status = .not_found });
@@ -788,7 +781,7 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                 const payload_buf = try allocator.alloc(u8, 0x10000);
 
                 var chunk_index: usize = 0;
-                var total_chunks: usize = 1;
+                var chunk_total: usize = 1;
 
                 const file_name = blk: {
                     var it = req.iterateHeaders();
@@ -807,13 +800,13 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                         } else if (std.ascii.eqlIgnoreCase(header.name, "X-Chunk-Index")) {
                             chunk_index = try std.fmt.parseInt(usize, header.value, 10);
                         } else if (std.ascii.eqlIgnoreCase(header.name, "X-Total-Chunks")) {
-                            total_chunks = try std.fmt.parseInt(usize, header.value, 10);
+                            chunk_total = try std.fmt.parseInt(usize, header.value, 10);
                         }
                     }
 
                     if (found_name) |name| break :blk name;
 
-                    try req.respond("Missing X-Filename header", .{ .status = .bad_request });
+                    try req.respond("Missing X-Filename", .{ .status = .bad_request });
                     return error.missing_header;
                 };
 
@@ -853,9 +846,9 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                     try file_writer.interface.flush();
                 }
 
-                log.debug("wrote chunk {}/{} ({} bytes) for '{s}'", .{ chunk_index + 1, total_chunks, total_bytes, file_name });
+                log.debug("wrote chunk {}/{} ({} bytes) for '{s}'", .{ chunk_index + 1, chunk_total, total_bytes, file_name });
 
-                if (chunk_index == total_chunks - 1) {
+                if (chunk_index == chunk_total - 1) {
                     try dir.rename(tmp_name, file_name);
                     log.info("successful upload to '{s}{s}{s}'", .{ upload_dir, std.fs.path.sep_str, file_name });
                 }
