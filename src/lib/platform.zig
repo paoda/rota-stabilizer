@@ -1025,18 +1025,30 @@ const QrCode = struct {
         defer allocator.free(qrcode);
 
         const size: usize = @intCast(qrcodegen.getSize(qrcode));
-        const required_len = size * size * RGB24_BPP;
+        const padding = 1;
+        const padded_size = size + (padding * 2);
+        const required_len = padded_size * padded_size * RGB24_BPP;
 
         if (self.buf.len < required_len) {
             self.buf = try allocator.realloc(self.buf, required_len);
         }
 
-        for (0..size) |y| {
-            for (0..size) |x| {
-                const is_dark = qrcodegen.getModule(qrcode, @intCast(x), @intCast(y));
-                const i = (y * size + x) * RGB24_BPP;
+        for (0..padded_size) |y| {
+            for (0..padded_size) |x| {
+                const i = (y * padded_size + x) * RGB24_BPP;
 
-                @memset(self.buf[i..][0..RGB24_BPP], if (is_dark) 0x00 else 0xFF);
+                const is_quiet_zone =
+                    x < padding or
+                    x >= size + padding or
+                    y < padding or
+                    y >= size + padding;
+
+                if (is_quiet_zone) {
+                    @memset(self.buf[i..][0..RGB24_BPP], 0xFF);
+                } else {
+                    const is_dark = qrcodegen.getModule(qrcode, @intCast(x - padding), @intCast(y - padding));
+                    @memset(self.buf[i..][0..RGB24_BPP], if (is_dark) 0x00 else 0xFF);
+                }
             }
         }
 
@@ -1052,8 +1064,8 @@ const QrCode = struct {
             gl.TEXTURE_2D,
             0,
             gl.RGB8,
-            @intCast(size),
-            @intCast(size),
+            @intCast(padded_size),
+            @intCast(padded_size),
             0,
             gl.RGB,
             gl.UNSIGNED_BYTE,
