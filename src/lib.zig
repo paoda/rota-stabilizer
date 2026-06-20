@@ -184,6 +184,7 @@ pub const GpuResourceManager = struct {
             out,
             y_out,
             uv_out,
+            qr,
         };
         const len = @typeInfo(Index).@"enum".fields.len;
 

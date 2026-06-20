@@ -5,6 +5,7 @@ const tracy = @import("tracy");
 const zgui = @import("zgui");
 const nfd = @import("znfde");
 const known_folders = @import("known-folders");
+const qrcodegen = @import("qrcodegen");
 
 const version = @import("build.zig.zon").version;
 const default_font = @embedFile("asset/Inter-Medium.ttf");
@@ -262,7 +263,7 @@ pub const gui = struct {
         encode_progress: f32 = 0.0,
         progress: VideoProgress = .default,
 
-        local_addr: ?std.net.Address,
+        net: Network,
 
         request: ?Request = null, // session change
         action: ?Action = null,
@@ -272,6 +273,27 @@ pub const gui = struct {
         render: RenderOptions = .{},
 
         err_message: ?[]const u8 = null,
+
+        // TODO(paoda): rename?
+        const Network = struct {
+            local_addr: ?std.net.Address,
+            qr: QrCode,
+
+            fn init(allocator: std.mem.Allocator) !Network {
+                const local_addr = getLocalIpAddress();
+                var qr = QrCode.init();
+                if (local_addr) |addr| try qr.updateTexture(allocator, addr);
+
+                return .{
+                    .local_addr = getLocalIpAddress(),
+                    .qr = qr,
+                };
+            }
+
+            fn deinit(self: Network, allocator: std.mem.Allocator) void {
+                self.qr.deinit(allocator);
+            }
+        };
 
         const VideoProgress = struct {
             pub const default: @This() = .{ .duration = null, .timestamp = 0.0 };
@@ -287,19 +309,20 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init(self: *State, render_target: Resolution) void {
+        pub fn init(self: *State, allocator: std.mem.Allocator, render_target: Resolution) !void {
             const hw_dec, const hw_enc = guessHardware();
 
             self.* = .{
-                .local_addr = getLocalIpAddress(),
+                .net = try Network.init(allocator),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
             };
         }
 
-        pub fn deinit(self: State) void {
+        pub fn deinit(self: State, allocator: std.mem.Allocator) void {
             if (self.err_message) |message| errors.allocator.free(message);
+            self.net.deinit(allocator);
         }
 
         pub fn defaultHardware(self: *State) void {
@@ -313,41 +336,29 @@ pub const gui = struct {
 
         const width, const height = ui_view.get();
 
-        {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.newFrame" });
-            defer z.end();
-
-            zgui.backend.newFrame(@intCast(width), @intCast(height));
-        }
-        defer {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.draw" });
-            defer z.end();
-
-            zgui.backend.draw();
-        }
+        zgui.backend.newFrame(@intCast(width), @intCast(height));
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
-        const view_pos = zgui.getMainViewport().getWorkPos();
+        {
+            const view_pos = zgui.getMainViewport().getWorkPos();
+            zgui.setNextWindowPos(.{ .x = view_pos[0], .y = view_pos[1], .cond = .always });
+            zgui.setNextWindowSize(.{ .w = @floatFromInt(width), .h = @floatFromInt(height), .cond = .always });
 
-        zgui.setNextWindowPos(.{ .x = view_pos[0], .y = view_pos[1], .cond = .always });
-        zgui.setNextWindowSize(.{ .w = @floatFromInt(width), .h = @floatFromInt(height), .cond = .always });
+            _ = zgui.begin("MainDockSpace", .{
+                .flags = .{
+                    .no_title_bar = true,
+                    .no_move = true,
+                    .no_resize = true,
+                    .no_collapse = true,
+                    .no_bring_to_front_on_focus = true,
+                    .no_nav_focus = true,
+                    .no_docking = true,
+                    .no_background = true,
+                },
+            });
+            defer zgui.end();
 
-        const show_dockspace = zgui.begin("MainDockSpace", .{
-            .flags = .{
-                .no_title_bar = true,
-                .no_move = true,
-                .no_resize = true,
-                .no_collapse = true,
-                .no_bring_to_front_on_focus = true,
-                .no_nav_focus = true,
-                .no_docking = true,
-                .no_background = true,
-            },
-        });
-        defer zgui.end();
-
-        if (show_dockspace) {
             if (!built_layout) {
                 setupDockingLayout("MainDockSpace", ui_view);
                 built_layout = true;
@@ -356,33 +367,42 @@ pub const gui = struct {
             _ = zgui.dockSpace("MainDockSpace", .{ 0.0, 0.0 }, .{ .passthru_central_node = true });
         }
 
-        zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
-        defer zgui.popStyleVar(.{});
+        {
+            zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
+            defer zgui.popStyleVar(.{});
 
-        try drawSettings(allocator, state);
-        drawVideoWindow(maybe_video);
-        try drawControls(state);
+            try drawSettings(allocator, state);
+            drawVideoWindow(maybe_video);
+            drawControls(state);
 
-        if (errors.messages.items.len != 0) zgui.openPopup("Error", .{});
+            if (errors.messages.items.len != 0) zgui.openPopup("Error", .{});
 
-        if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
-            defer zgui.endPopup();
+            if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
+                defer zgui.endPopup();
 
-            const message = state.err_message orelse errors.messages.pop().?;
-            zgui.text("{s}", .{message});
+                const message = state.err_message orelse errors.messages.pop().?;
+                zgui.text("{s}", .{message});
 
-            zgui.spacing();
-            zgui.spacing();
-            zgui.separator();
+                zgui.spacing();
+                zgui.spacing();
+                zgui.separator();
 
-            if (zgui.button("OK", .{ .w = -1.0 })) {
-                errors.allocator.free(message); // FIXME(paoda): use an arena?
-                state.err_message = null;
+                if (zgui.button("OK", .{ .w = -1.0 })) {
+                    errors.allocator.free(message); // FIXME(paoda): use an arena?
+                    state.err_message = null;
 
-                zgui.closeCurrentPopup();
-            } else {
-                state.err_message = message;
+                    zgui.closeCurrentPopup();
+                } else {
+                    state.err_message = message;
+                }
             }
+        }
+
+        {
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "zgui.backend.draw" });
+            defer z.end();
+
+            zgui.backend.draw();
         }
     }
 
@@ -461,6 +481,9 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        const default_path = try getVideoDirectory(allocator);
+        defer if (default_path) |path| allocator.free(path);
+
         zgui.pushItemWidth(-zgui.calcTextSize("Browse...", .{})[0] - 20.0);
         defer zgui.popItemWidth();
 
@@ -470,7 +493,7 @@ pub const gui = struct {
         if (zgui.button("Browse...##input", .{})) {
             const maybe_path = try nfd.openFileDialog(allocator, &.{
                 .{ .name = "Screen Recordings", .spec = "mp4,mkv,mov,webm" },
-            }, null);
+            }, default_path);
 
             if (maybe_path) |path| {
                 setPath(&state.input_path, path);
@@ -482,9 +505,6 @@ pub const gui = struct {
 
         zgui.sameLine(.{});
         if (zgui.button("Browse...##output", .{})) {
-            const default_path = try getVideoDirectory(allocator);
-            defer if (default_path) |path| allocator.free(path);
-
             const maybe_path = try nfd.saveFileDialog(allocator, &.{
                 .{ .name = "Screen Recordings", .spec = "mp4,mkv,mov,webm" },
             }, default_path, "output.mp4");
@@ -793,14 +813,28 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const ip_str = if (state.local_addr) |address| blk: {
-            const addr = std.mem.toBytes(address.in.sa.addr);
+        if (state.net.local_addr) |address| {
+            const b = std.mem.toBytes(address.in.sa.addr);
+
+            zgui.image(
+                .{ .tex_data = null, .tex_id = @enumFromInt(state.net.qr.tex_id[0]) },
+                .{
+                    .w = 200,
+                    .h = 200,
+                    .uv0 = .{ 0.0, 0.0 },
+                    .uv1 = .{ 1.0, 1.0 },
+                },
+            );
 
             var buf: [0xF]u8 = undefined;
-            break :blk std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] }) catch unreachable;
-        } else "Unknown";
+            const str = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch unreachable;
 
-        zgui.text("Local IP: {s}", .{ip_str});
+            zgui.text("Local IP: {s}", .{str});
+
+            zgui.spacing();
+            zgui.separator();
+            zgui.spacing();
+        }
 
         zgui.bulletText("CTRL+Click to manually input a value!", .{});
         zgui.bulletText("For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
@@ -852,7 +886,7 @@ pub const gui = struct {
         });
     }
 
-    fn drawControls(state: *State) !void {
+    fn drawControls(state: *State) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -948,12 +982,105 @@ fn getLocalIpAddress() ?std.net.Address {
     return local_addr;
 }
 
-fn getVideoDirectory(allocator: std.mem.Allocator) !?[:0]const u8 {
+pub fn getVideoDirectory(allocator: std.mem.Allocator) !?[:0]const u8 {
     const base_path = try known_folders.getPath(allocator, .videos) orelse return null;
     defer allocator.free(base_path);
 
     const path = try std.fs.path.joinZ(allocator, &.{ base_path, "rota-stabilizer" });
+    errdefer allocator.free(path);
+
     std.fs.makeDirAbsolute(path) catch |e| if (e != error.PathAlreadyExists) return e;
 
     return path;
 }
+
+const QrCode = struct {
+    const RGB24_BPP = @import("../lib.zig").RGB24_BPP;
+
+    buf: []u8 = &.{},
+    tex_id: [1]c_uint,
+
+    // FIXME(paoda): generating textures outside of GpuResourceManager
+    pub fn init() QrCode {
+        var ids: [1]c_uint = undefined;
+        gl.GenTextures(1, ids[0..]);
+
+        gl.BindTexture(gl.TEXTURE_2D, ids[0]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        return .{ .tex_id = ids };
+    }
+
+    fn deinit(self: QrCode, allocator: std.mem.Allocator) void {
+        if (self.buf.len != 0) allocator.free(self.buf);
+        gl.DeleteTextures(1, self.tex_id[0..]);
+    }
+
+    pub fn updateTexture(self: *QrCode, allocator: std.mem.Allocator, address: std.net.Address) !void {
+        const MAX_LEN: usize = "http://255.255.255.255:65535".len;
+
+        const url = blk: {
+            var addr = address;
+            addr.setPort(8080); // TODO(paoda): make configurable
+
+            var buf: [MAX_LEN + 1]u8 = undefined;
+            break :blk std.fmt.bufPrintZ(&buf, "http://{f}", .{addr}) catch unreachable;
+        };
+
+        const qrcode = try qrcodegen.encodeText(allocator, url, .Low, .Auto, .{});
+        defer allocator.free(qrcode);
+
+        const size: usize = @intCast(qrcodegen.getSize(qrcode));
+        const padding = 1;
+        const padded_size = size + (padding * 2);
+        const required_len = padded_size * padded_size * RGB24_BPP;
+
+        if (self.buf.len < required_len) {
+            self.buf = try allocator.realloc(self.buf, required_len);
+        }
+
+        for (0..padded_size) |y| {
+            for (0..padded_size) |x| {
+                const i = (y * padded_size + x) * RGB24_BPP;
+
+                const is_quiet_zone =
+                    x < padding or
+                    x >= size + padding or
+                    y < padding or
+                    y >= size + padding;
+
+                if (is_quiet_zone) {
+                    @memset(self.buf[i..][0..RGB24_BPP], 0xFF);
+                } else {
+                    const is_dark = qrcodegen.getModule(qrcode, @intCast(x - padding), @intCast(y - padding));
+                    @memset(self.buf[i..][0..RGB24_BPP], if (is_dark) 0x00 else 0xFF);
+                }
+            }
+        }
+
+        gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+        gl.BindTexture(gl.TEXTURE_2D, self.tex_id[0]);
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        defer gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4);
+
+        // Allocate and upload in one step using the actual dimension
+        gl.TexImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGB8,
+            @intCast(padded_size),
+            @intCast(padded_size),
+            0,
+            gl.RGB,
+            gl.UNSIGNED_BYTE,
+            self.buf.ptr,
+        );
+    }
+};

@@ -65,6 +65,10 @@
             .url = "git+https://github.com/ziglibs/known-folders#83d39161eac2ed6f37ad3cb4d9dd518696ce90bb",
             .hash = "known_folders-0.0.0-Fy-PJv3LAAABBRVoZWVrKZdyLoUfl5VRY5fqRRRdnF5L",
         },
+        .zqrcodegen = .{
+            .url = "git+https://git.musuka.dev/paoda/zqrcodegen#3947181164beb1d68c03c9fa41f67f81493745e5",
+            .hash = "zqrcodegen-0.1.0-SLCb_R0yAQA--coGNDrstMh-unTkfq7eY85axdfyWfyq",
+        },
     },
     .paths = .{
         "build.zig",
