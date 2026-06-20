@@ -780,13 +780,13 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                 const file_buf = try allocator.alloc(u8, 0x100000);
                 const payload_buf = try allocator.alloc(u8, 0x10000);
 
-                var chunk_index: usize = 0;
-                var chunk_total: usize = 1;
-
-                const file_name = blk: {
-                    var it = req.iterateHeaders();
+                const file_name, const chunk_index, const chunk_offset, const total_size = blk: {
                     var found_name: ?[]const u8 = null;
+                    var found_index: ?usize = null;
+                    var found_offset: ?usize = null;
+                    var found_size: ?usize = null;
 
+                    var it = req.iterateHeaders();
                     while (it.next()) |header| {
                         if (std.ascii.eqlIgnoreCase(header.name, "X-Filename")) {
                             const basename = std.fs.path.basename(header.value);
@@ -798,32 +798,48 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
 
                             found_name = try std.fmt.bufPrint(&file_name_buf, "{s}", .{basename});
                         } else if (std.ascii.eqlIgnoreCase(header.name, "X-Chunk-Index")) {
-                            chunk_index = try std.fmt.parseInt(usize, header.value, 10);
-                        } else if (std.ascii.eqlIgnoreCase(header.name, "X-Total-Chunks")) {
-                            chunk_total = try std.fmt.parseInt(usize, header.value, 10);
+                            found_index = try std.fmt.parseInt(usize, header.value, 10);
+                        } else if (std.ascii.eqlIgnoreCase(header.name, "X-Chunk-Offset")) {
+                            found_offset = try std.fmt.parseInt(usize, header.value, 10);
+                        } else if (std.ascii.eqlIgnoreCase(header.name, "X-File-Size")) {
+                            found_size = try std.fmt.parseInt(usize, header.value, 10);
                         }
                     }
 
-                    if (found_name) |name| break :blk name;
+                    const name = found_name orelse {
+                        try req.respond("Missing X-Filename", .{ .status = .bad_request });
+                        return error.missing_header;
+                    };
 
-                    try req.respond("Missing X-Filename", .{ .status = .bad_request });
-                    return error.missing_header;
+                    const index = found_index orelse {
+                        try req.respond("Missing X-Chunk-Index", .{ .status = .bad_request });
+                        return error.missing_header;
+                    };
+
+                    const offset = found_offset orelse {
+                        try req.respond("Missing X-Chunk-Offset", .{ .status = .bad_request });
+                        return error.missing_header;
+                    };
+
+                    const size = found_size orelse {
+                        try req.respond("Missing X-File-Size", .{ .status = .bad_request });
+                        return error.missing_header;
+                    };
+
+                    break :blk .{ name, index, offset, size };
                 };
 
                 const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, "{s}.tmp", .{file_name});
 
-                const default_path = blk: {
-                    const maybe_path = try platform.getVideoDirectory(allocator);
-                    break :blk maybe_path orelse return error.missing_known_path;
-                };
+                const default_path = try platform.getVideoDirectory(allocator) orelse return error.missing_video_path;
 
-                const upload_dir = try std.fs.path.join(allocator, &.{ default_path, "upload" });
-                std.fs.makeDirAbsolute(upload_dir) catch |e| if (e != error.PathAlreadyExists) return e;
+                const upload_path = try std.fs.path.join(allocator, &.{ default_path, "upload" });
+                std.fs.makeDirAbsolute(upload_path) catch |e| if (e != error.PathAlreadyExists) return e;
 
-                var dir = try std.fs.openDirAbsolute(upload_dir, .{});
+                var dir = try std.fs.openDirAbsolute(upload_path, .{});
                 defer dir.close();
 
-                var total_bytes: usize = 0;
+                var new_size: usize = chunk_offset;
 
                 {
                     const file = switch (chunk_index) {
@@ -832,25 +848,35 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                     };
                     defer file.close();
 
+                    if (chunk_offset > try file.getEndPos()) {
+                        // compare against current_size if true, then we have missed
+                        // a chunk in what is supposed to be a sequential upload
+                        try req.respond("Chunk out of order", .{ .status = .conflict });
+                        return error.chunk_out_of_order;
+                    }
+
                     var file_writer = file.writer(file_buf);
-                    try file_writer.seekTo(try file.getEndPos());
+                    try file_writer.seekTo(chunk_offset); // append for new chunk, overwrite for retried chunk
 
                     var payload_reader = req.readerExpectNone(payload_buf);
+                    var byte_count: usize = 0;
 
                     while (true) {
-                        total_bytes += payload_reader.stream(&file_writer.interface, .unlimited) catch |err| {
+                        byte_count += payload_reader.stream(&file_writer.interface, .unlimited) catch |err| {
                             if (err == error.EndOfStream) break else return err;
                         };
                     }
 
                     try file_writer.interface.flush();
+                    new_size += byte_count;
                 }
 
-                log.debug("wrote chunk {}/{} ({} bytes) for '{s}'", .{ chunk_index + 1, chunk_total, total_bytes, file_name });
-
-                if (chunk_index == chunk_total - 1) {
+                if (new_size == total_size) {
                     try dir.rename(tmp_name, file_name);
-                    log.info("successful upload to '{s}{s}{s}'", .{ upload_dir, std.fs.path.sep_str, file_name });
+                    log.info("successful upload to '{s}{s}{s}'", .{ upload_path, std.fs.path.sep_str, file_name });
+                } else if (new_size > total_size) {
+                    try req.respond("Chunk exceeds declared file size", .{ .status = .conflict });
+                    return error.write_overflow;
                 }
 
                 try req.respond("Chunk OK", .{ .status = .ok });

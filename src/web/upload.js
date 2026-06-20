@@ -24,11 +24,12 @@ function sleep(ms) {
  * @param {File} file
  * @param {number} index
  * @param {number} totalChunks
+ * @param {number} offset - byte offset where this chunk starts within the full file
  * @param {retryCallback} onRetry 
  * @returns {Promise<Response>}
  *
  */
-async function uploadChunkWithRetry(chunk, file, index, totalChunks, onRetry) {
+async function uploadChunkWithRetry(chunk, file, index, totalChunks, offset, onRetry) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const response = await fetch('/upload', {
@@ -37,7 +38,9 @@ async function uploadChunkWithRetry(chunk, file, index, totalChunks, onRetry) {
         headers: {
           'X-Filename': file.name,
           'X-Chunk-Index': `${index}`,
-          'X-Total-Chunks': `${totalChunks}`
+          'X-Total-Chunks': `${totalChunks}`,
+          'X-Chunk-Offset': `${offset}`,
+          'X-File-Size': `${file.size}`
         }
       });
 
@@ -79,7 +82,7 @@ uploadBtn.addEventListener('click', async () => {
       const end = Math.min(start + chunkSize, file.size);
       const chunk = file.slice(start, end);
 
-      await uploadChunkWithRetry(chunk, file, i, totalChunks, (attempt, max, delay) => {
+      await uploadChunkWithRetry(chunk, file, i, totalChunks, start, (attempt, max, delay) => {
         statusText.innerText = `Chunk ${i} failed, retrying (${attempt}/${max}) in ${Math.round(delay / 1000)}s...`;
       });
 
