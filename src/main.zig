@@ -696,14 +696,8 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
 fn runHttpServer(allocator: std.mem.Allocator, port: u16) !void {
     const log = std.log.scoped(.http);
 
-    const html_file = @embedFile("web/index.html");
-    const js_file = @embedFile("web/upload.js");
-
-    var recv_buf: [0x1000]u8 = undefined;
-    var send_buf: [0x1000]u8 = undefined;
-
     var address = try std.net.Address.parseIp4("0.0.0.0", port);
-    var listener = try address.listen(.{ .reuse_address = true });
+    var listener = try address.listen(.{});
 
     log.info("upload server listening on http://{f}", .{address});
 
@@ -714,143 +708,125 @@ fn runHttpServer(allocator: std.mem.Allocator, port: u16) !void {
         };
         defer conn.stream.close();
 
+        var recv_buf: [0x4000]u8 = undefined;
+        var send_buf: [0x4000]u8 = undefined;
+
         var conn_reader = conn.stream.reader(&recv_buf);
         var conn_writer = conn.stream.writer(&send_buf);
+
         var server = std.http.Server.init(conn_reader.interface(), &conn_writer.interface);
 
-        while (true) keep_alive: {
-            var req = server.receiveHead() catch |e| {
-                switch (e) {
-                    error.HttpConnectionClosing => break :keep_alive,
-                    else => break :keep_alive log.err("connection err: {}", .{e}),
-                }
+        while (server.reader.state == .ready) keep_alive: {
+            handleRequest(allocator, &server) catch |e| switch (e) {
+                error.HttpConnectionClosing, error.close_socket => break :keep_alive,
+                else => break :keep_alive log.err("req handle err: {}", .{e}),
             };
+        }
+    }
+}
 
-            log.debug("[{t}] {s}", .{ req.head.method, req.head.target });
+fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
+    const log = std.log.scoped(.http);
 
-            switch (req.head.method) {
-                .GET => {
-                    if (std.mem.eql(u8, req.head.target, "/")) {
-                        req.respond(html_file, .{
-                            .extra_headers = &.{
-                                .{ .name = "content-type", .value = "text/html" },
-                            },
-                        }) catch |e| break :keep_alive log.err("respond err: {}", .{e});
-                    } else if (std.mem.eql(u8, req.head.target, "/upload.js")) {
-                        req.respond(js_file, .{
-                            .extra_headers = &.{
-                                .{ .name = "content-type", .value = "application/javascript" },
-                            },
-                        }) catch |e| break :keep_alive log.err("respond err: {}", .{e});
-                    } else {
-                        req.respond("Not Found", .{ .status = .not_found }) catch |e| {
-                            break :keep_alive log.err("respond err: {}", .{e});
-                        };
-                    }
-                },
-                .POST => {
-                    if (std.mem.eql(u8, req.head.target, "/upload")) {
-                        const file_buf = allocator.alloc(u8, 0x100000) catch |e| break :keep_alive log.err("file_buf alloc err: {}", .{e});
-                        defer allocator.free(file_buf);
+    const html_file = @embedFile("web/index.html");
+    const js_file = @embedFile("web/upload.js");
 
-                        const payload_buf = allocator.alloc(u8, 0x10000) catch |e| break :keep_alive log.err("payload_buf alloc err: {}", .{e});
-                        defer allocator.free(payload_buf);
+    var req = try server.receiveHead();
+    log.debug("[{t}] {s}", .{ req.head.method, req.head.target });
 
-                        const default_path = platform.getVideoDirectory(allocator) catch |e| {
-                            break :keep_alive log.err("platform.getVideoDirectory err: {}", .{e});
-                        } orelse {
-                            break :keep_alive log.err("failed to determine known upload directory", .{});
-                        };
-                        defer allocator.free(default_path);
+    switch (req.head.method) {
+        .GET => {
+            if (std.mem.eql(u8, req.head.target, "/")) {
+                try req.respond(html_file, .{
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/html" },
+                    },
+                });
+            } else if (std.mem.eql(u8, req.head.target, "/upload.js")) {
+                try req.respond(js_file, .{
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/javascript" },
+                    },
+                });
+            } else {
+                try req.respond("Not Found", .{ .status = .not_found });
+            }
+        },
+        .POST => {
+            if (std.mem.eql(u8, req.head.target, "/upload")) {
+                var file_name_buf: [std.fs.max_name_bytes]u8 = undefined;
+                var tmp_name_buf: [std.fs.max_name_bytes]u8 = undefined;
 
-                        const upload_dir = std.fs.path.join(allocator, &.{ default_path, "upload" }) catch |e| {
-                            break :keep_alive log.err("upload_dir alloc err: {}", .{e});
-                        };
-                        defer allocator.free(upload_dir);
+                const file_buf = try allocator.alloc(u8, 0x100000);
+                defer allocator.free(file_buf);
 
-                        var file_name_buf: [std.fs.max_name_bytes]u8 = undefined;
-                        var tmp_name_buf: [std.fs.max_name_bytes]u8 = undefined;
+                const payload_buf = try allocator.alloc(u8, 0x10000);
+                defer allocator.free(payload_buf);
 
-                        const file_name = blk: {
-                            var it = req.iterateHeaders();
+                const file_name = blk: {
+                    var it = req.iterateHeaders();
 
-                            while (it.next()) |header| {
-                                if (std.ascii.eqlIgnoreCase(header.name, "X-Filename")) {
-                                    const basename = std.fs.path.basename(header.value);
+                    while (it.next()) |header| {
+                        if (std.ascii.eqlIgnoreCase(header.name, "X-Filename")) {
+                            const basename = std.fs.path.basename(header.value);
 
-                                    if (basename.len == 0) {
-                                        req.respond("Missing or invalid X-Filename header", .{
-                                            .status = .bad_request,
-                                        }) catch |e| break :keep_alive log.err("respond err: {}", .{e});
-
-                                        break :keep_alive;
-                                    }
-
-                                    const name = std.fmt.bufPrint(&file_name_buf, "{s}", .{basename}) catch |e| {
-                                        break :keep_alive log.err("file_name print err: {}", .{e});
-                                    };
-
-                                    break :blk name;
-                                }
+                            if (basename.len == 0) {
+                                try req.respond("Missing or invalid X-Filename header", .{ .status = .bad_request });
+                                return error.missing_or_invalid_header;
                             }
 
-                            req.respond("Missing X-Filename header", .{
-                                .status = .bad_request,
-                            }) catch |e| break :keep_alive log.err("respond err: {}", .{e});
-
-                            break :keep_alive;
-                        };
-
-                        const tmp_name = std.fmt.bufPrint(&tmp_name_buf, "{s}.tmp", .{file_name}) catch |e| {
-                            break :keep_alive log.err("tmp_name print err: {}", .{e});
-                        };
-
-                        var dir = std.fs.openDirAbsolute(upload_dir, .{}) catch |e| {
-                            break :keep_alive log.err("failed to open '{s}': {}", .{ upload_dir, e });
-                        };
-                        defer dir.close();
-
-                        const file = dir.createFile(tmp_name, .{}) catch |e| {
-                            break :keep_alive log.err("failed to create '{s}': {}", .{ tmp_name, e });
-                        };
-                        defer file.close();
-
-                        var file_writer = file.writer(file_buf);
-                        var payload_reader = req.readerExpectNone(payload_buf);
-
-                        var count: usize = 0;
-                        defer log.debug("wrote a total of {} bytes to disk", .{count});
-
-                        while (true) {
-                            count += payload_reader.stream(&file_writer.interface, .unlimited) catch |e| {
-                                if (e == error.EndOfStream) break;
-                                break :keep_alive log.err("stream interrupted: {}", .{e});
-                            };
+                            const name = try std.fmt.bufPrint(&file_name_buf, "{s}", .{basename});
+                            break :blk name;
                         }
-
-                        file_writer.interface.flush() catch |e| {
-                            break :keep_alive log.err("failed to flush file writer: {}", .{e});
-                        };
-
-                        dir.rename(tmp_name, file_name) catch |e| {
-                            break :keep_alive log.err("failed to rename '{s}' to '{s}: {}'", .{ tmp_name, file_name, e });
-                        };
-
-                        log.info("upload completed", .{});
-
-                        req.respond("Complete", .{ .status = .ok }) catch |e| {
-                            break :keep_alive log.err("respond err: {}", .{e});
-                        };
-                    } else {
-                        req.respond("Not Found", .{ .status = .not_found }) catch |e| {
-                            break :keep_alive log.err("respond err: {}", .{e});
-                        };
                     }
-                },
-                else => req.respond("Not Found", .{ .status = .not_found }) catch |e| {
-                    break :keep_alive log.err("respond err: {}", .{e});
-                },
+
+                    try req.respond("Missing X-Filename header", .{ .status = .bad_request });
+                    return error.missing_header;
+                };
+
+                const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, "{s}.tmp", .{file_name});
+
+                const default_path = blk: {
+                    const maybe_path = try platform.getVideoDirectory(allocator);
+                    break :blk maybe_path orelse return error.missing_known_path;
+                };
+                defer allocator.free(default_path);
+
+                const upload_dir = try std.fs.path.join(allocator, &.{ default_path, "upload" });
+                defer allocator.free(upload_dir);
+
+                std.fs.makeDirAbsolute(upload_dir) catch |e| if (e != error.PathAlreadyExists) return e;
+
+                var dir = try std.fs.openDirAbsolute(upload_dir, .{});
+                defer dir.close();
+
+                const file = try dir.createFile(tmp_name, .{});
+                defer file.close();
+
+                var file_writer = file.writer(file_buf);
+                var payload_reader = req.readerExpectNone(payload_buf);
+
+                var count: usize = 0;
+                defer log.debug("wrote a total of {} bytes to disk", .{count});
+
+                while (true) {
+                    count += payload_reader.stream(&file_writer.interface, .unlimited) catch |e| {
+                        if (e == error.EndOfStream) break else return e;
+                    };
+                }
+
+                try file_writer.interface.flush();
+
+                try dir.rename(tmp_name, file_name);
+                log.info("upload completed", .{});
+
+                try req.respond("Complete", .{ .status = .ok });
+
+                return error.close_socket;
+            } else {
+                try req.respond("Not Found", .{ .status = .not_found });
             }
-        }
+        },
+        else => try req.respond("Not Found", .{ .status = .not_found }),
     }
 }
