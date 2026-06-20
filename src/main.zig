@@ -701,32 +701,56 @@ fn runHttpServer(allocator: std.mem.Allocator, port: u16) !void {
 
     log.info("upload server listening on http://{f}", .{address});
 
+    const pool = try allocator.create(std.Thread.Pool);
+    defer allocator.destroy(pool);
+
+    try pool.init(.{ .allocator = allocator });
+
     while (!signal.should_quit.load(.monotonic)) {
         const conn = listener.accept() catch |err| {
             log.err("failed to accept connection: {}", .{err});
             continue;
         };
-        defer conn.stream.close();
 
-        var recv_buf: [0x4000]u8 = undefined;
-        var send_buf: [0x4000]u8 = undefined;
+        pool.spawn(handleConnection, .{ allocator, conn }) catch |err| {
+            log.err("failed to spawn thread: {}", .{err});
+            conn.stream.close();
+            continue;
+        };
+    }
+}
 
-        var conn_reader = conn.stream.reader(&recv_buf);
-        var conn_writer = conn.stream.writer(&send_buf);
+fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Connection) void {
+    defer conn.stream.close();
 
-        var server = std.http.Server.init(conn_reader.interface(), &conn_writer.interface);
+    const log = std.log.scoped(.http_conn);
 
-        while (server.reader.state == .ready) keep_alive: {
-            handleRequest(allocator, &server) catch |e| switch (e) {
-                error.HttpConnectionClosing, error.close_socket => break :keep_alive,
-                else => break :keep_alive log.err("req handle err: {}", .{e}),
-            };
-        }
+    var arena = std.heap.ArenaAllocator.init(parent_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var recv_buf: [0x4000]u8 = undefined;
+    var send_buf: [0x4000]u8 = undefined;
+
+    var conn_reader = conn.stream.reader(&recv_buf);
+    var conn_writer = conn.stream.writer(&send_buf);
+
+    var server = std.http.Server.init(conn_reader.interface(), &conn_writer.interface);
+
+    while (server.reader.state == .ready) keep_alive: {
+        handleRequest(allocator, &server) catch |e| switch (e) {
+            error.HttpConnectionClosing, error.close_socket => break :keep_alive,
+            else => {
+                log.err("req handle err: {}", .{e});
+                break :keep_alive;
+            },
+        };
     }
 }
 
 fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
-    const log = std.log.scoped(.http);
+    const log = std.log.scoped(.http_req);
 
     const html_file = @embedFile("web/index.html");
     const js_file = @embedFile("web/upload.js");
