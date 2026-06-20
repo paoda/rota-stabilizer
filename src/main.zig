@@ -81,7 +81,7 @@ pub fn main() !void {
     try state.init(allocator, startup.render_target);
     defer state.deinit(allocator);
 
-    const handle = try std.Thread.spawn(.{}, runHttpServer, .{ allocator, 8080 });
+    const handle = try std.Thread.spawn(.{}, runHttpServer, .{8080});
     handle.detach();
 
     while (!signal.should_quit.load(.monotonic)) {
@@ -693,8 +693,13 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
     return timestamp;
 }
 
-fn runHttpServer(allocator: std.mem.Allocator, port: u16) !void {
+fn runHttpServer(port: u16) !void {
     const log = std.log.scoped(.http);
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const allocator = gpa.allocator();
 
     var address = try std.net.Address.parseIp4("0.0.0.0", port);
     var listener = try address.listen(.{});
@@ -705,6 +710,7 @@ fn runHttpServer(allocator: std.mem.Allocator, port: u16) !void {
     defer allocator.destroy(pool);
 
     try pool.init(.{ .allocator = allocator });
+    defer pool.deinit();
 
     while (!signal.should_quit.load(.monotonic)) {
         const conn = listener.accept() catch |err| {
@@ -738,13 +744,10 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
 
     var server = std.http.Server.init(conn_reader.interface(), &conn_writer.interface);
 
-    while (server.reader.state == .ready) keep_alive: {
+    while (server.reader.state == .ready) {
         handleRequest(allocator, &server) catch |e| switch (e) {
-            error.HttpConnectionClosing, error.close_socket => break :keep_alive,
-            else => {
-                log.err("req handle err: {}", .{e});
-                break :keep_alive;
-            },
+            error.HttpConnectionClosing => return,
+            else => return log.err("request handler err: {}", .{e}),
         };
     }
 }
@@ -782,27 +785,33 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                 var tmp_name_buf: [std.fs.max_name_bytes]u8 = undefined;
 
                 const file_buf = try allocator.alloc(u8, 0x100000);
-                defer allocator.free(file_buf);
-
                 const payload_buf = try allocator.alloc(u8, 0x10000);
-                defer allocator.free(payload_buf);
+
+                var chunk_index: usize = 0;
+                var total_chunks: usize = 1;
 
                 const file_name = blk: {
                     var it = req.iterateHeaders();
+                    var found_name: ?[]const u8 = null;
 
                     while (it.next()) |header| {
                         if (std.ascii.eqlIgnoreCase(header.name, "X-Filename")) {
                             const basename = std.fs.path.basename(header.value);
 
                             if (basename.len == 0) {
-                                try req.respond("Missing or invalid X-Filename header", .{ .status = .bad_request });
+                                try req.respond("Invalid X-Filename", .{ .status = .bad_request });
                                 return error.missing_or_invalid_header;
                             }
 
-                            const name = try std.fmt.bufPrint(&file_name_buf, "{s}", .{basename});
-                            break :blk name;
+                            found_name = try std.fmt.bufPrint(&file_name_buf, "{s}", .{basename});
+                        } else if (std.ascii.eqlIgnoreCase(header.name, "X-Chunk-Index")) {
+                            chunk_index = try std.fmt.parseInt(usize, header.value, 10);
+                        } else if (std.ascii.eqlIgnoreCase(header.name, "X-Total-Chunks")) {
+                            total_chunks = try std.fmt.parseInt(usize, header.value, 10);
                         }
                     }
+
+                    if (found_name) |name| break :blk name;
 
                     try req.respond("Missing X-Filename header", .{ .status = .bad_request });
                     return error.missing_header;
@@ -814,39 +823,44 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                     const maybe_path = try platform.getVideoDirectory(allocator);
                     break :blk maybe_path orelse return error.missing_known_path;
                 };
-                defer allocator.free(default_path);
 
                 const upload_dir = try std.fs.path.join(allocator, &.{ default_path, "upload" });
-                defer allocator.free(upload_dir);
-
                 std.fs.makeDirAbsolute(upload_dir) catch |e| if (e != error.PathAlreadyExists) return e;
 
                 var dir = try std.fs.openDirAbsolute(upload_dir, .{});
                 defer dir.close();
 
-                const file = try dir.createFile(tmp_name, .{});
-                defer file.close();
+                var total_bytes: usize = 0;
 
-                var file_writer = file.writer(file_buf);
-                var payload_reader = req.readerExpectNone(payload_buf);
-
-                var count: usize = 0;
-                defer log.debug("wrote a total of {} bytes to disk", .{count});
-
-                while (true) {
-                    count += payload_reader.stream(&file_writer.interface, .unlimited) catch |e| {
-                        if (e == error.EndOfStream) break else return e;
+                {
+                    const file = switch (chunk_index) {
+                        0 => try dir.createFile(tmp_name, .{}),
+                        else => try dir.openFile(tmp_name, .{ .mode = .write_only }),
                     };
+                    defer file.close();
+
+                    var file_writer = file.writer(file_buf);
+                    try file_writer.seekTo(try file.getEndPos());
+
+                    var payload_reader = req.readerExpectNone(payload_buf);
+
+                    while (true) {
+                        total_bytes += payload_reader.stream(&file_writer.interface, .unlimited) catch |err| {
+                            if (err == error.EndOfStream) break else return err;
+                        };
+                    }
+
+                    try file_writer.interface.flush();
                 }
 
-                try file_writer.interface.flush();
+                log.debug("wrote chunk {}/{} ({} bytes) for '{s}'", .{ chunk_index + 1, total_chunks, total_bytes, file_name });
 
-                try dir.rename(tmp_name, file_name);
-                log.info("upload completed", .{});
+                if (chunk_index == total_chunks - 1) {
+                    try dir.rename(tmp_name, file_name);
+                    log.info("successful upload to '{s}{s}{s}'", .{ upload_dir, std.fs.path.sep_str, file_name });
+                }
 
-                try req.respond("Complete", .{ .status = .ok });
-
-                return error.close_socket;
+                try req.respond("Chunk OK", .{ .status = .ok });
             } else {
                 try req.respond("Not Found", .{ .status = .not_found });
             }
