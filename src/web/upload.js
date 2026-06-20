@@ -1,8 +1,71 @@
 const uploadBtn = document.getElementById('uploadBtn');
 
+const MAX_RETRIES = 4;
+const BASE_DELAY_MS = 500;
+
+
+/** 
+ * @callback retryCallback
+ * @param {} attempt
+ * @param {} max
+ *
+ */
+
+/** 
+ * @param {number} ms  
+ * @returns {Promise<number>}
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * @param {} chunk 
+ * @param {} file
+ * @param {number} index
+ * @param {number} totalChunks
+ * @param {retryCallback} onRetry 
+ * @returns {Promise<Response>}
+ *
+ */
+async function uploadChunkWithRetry(chunk, file, index, totalChunks, onRetry) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch('/upload', {
+        method: 'POST',
+        body: chunk,
+        headers: {
+          'X-Filename': file.name,
+          'X-Chunk-Index': `${index}`,
+          'X-Total-Chunks': `${totalChunks}`
+        }
+      });
+
+      if (response.ok) return response;
+
+      if (response.status >= 400 && response.status < 500) {
+        throw new Error(`Chunk ${index} rejected: HTTP ${response.status}`);
+      }
+
+      // 5xx / other non-ok: treat as retryable below.
+      throw new Error(`Chunk ${index} failed: HTTP ${response.status}`);
+    } catch (error) {
+      if (attempt === MAX_RETRIES) throw error;
+
+      const delay = BASE_DELAY_MS * 2 ** attempt + Math.random() * 200;
+      onRetry?.(attempt + 1, MAX_RETRIES, delay);
+
+      await sleep(delay);
+    }
+  }
+}
+
 uploadBtn.addEventListener('click', async () => {
   const fileInput = document.getElementById('videoInput');
+  if (!fileInput)  throw new Error('missing <input id="videoInput" />')
+
   const statusText = document.getElementById('status');
+  if (!statusText) throw new Error()
 
   if (fileInput.files.length === 0) return;
 
@@ -16,23 +79,17 @@ uploadBtn.addEventListener('click', async () => {
 
   statusText.innerText = 'Uploading...';
 
+  await acquireWakeLock();
+
   try {
     for (let i = 0; i < totalChunks; i++) {
       const start = i * chunkSize;
       const end = Math.min(start + chunkSize, file.size);
       const chunk = file.slice(start, end);
 
-      const response = await fetch('/upload', {
-        method: 'POST',
-        body: chunk,
-        headers: {
-          'X-Filename': file.name,
-          'X-Chunk-Index': `${i}`,
-          'X-Total-Chunks': `${totalChunks}`
-        }
+      await uploadChunkWithRetry(chunk, file, i, totalChunks, (attempt, max, delay) => {
+        statusText.innerText = `Chunk ${i} failed, retrying (${attempt}/${max}) in ${Math.round(delay / 1000)}s...`;
       });
-
-      if (!response.ok) throw new Error(`Chunk ${i} failed to upload`);
 
       const percent = Math.round(((i + 1) / totalChunks) * 100);
       statusText.innerText = `Uploading... ${percent}%`;
@@ -45,6 +102,7 @@ uploadBtn.addEventListener('click', async () => {
     console.error(error);
   } finally {
     uploadBtn.disabled = false;
+    await releaseWakeLock();
   }
 
 });
