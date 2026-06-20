@@ -153,11 +153,6 @@ const PlaybackSession = struct {
         const manager = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
         errdefer manager.deinit(allocator);
 
-        if (state.net.local_addr) |addr| {
-            state.net.qr.setupTexture(manager);
-            try state.net.qr.updateTexture(allocator, manager, addr);
-        }
-
         const camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
         const angle_calc = try AngleCalc.init(manager, camera);
 
@@ -417,11 +412,6 @@ const EncodeSession = struct {
         errdefer manager.deinit(allocator);
 
         try manager.setupEncodingTargets(encode_view, encoder._frame);
-
-        if (state.net.local_addr) |addr| {
-            state.net.qr.setupTexture(manager);
-            try state.net.qr.updateTexture(allocator, manager, addr);
-        }
 
         const handles = try decoder.spawn(true);
         errdefer handles.deinit();

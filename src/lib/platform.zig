@@ -279,10 +279,14 @@ pub const gui = struct {
             local_addr: ?std.net.Address,
             qr: QrCode,
 
-            fn init() Network {
+            fn init(allocator: std.mem.Allocator) !Network {
+                const local_addr = getLocalIpAddress();
+                var qr = QrCode.init();
+                if (local_addr) |addr| try qr.updateTexture(allocator, addr);
+
                 return .{
                     .local_addr = getLocalIpAddress(),
-                    .qr = .{},
+                    .qr = qr,
                 };
             }
 
@@ -305,11 +309,11 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init(self: *State, render_target: Resolution) void {
+        pub fn init(self: *State, allocator: std.mem.Allocator, render_target: Resolution) !void {
             const hw_dec, const hw_enc = guessHardware();
 
             self.* = .{
-                .net = Network.init(),
+                .net = try Network.init(allocator),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
@@ -809,25 +813,11 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const ip_str = if (state.net.local_addr) |address| blk: {
-            const addr = std.mem.toBytes(address.in.sa.addr);
+        if (state.net.local_addr) |address| {
+            const b = std.mem.toBytes(address.in.sa.addr);
 
-            var buf: [0xF]u8 = undefined;
-            break :blk std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] }) catch unreachable;
-        } else "Unknown";
-
-        zgui.text("Local IP: {s}", .{ip_str});
-
-        zgui.bulletText("CTRL+Click to manually input a value!", .{});
-        zgui.bulletText("For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
-
-        zgui.spacing();
-        zgui.separator();
-        zgui.spacing();
-
-        if (state.net.qr.tex_id) |tex_id| {
             zgui.image(
-                .{ .tex_data = null, .tex_id = @enumFromInt(tex_id) },
+                .{ .tex_data = null, .tex_id = @enumFromInt(state.net.qr.tex_id[0]) },
                 .{
                     .w = 200,
                     .h = 200,
@@ -835,7 +825,23 @@ pub const gui = struct {
                     .uv1 = .{ 1.0, 1.0 },
                 },
             );
+
+            var buf: [0xF]u8 = undefined;
+            const str = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch unreachable;
+
+            zgui.text("Local IP: {s}", .{str});
+
+            zgui.spacing();
+            zgui.separator();
+            zgui.spacing();
         }
+
+        zgui.bulletText("CTRL+Click to manually input a value!", .{});
+        zgui.bulletText("For Youtube, I recommend 3840x2160 @ 60_000kbps", .{});
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
 
         zgui.text("rota-stabilizer v{s}", .{version});
     }
@@ -992,10 +998,14 @@ const QrCode = struct {
     const RGB24_BPP = @import("../lib.zig").RGB24_BPP;
 
     buf: []u8 = &.{},
-    tex_id: ?c_uint = null,
+    tex_id: [1]c_uint,
 
-    pub fn setupTexture(self: *QrCode, manager: *const GpuResourceManager) void {
-        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(.qr));
+    // FIXME(paoda): generating textures outside of GpuResourceManager
+    pub fn init() QrCode {
+        var ids: [1]c_uint = undefined;
+        gl.GenTextures(1, ids[0..]);
+
+        gl.BindTexture(gl.TEXTURE_2D, ids[0]);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -1003,14 +1013,15 @@ const QrCode = struct {
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-        @memset(self.buf, 0);
+        return .{ .tex_id = ids };
     }
 
     fn deinit(self: QrCode, allocator: std.mem.Allocator) void {
         if (self.buf.len != 0) allocator.free(self.buf);
+        gl.DeleteTextures(1, self.tex_id[0..]);
     }
 
-    pub fn updateTexture(self: *QrCode, allocator: std.mem.Allocator, manager: *const GpuResourceManager, address: std.net.Address) !void {
+    pub fn updateTexture(self: *QrCode, allocator: std.mem.Allocator, address: std.net.Address) !void {
         const MAX_LEN: usize = "http://255.255.255.255:65535".len;
 
         const url = blk: {
@@ -1053,7 +1064,7 @@ const QrCode = struct {
         }
 
         gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
-        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(.qr));
+        gl.BindTexture(gl.TEXTURE_2D, self.tex_id[0]);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
         gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -1071,7 +1082,5 @@ const QrCode = struct {
             gl.UNSIGNED_BYTE,
             self.buf.ptr,
         );
-
-        self.tex_id = manager.tex.get(.qr);
     }
 };
