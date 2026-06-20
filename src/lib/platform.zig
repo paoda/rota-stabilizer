@@ -5,6 +5,7 @@ const tracy = @import("tracy");
 const zgui = @import("zgui");
 const nfd = @import("znfde");
 const known_folders = @import("known-folders");
+const qrcodegen = @import("qrcodegen");
 
 const version = @import("build.zig.zon").version;
 const default_font = @embedFile("asset/Inter-Medium.ttf");
@@ -262,7 +263,7 @@ pub const gui = struct {
         encode_progress: f32 = 0.0,
         progress: VideoProgress = .default,
 
-        local_addr: ?std.net.Address,
+        net: Network,
 
         request: ?Request = null, // session change
         action: ?Action = null,
@@ -272,6 +273,23 @@ pub const gui = struct {
         render: RenderOptions = .{},
 
         err_message: ?[]const u8 = null,
+
+        // TODO(paoda): rename?
+        const Network = struct {
+            local_addr: ?std.net.Address,
+            qr: QrCode,
+
+            fn init() Network {
+                return .{
+                    .local_addr = getLocalIpAddress(),
+                    .qr = .{},
+                };
+            }
+
+            fn deinit(self: Network, allocator: std.mem.Allocator) void {
+                self.qr.deinit(allocator);
+            }
+        };
 
         const VideoProgress = struct {
             pub const default: @This() = .{ .duration = null, .timestamp = 0.0 };
@@ -291,15 +309,16 @@ pub const gui = struct {
             const hw_dec, const hw_enc = guessHardware();
 
             self.* = .{
-                .local_addr = getLocalIpAddress(),
+                .net = Network.init(),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
             };
         }
 
-        pub fn deinit(self: State) void {
+        pub fn deinit(self: State, allocator: std.mem.Allocator) void {
             if (self.err_message) |message| errors.allocator.free(message);
+            self.net.deinit(allocator);
         }
 
         pub fn defaultHardware(self: *State) void {
@@ -790,7 +809,7 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const ip_str = if (state.local_addr) |address| blk: {
+        const ip_str = if (state.net.local_addr) |address| blk: {
             const addr = std.mem.toBytes(address.in.sa.addr);
 
             var buf: [0xF]u8 = undefined;
@@ -805,6 +824,18 @@ pub const gui = struct {
         zgui.spacing();
         zgui.separator();
         zgui.spacing();
+
+        if (state.net.qr.tex_id) |tex_id| {
+            zgui.image(
+                .{ .tex_data = null, .tex_id = @enumFromInt(tex_id) },
+                .{
+                    .w = 200,
+                    .h = 200,
+                    .uv0 = .{ 0.0, 0.0 },
+                    .uv1 = .{ 1.0, 1.0 },
+                },
+            );
+        }
 
         zgui.text("rota-stabilizer v{s}", .{version});
     }
@@ -954,3 +985,79 @@ fn getVideoDirectory(allocator: std.mem.Allocator) !?[:0]const u8 {
 
     return path;
 }
+
+const QrCode = struct {
+    const RGB24_BPP = @import("../lib.zig").RGB24_BPP;
+
+    buf: []u8 = &.{},
+    tex_id: ?c_uint = null,
+
+    pub fn setupTexture(self: *QrCode, manager: *const GpuResourceManager) void {
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(.qr));
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        @memset(self.buf, 0);
+    }
+
+    fn deinit(self: QrCode, allocator: std.mem.Allocator) void {
+        if (self.buf.len != 0) allocator.free(self.buf);
+    }
+
+    pub fn updateTexture(self: *QrCode, allocator: std.mem.Allocator, manager: *const GpuResourceManager, address: std.net.Address) !void {
+        const MAX_LEN: usize = "http://255.255.255.255:65535".len;
+
+        const url = blk: {
+            var addr = address;
+            addr.setPort(8080); // TODO(paoda): make configurable
+
+            var buf: [MAX_LEN + 1]u8 = undefined;
+            break :blk std.fmt.bufPrintZ(&buf, "http://{f}", .{addr}) catch unreachable;
+        };
+
+        const qrcode = try qrcodegen.encodeText(allocator, url, .Low, .Auto, .{});
+        defer allocator.free(qrcode);
+
+        const size: usize = @intCast(qrcodegen.getSize(qrcode));
+        const required_len = size * size * RGB24_BPP;
+
+        if (self.buf.len < required_len) {
+            self.buf = try allocator.realloc(self.buf, required_len);
+        }
+
+        for (0..size) |y| {
+            for (0..size) |x| {
+                const is_dark = qrcodegen.getModule(qrcode, @intCast(x), @intCast(y));
+                const i = (y * size + x) * RGB24_BPP;
+
+                @memset(self.buf[i..][0..RGB24_BPP], if (is_dark) 0x00 else 0xFF);
+            }
+        }
+
+        gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0);
+        gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(.qr));
+        defer gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        defer gl.PixelStorei(gl.UNPACK_ALIGNMENT, 4);
+
+        // Allocate and upload in one step using the actual dimension
+        gl.TexImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGB8,
+            @intCast(size),
+            @intCast(size),
+            0,
+            gl.RGB,
+            gl.UNSIGNED_BYTE,
+            self.buf.ptr,
+        );
+
+        self.tex_id = manager.tex.get(.qr);
+    }
+};

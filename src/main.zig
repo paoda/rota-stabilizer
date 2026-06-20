@@ -79,7 +79,7 @@ pub fn main() !void {
     defer allocator.destroy(state);
 
     state.init(startup.render_target);
-    defer state.deinit();
+    defer state.deinit(allocator);
 
     while (!signal.should_quit.load(.monotonic)) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });

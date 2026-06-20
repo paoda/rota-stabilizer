@@ -3,6 +3,8 @@ const tracy = @import("tracy");
 const gl = @import("gl");
 const c = @import("lib.zig").c;
 
+const EncodeError = @import("qrcodegen").EncodeError;
+
 const Camera = @import("main.zig").Camera;
 const AngleCalc = @import("main.zig").AngleCalc;
 
@@ -100,7 +102,7 @@ const PlaybackSession = struct {
 
     next_frame: ?*c.AVFrame = null,
 
-    const InitError = error{preload_fail} || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError;
+    const InitError = error{preload_fail} || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError || EncodeError;
     const log = std.log.scoped(.playback_session);
 
     fn stop(self: *const @This()) void {
@@ -118,7 +120,7 @@ const PlaybackSession = struct {
         self.decoder.queue.frame.interrupt();
     }
 
-    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, path: []const u8) InitError!PlaybackSession {
+    pub fn init(allocator: std.mem.Allocator, state: *GuiState, ui: Ui, path: []const u8) InitError!PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
 
@@ -150,6 +152,11 @@ const PlaybackSession = struct {
 
         const manager = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
         errdefer manager.deinit(allocator);
+
+        if (state.net.local_addr) |addr| {
+            state.net.qr.setupTexture(manager);
+            try state.net.qr.updateTexture(allocator, manager, addr);
+        }
 
         const camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
         const angle_calc = try AngleCalc.init(manager, camera);
@@ -363,7 +370,7 @@ const EncodeSession = struct {
         self.decoder.queue.frame.interrupt();
     }
 
-    pub fn init(allocator: std.mem.Allocator, state: *const GuiState, ui: Ui, src_path: []const u8, dst_path: []const u8) !EncodeSession {
+    pub fn init(allocator: std.mem.Allocator, state: *GuiState, ui: Ui, src_path: []const u8, dst_path: []const u8) !EncodeSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.init" });
         defer zone.end();
 
@@ -410,6 +417,11 @@ const EncodeSession = struct {
         errdefer manager.deinit(allocator);
 
         try manager.setupEncodingTargets(encode_view, encoder._frame);
+
+        if (state.net.local_addr) |addr| {
+            state.net.qr.setupTexture(manager);
+            try state.net.qr.updateTexture(allocator, manager, addr);
+        }
 
         const handles = try decoder.spawn(true);
         errdefer handles.deinit();
