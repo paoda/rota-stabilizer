@@ -477,6 +477,9 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        const default_path = try getVideoDirectory(allocator);
+        defer if (default_path) |path| allocator.free(path);
+
         zgui.pushItemWidth(-zgui.calcTextSize("Browse...", .{})[0] - 20.0);
         defer zgui.popItemWidth();
 
@@ -486,7 +489,7 @@ pub const gui = struct {
         if (zgui.button("Browse...##input", .{})) {
             const maybe_path = try nfd.openFileDialog(allocator, &.{
                 .{ .name = "Screen Recordings", .spec = "mp4,mkv,mov,webm" },
-            }, null);
+            }, default_path);
 
             if (maybe_path) |path| {
                 setPath(&state.input_path, path);
@@ -498,9 +501,6 @@ pub const gui = struct {
 
         zgui.sameLine(.{});
         if (zgui.button("Browse...##output", .{})) {
-            const default_path = try getVideoDirectory(allocator);
-            defer if (default_path) |path| allocator.free(path);
-
             const maybe_path = try nfd.saveFileDialog(allocator, &.{
                 .{ .name = "Screen Recordings", .spec = "mp4,mkv,mov,webm" },
             }, default_path, "output.mp4");
@@ -976,11 +976,13 @@ fn getLocalIpAddress() ?std.net.Address {
     return local_addr;
 }
 
-fn getVideoDirectory(allocator: std.mem.Allocator) !?[:0]const u8 {
+pub fn getVideoDirectory(allocator: std.mem.Allocator) !?[:0]const u8 {
     const base_path = try known_folders.getPath(allocator, .videos) orelse return null;
     defer allocator.free(base_path);
 
     const path = try std.fs.path.joinZ(allocator, &.{ base_path, "rota-stabilizer" });
+    errdefer allocator.free(path);
+
     std.fs.makeDirAbsolute(path) catch |e| if (e != error.PathAlreadyExists) return e;
 
     return path;
