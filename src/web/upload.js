@@ -48,9 +48,13 @@ async function uploadChunkWithRetry(chunk, file, index, totalChunks, offset, onR
       });
 
       if (response.ok) return response;
-      throw new Error(`Chunk ${index} failed: HTTP ${response.status}`);
+
+      const error = new Error(`Chunk ${index} failed: HTTP ${response.status}`);
+      error.retryable = response.status >= 500;
+
+      throw error;
     } catch (error) {
-      if (attempt === MAX_RETRIES) throw error;
+      if (attempt === MAX_RETRIES || error.retryable === false) throw error;
 
       const delay_ms = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 200;
       onRetry(attempt + 1, MAX_RETRIES, delay_ms);
@@ -97,7 +101,7 @@ uploadBtn.addEventListener('click', async () => {
     statusText.innerText = 'Upload complete!';
     fileInput.value = '';
   } catch (error) {
-    statusText.innerText = 'Upload failed or interrupted';
+    statusText.innerText = `Upload failed: ${error.message}`;
     console.error(error);
   } finally {
     noSleep.disable();
