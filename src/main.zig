@@ -768,6 +768,10 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_
                 try req.respond(@embedFile("web/upload.js"), .{
                     .extra_headers = &.{.{ .name = "content-type", .value = "application/javascript" }},
                 });
+            } else if (std.mem.eql(u8, req.head.target, "/lib/nosleep.min.js")) {
+                try req.respond(@embedFile("web/lib/nosleep.min.js"), .{
+                    .extra_headers = &.{.{ .name = "content-type", .value = "application/javascript" }},
+                });
             } else {
                 try req.respond("Not Found", .{ .status = .not_found });
             }

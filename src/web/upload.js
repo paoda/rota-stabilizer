@@ -1,7 +1,10 @@
-const uploadBtn = document.getElementById('uploadBtn');
+import NoSleep from '/lib/nosleep.min.js';
 
+const uploadBtn = document.getElementById('uploadBtn');
 const MAX_RETRIES = 4;
 const BASE_DELAY_MS = 500;
+
+const noSleep = new NoSleep();
 
 /** 
  * @param {number} ms  
@@ -75,6 +78,7 @@ uploadBtn.addEventListener('click', async () => {
 
   // TODO(paoda): encodeURIComponent file name
   statusText.innerText = 'Uploading...';
+  noSleep.enable();
 
   try {
     for (let i = 0; i < totalChunks; i++) {
@@ -96,6 +100,7 @@ uploadBtn.addEventListener('click', async () => {
     statusText.innerText = 'Upload failed or interrupted';
     console.error(error);
   } finally {
+    noSleep.disable();
     uploadBtn.disabled = false;
   }
 });
