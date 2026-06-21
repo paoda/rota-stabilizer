@@ -52,7 +52,7 @@ pub fn main() !void {
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
-    var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.c_allocator };
+    var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .{ .backing_allocator = std.heap.c_allocator };
     defer std.debug.assert(gpa.deinit() == .ok);
 
     var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
@@ -745,18 +745,18 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
     var server = std.http.Server.init(conn_reader.interface(), &conn_writer.interface);
 
     while (server.reader.state == .ready) {
-        handleRequest(allocator, &server) catch |e| switch (e) {
+        handleRequest(allocator, &server, conn.address) catch |e| switch (e) {
             error.HttpConnectionClosing => return,
             else => return log.err("request handler err: {}", .{e}),
         };
     }
 }
 
-fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
+fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_addr: std.net.Address) !void {
     const log = std.log.scoped(.http_req);
 
     var req = try server.receiveHead();
-    log.debug("[{t}] {s}", .{ req.head.method, req.head.target });
+    log.debug("{f} -> {t} {s}", .{ client_addr, req.head.method, req.head.target });
 
     switch (req.head.method) {
         .GET => {
@@ -766,6 +766,10 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                 });
             } else if (std.mem.eql(u8, req.head.target, "/upload.js")) {
                 try req.respond(@embedFile("web/upload.js"), .{
+                    .extra_headers = &.{.{ .name = "content-type", .value = "application/javascript" }},
+                });
+            } else if (std.mem.eql(u8, req.head.target, "/lib/nosleep.min.js")) {
+                try req.respond(@embedFile("web/lib/nosleep.min.js"), .{
                     .extra_headers = &.{.{ .name = "content-type", .value = "application/javascript" }},
                 });
             } else {
@@ -844,13 +848,18 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
                 {
                     const file = switch (chunk_index) {
                         0 => try dir.createFile(tmp_name, .{}),
-                        else => try dir.openFile(tmp_name, .{ .mode = .write_only }),
+                        else => dir.openFile(tmp_name, .{ .mode = .write_only }) catch |err| switch (err) {
+                            error.FileNotFound => {
+                                try req.respond("No upload in progress for this chunk index", .{ .status = .conflict });
+                                return error.no_upload_in_progress;
+                            },
+                            else => return err,
+                        },
                     };
                     defer file.close();
 
                     if (chunk_offset > try file.getEndPos()) {
-                        // compare against current_size if true, then we have missed
-                        // a chunk in what is supposed to be a sequential upload
+                        log.warn("[{s}] rejected chunk {}: expected offset {}, got {}", .{ file_name, chunk_index, try file.getEndPos(), chunk_offset });
                         try req.respond("Chunk out of order", .{ .status = .conflict });
                         return error.chunk_out_of_order;
                     }
@@ -869,12 +878,18 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server) !void {
 
                     try file_writer.interface.flush();
                     new_size += byte_count;
+
+                    log.debug(
+                        "[{s}] chk {}@{} ({}B) -> {}/{} ",
+                        .{ file_name, chunk_index, chunk_offset, byte_count, new_size, total_size },
+                    );
                 }
 
                 if (new_size == total_size) {
                     try dir.rename(tmp_name, file_name);
-                    log.info("successful upload to '{s}{s}{s}'", .{ upload_path, std.fs.path.sep_str, file_name });
+                    log.info("[{s}] completed upload to {s}", .{ file_name, upload_path });
                 } else if (new_size > total_size) {
+                    log.warn("[{s}] overflow: chunk {} pushed size to {} (max {})", .{ file_name, chunk_index, new_size, total_size });
                     try req.respond("Chunk exceeds declared file size", .{ .status = .conflict });
                     return error.write_overflow;
                 }

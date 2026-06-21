@@ -1,7 +1,10 @@
-const uploadBtn = document.getElementById('uploadBtn');
+import NoSleep from '/lib/nosleep.min.js';
 
+const uploadBtn = document.getElementById('uploadBtn');
 const MAX_RETRIES = 4;
 const BASE_DELAY_MS = 500;
+
+const noSleep = new NoSleep();
 
 /** 
  * @param {number} ms  
@@ -45,9 +48,13 @@ async function uploadChunkWithRetry(chunk, file, index, totalChunks, offset, onR
       });
 
       if (response.ok) return response;
-      throw new Error(`Chunk ${index} failed: HTTP ${response.status}`);
+
+      const error = new Error(`Chunk ${index} failed: HTTP ${response.status}`);
+      error.retryable = response.status >= 500;
+
+      throw error;
     } catch (error) {
-      if (attempt === MAX_RETRIES) throw error;
+      if (attempt === MAX_RETRIES || error.retryable === false) throw error;
 
       const delay_ms = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 200;
       onRetry(attempt + 1, MAX_RETRIES, delay_ms);
@@ -75,6 +82,7 @@ uploadBtn.addEventListener('click', async () => {
 
   // TODO(paoda): encodeURIComponent file name
   statusText.innerText = 'Uploading...';
+  noSleep.enable();
 
   try {
     for (let i = 0; i < totalChunks; i++) {
@@ -93,9 +101,10 @@ uploadBtn.addEventListener('click', async () => {
     statusText.innerText = 'Upload complete!';
     fileInput.value = '';
   } catch (error) {
-    statusText.innerText = 'Upload failed or interrupted';
+    statusText.innerText = `Upload failed: ${error.message}`;
     console.error(error);
   } finally {
+    noSleep.disable();
     uploadBtn.disabled = false;
   }
 });
