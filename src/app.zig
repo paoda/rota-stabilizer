@@ -102,7 +102,7 @@ const PlaybackSession = struct {
 
     next_frame: ?*c.AVFrame = null,
 
-    const InitError = error{preload_fail} || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError || EncodeError;
+    const InitError = error{ preload_fail, silent } || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError || EncodeError;
     const log = std.log.scoped(.playback_session);
 
     fn stop(self: *const @This()) void {
@@ -130,10 +130,12 @@ const PlaybackSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
+        if (!verifyPath(allocator, path)) return error.silent;
+
         decoder.init(allocator, hw_device, state.volume.value, path, false) catch |e| switch (e) {
             error.missing_file => {
                 errors.add_missing_file(path);
-                return error.ffmpeg_error; // generic now that its been reported
+                return error.silent;
             },
             else => return e,
         };
@@ -382,10 +384,15 @@ const EncodeSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
+        if (!verifyPath(allocator, src_path)) return error.silent;
+        if (!verifyPath(allocator, dst_path)) return error.silent;
+
+        // FIXME(paoda): error reporting is wrong when writing to a file in a directory that doesn't exist
+
         decoder.init(allocator, hw_dec, 0.0, src_path, true) catch |e| switch (e) {
             error.missing_file => {
                 errors.add_missing_file(src_path);
-                return error.ffmpeg_error; // TODO(paoda): write something here
+                return error.silent;
             },
             else => return e,
         };
@@ -647,7 +654,7 @@ pub const App = struct {
             .idle => {}, // already idle
             .encode => |paths| {
                 const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch |e| switch (e) {
-                    error.ffmpeg_error => return, // reporting handled already
+                    error.silent => return, // reporting handled already
                     else => return errors.add_unknown_err(e),
                 };
 
@@ -655,7 +662,7 @@ pub const App = struct {
             },
             .playback => |path| {
                 const session = PlaybackSession.init(allocator, state, ui, path) catch |e| switch (e) {
-                    error.ffmpeg_error => return, // reporting handled already
+                    error.silent => return, // reporting handled already
                     else => return errors.add_unknown_err(e),
                 };
                 self.session = .{ .playback = session };
@@ -706,4 +713,36 @@ fn getHwDeviceName(t: c.AVHWDeviceType) []const u8 {
     if (t == c.AV_HWDEVICE_TYPE_NONE) return "software";
 
     return std.mem.span(c.av_hwdevice_get_type_name(t));
+}
+
+fn verifyPath(allocator: std.mem.Allocator, path: []const u8) bool {
+    const ext = std.fs.path.extension(path);
+
+    if (std.mem.eql(u8, ext, "")) {
+        errors.add_missing_ext_err(path);
+        return false;
+    }
+
+    var valid_ext: bool = false;
+    // TODO(paoda): dont' hardcode these
+    inline for (&.{ ".mp4", ".mkv", ".mov", ".webm" }) |str| {
+        if (std.mem.eql(u8, ext, str)) valid_ext = true;
+    }
+
+    if (!valid_ext) {
+        errors.add_invalid_video_ext_err(path);
+        return false;
+    }
+
+    const getVideoDirectory = @import("lib/platform.zig").getVideoDirectory;
+
+    if (!std.fs.path.isAbsolute(path)) {
+        const default_path = getVideoDirectory(allocator) catch null;
+        defer if (default_path) |p| allocator.free(p);
+
+        errors.add_relative_path_err(default_path, path);
+        return false;
+    }
+
+    return true;
 }

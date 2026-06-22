@@ -251,6 +251,7 @@ pub const gui = struct {
     pub const State = struct {
         input_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
         output_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
+        default_path: ?[:0]const u8,
 
         hw_dec: HwDeviceType,
         hw_enc: HwDeviceType,
@@ -306,6 +307,7 @@ pub const gui = struct {
             const hw_dec, const hw_enc = guessHardware();
 
             self.* = .{
+                .default_path = getVideoDirectory(allocator) catch null,
                 .net = try Network.init(allocator),
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
@@ -314,6 +316,7 @@ pub const gui = struct {
         }
 
         pub fn deinit(self: State, allocator: std.mem.Allocator) void {
+            if (self.default_path) |path| allocator.free(path);
             self.net.deinit(allocator);
         }
 
@@ -367,7 +370,11 @@ pub const gui = struct {
             drawVideoWindow(maybe_video);
             drawControls(state);
 
-            if (errors.messages.items.len != 0) zgui.openPopup("Error", .{});
+            if (errors.messages.items.len != 0) {
+                const x, const y = zgui.getMainViewport().getCenter();
+                zgui.setNextWindowPos(.{ .x = x, .y = y, .cond = .appearing, .pivot_x = 0.5, .pivot_y = 0.5 });
+                zgui.openPopup("Error", .{});
+            }
 
             if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
                 defer zgui.endPopup();
@@ -435,7 +442,7 @@ pub const gui = struct {
 
         if (!showing) return;
 
-        try drawActionButtons(allocator, state);
+        drawActionButtons(state);
 
         zgui.spacing();
 
@@ -485,9 +492,6 @@ pub const gui = struct {
         const name = "Screen Recordings";
         const spec = "mp4,mkv,mov,webm";
 
-        const default_path = try getVideoDirectory(allocator);
-        defer if (default_path) |path| allocator.free(path);
-
         zgui.pushItemWidth(-zgui.calcTextSize("Browse...", .{})[0] - 20.0);
         defer zgui.popItemWidth();
 
@@ -495,7 +499,7 @@ pub const gui = struct {
 
         zgui.sameLine(.{});
         if (zgui.button("Browse...##input", .{})) {
-            if (try nfd.openFileDialog(allocator, &.{.{ .name = name, .spec = spec }}, default_path)) |path| {
+            if (try nfd.openFileDialog(allocator, &.{.{ .name = name, .spec = spec }}, state.default_path)) |path| {
                 defer allocator.free(path);
                 setPath(&state.input_path, path);
             }
@@ -505,14 +509,14 @@ pub const gui = struct {
 
         zgui.sameLine(.{});
         if (zgui.button("Browse...##output", .{})) {
-            if (try nfd.saveFileDialog(allocator, &.{.{ .name = name, .spec = spec }}, default_path, "output.mp4")) |path| {
+            if (try nfd.saveFileDialog(allocator, &.{.{ .name = name, .spec = spec }}, state.default_path, "output.mp4")) |path| {
                 defer allocator.free(path);
                 setPath(&state.output_path, path);
             }
         }
     }
 
-    fn drawActionButtons(allocator: std.mem.Allocator, state: *State) !void {
+    fn drawActionButtons(state: *State) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -541,11 +545,9 @@ pub const gui = struct {
                 const str = std.mem.sliceTo(state.output_path[0..], 0);
 
                 if (str.len == 0) {
-                    if (try getVideoDirectory(allocator)) |video_path| {
-                        defer allocator.free(video_path);
-
-                        const file_path = try std.fs.path.joinZ(allocator, &.{ video_path, "output.mp4" });
-                        defer allocator.free(file_path);
+                    if (state.default_path) |path| {
+                        var buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const file_path = std.fmt.bufPrintZ(&buf, "{s}{s}{s}", .{ path, std.fs.path.sep_str, "output.mp4" }) catch unreachable;
 
                         setPath(&state.output_path, file_path);
                     }
@@ -811,7 +813,16 @@ pub const gui = struct {
 
         const panel_width = zgui.getContentRegionAvail()[0];
 
-        zgui.textWrapped("Scan to upload a video over Wi-Fi.", .{});
+        zgui.text("Scan to upload a video over Wi-Fi", .{});
+
+        if (state.default_path) |path| {
+            zgui.sameLine(.{ .spacing = 2 });
+            zgui.textDisabled("(?)", .{});
+            if (zgui.isItemHovered(.{}) and zgui.beginTooltip()) {
+                defer zgui.endTooltip();
+                zgui.text("files will be uploaded to '{s}'", .{path});
+            }
+        }
 
         zgui.spacing();
         zgui.separator();

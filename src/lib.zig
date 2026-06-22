@@ -919,7 +919,7 @@ pub const Errors = struct {
         self.print("failed to determine local ip: {}\n", .{e});
     }
 
-    pub fn add_win_signal_handler_err(self: *Errors, e: std.posix.ConnectError) void {
+    pub fn add_win_signal_handler_err(self: *Errors, e: anyerror) void {
         self.print("failed to setup windows CTRL-C signal handler: {}\n", .{e});
     }
 
@@ -928,14 +928,31 @@ pub const Errors = struct {
     }
 
     pub fn add_missing_file(self: *Errors, path: []const u8) void {
-        self.print("unable to access '{s}'\n", .{path});
+        self.print("failed to access '{s}'\n", .{path}); // from ffmpeg
     }
 
     pub fn add_encoding_fallback_err(self: *Errors, device: c.AVHWDeviceType, codec_id: c.AVCodecID) void {
         const device_name = c.av_hwdevice_get_type_name(device);
         const codec_name = c.avcodec_get_name(codec_id);
 
-        self.print("failed to find {s} encoder for {s}. Defaulting to software (will be slow!)\n", .{ codec_name, device_name });
+        self.print("failed to find {s} for {s}. Using (slow) software encoding instead.\n", .{ codec_name, device_name });
+    }
+
+    pub fn add_missing_ext_err(self: *Errors, path: []const u8) void {
+        self.print("'{s}' does not end with a file extension'\n", .{path});
+    }
+
+    pub fn add_invalid_video_ext_err(self: *Errors, path: []const u8) void {
+        // TODO(paoda): dont' hardcode these
+        self.print("'{s}' does not end with '.mp4', '.mkv', '.mov' or '.webm'\n", .{path});
+    }
+
+    pub fn add_relative_path_err(self: *Errors, default_path: ?[:0]const u8, path: []const u8) void {
+        if (default_path) |known_path| {
+            self.print("'{s}' is not an absolute path.\nA well-formed path looks like '{s}{s}example.mp4'\n", .{ path, known_path, std.fs.path.sep_str });
+        } else {
+            self.print("'{s}' is not an absolute path.\n", .{path});
+        }
     }
 
     pub fn add_ffmpeg_err(self: *Errors, errno: c_int) void {
@@ -943,7 +960,7 @@ pub const Errors = struct {
         var buf: [c.AV_ERROR_MAX_STRING_SIZE]u8 = undefined;
 
         const str = std.mem.sliceTo(c.av_make_error_string(&buf, buf.len, errno), 0);
-        self.print("{s} ({})\n", .{ str, errno });
+        self.print("{s} ({}) from ffmpeg\n", .{ str, errno });
     }
 
     pub fn add_unknown_err(self: *Errors, e: anyerror) void {
