@@ -894,14 +894,12 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
 //
 // Errors is a method that reports errors and their context
 pub const Errors = struct {
-    count: usize,
     messages: std.ArrayList([]const u8),
 
     allocator: std.mem.Allocator,
 
     pub fn init(self: *Errors, allocator: std.mem.Allocator) void {
         self.* = .{
-            .count = 0,
             .allocator = allocator,
             .messages = .empty,
         };
@@ -955,7 +953,6 @@ pub const Errors = struct {
     // TODO(paoda): maybe add a scope thing here?
     fn print(self: *Errors, comptime fmt: []const u8, args: anytype) void {
         std.debug.assert(fmt[fmt.len - 1] == '\n');
-        self.count += 1;
 
         const text = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("oom in error reporter (it's over)");
 
