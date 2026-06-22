@@ -2,46 +2,68 @@
 
 ![a screenshot of the application in question](./asset/example.png)
 
-# [See this in action!](https://youtu.be/qs2fVbXWDNI)
+## [See this in action!](https://youtu.be/raAOzAHmAFM)
 
 ## About
 
 Rotaeno is uniquely disadvantaged in that a screen recording on its own is straight up unusable. Currently, players either try a handcam, or use existing stabilization tools. I want everyone to pass around cool looking rotaeno gameplay and I think the best way to achieve this is by making it as frictionless as possible to produce something good looking.
 
-Thus, this stabilizer only requires a screen recording with [Stream Encoding V2](https://rotaeno.com/streaming) enabled. The rest is efficiently handled for you. 
+Thus, this stabilizer only requires a screen recording with [Streaming Mode](https://rotaeno.com/streaming) enabled. The rest is efficiently handled for you.
 
 ## Features
 
 - realtime playback!!!!! (I've tested up to 120fps)
-- fast video encoding 
-- auto crop for tablets 
+- fast video encoding
+- auto crop for tablets
 - pretty ui (blurred background, ring, device border)
-- customization
+- ui customization
+- easy upload from mobile device via QR Code
 
-## Download
+## Download (Nightly)
 
-The most recent successful CI run in the [Actions](<https://github.com/paoda/rota-stabilizer/actions>) tab will have binary artifacts uploaded. 
+The most recent successful CI run in the [Actions](<https://github.com/paoda/rota-stabilizer/actions>) tab will have binary artifacts uploaded (Linux users can find the flatpak here).
 
-Alternatively: 
+Alternatively:
 
 [Windows (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-windows-latest.zip.zip>)
 
 [macOS (nightly.link)](<https://nightly.link/paoda/rota-stabilizer/workflows/main/main/rota-stabilizer-macos-latest.zip.zip>)
 
-
 ## How to Use
 
-- TODO: Instructions on how to use the GUI
+1. Click on the Upload Tab to find the QR Code that allows you to upload a screen recording from your mobile device
+    - Take note of the tooltip above the QR Code which informs you where your uploads will be saved
 
-**NOTE:** This tool uses [ffmpeg](https://www.ffmpeg.org/), so it can work with many video file types. Feel free to have an `input.mkv`, `output.webm`, or `input.mov`. 
+2. Scan the QR Code, then, on your mobile device, click 'Browse...' and then click Upload
+3. To the right of the "Input Video Path" input field, click 'Browse...' and select the uploaded file
+4. Optionally, choose an output path.
+5. Feel free to use the Render and Hardware & Output tabs to configure the stabilizer to your liking.
+6. For Realtime, playback, hit Play. To produce a video file, hit Encode
+7. The stabilized footage will be saved to your chosen output path. If you didn't select one, it will default to `rota-stabilizer/` in your `Videos/` (Win/Linux), or `Movies` (macOS) folder.
 
-# Building
+## Building
 
-`zig build -Doptimize=ReleaseSafe`
+### macOS
 
-The binary can then be found in `zig-out/bin`. 
+```sh
+brew install ffmpeg
+zig build -Doptimize=ReleaseSafe
+```
 
-# Related Work
+### Windows
+
+```sh
+zig build -Doptimize=ReleaseSafe
+```
+
+### Linux
+
+- TODO: i feel like this really depends on the desktop environment
+
+The binary and its dependencies can then be found in `zig-out/bin`.
+
+## Related Work
+
 - [Lawrenceeeeeeee/python_rotaeno_stabilizer](https://github.com/Lawrenceeeeeeee/python_rotaeno_stabilizer)
 - [linnaea/rotaeno-stablizer](https://github.com/linnaea/rotaeno-stablizer)
 - [I-love-study/py-rotaeno-stablizer-gui](https://github.com/I-love-study/py-rotaeno-stablizer-gui)
