@@ -175,23 +175,23 @@ pub inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(
 }
 
 pub fn guessHardware() struct { HwDeviceType, HwDeviceType } {
-    const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
+    if (builtin.os.tag == .macos) return .{ .VideoToolbox, .VideoToolbox };
 
-    if (builtin.os.tag == .macos) {
-        const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
-        if (is_apple) return .{ .VideoToolbox, .VideoToolbox } else return .{ .Software, .Software };
-    }
+    const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
 
     const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
     if (is_nvidia) return .{ .CUDA, .CUDA };
 
-    // FIXME is it fine to use QSV like this?
     const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
-    if (is_intel) return .{ .QSV, .QSV };
+    if (is_intel) return switch (builtin.os.tag) {
+        .linux => .{ .VAAPI, .VAAPI },
+        // FIXME(paoda): qsv encoding?
+        .windows => .{ .D3D11VA, .QSV },
+        else => unreachable,
+    };
 
     const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null;
     const is_ati = std.mem.indexOf(u8, vendor, "ATI") != null;
-
     if (is_amd or is_ati) return switch (builtin.os.tag) {
         .linux => .{ .VAAPI, .VAAPI },
         .windows => .{ .D3D11VA, .AMF },
