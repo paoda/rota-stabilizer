@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const tracy = @import("tracy");
 const gl = @import("gl");
 const c = @import("lib.zig").c;
@@ -726,7 +727,12 @@ fn verifyPath(allocator: std.mem.Allocator, path: []const u8) bool {
     var valid_ext: bool = false;
     // TODO(paoda): dont' hardcode these
     inline for (&.{ ".mp4", ".mkv", ".mov", ".webm" }) |str| {
-        if (std.mem.eql(u8, ext, str)) valid_ext = true;
+        const is_valid = switch (builtin.os.tag) {
+            .windows => std.ascii.eqlIgnoreCase(ext, str),
+            else => std.mem.eql(u8, ext, str),
+        };
+
+        if (is_valid) valid_ext = true;
     }
 
     if (!valid_ext) {
