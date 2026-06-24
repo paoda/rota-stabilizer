@@ -931,11 +931,9 @@ pub const Errors = struct {
         self.print("failed to access '{s}'\n", .{path}); // from ffmpeg
     }
 
-    pub fn add_encoding_fallback_err(self: *Errors, device: c.AVHWDeviceType, codec_id: c.AVCodecID) void {
-        const device_name = c.av_hwdevice_get_type_name(device);
+    pub fn add_encoding_fallback_err(self: *Errors, dev_str: [*:0]const u8, codec_id: c.AVCodecID, e: anyerror) void {
         const codec_name = c.avcodec_get_name(codec_id);
-
-        self.print("failed to find {s} for {s}. Using (slow) software encoding instead.\n", .{ codec_name, device_name });
+        self.print("failed to init {s} {s} encoder ({}). Defaulting to slower software.\n", .{ dev_str, codec_name, e });
     }
 
     pub fn add_missing_ext_err(self: *Errors, path: []const u8) void {

@@ -1050,15 +1050,13 @@ pub const Decoder = struct {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
-        fmt_ctx.dump();
-
         const video_ctx = try allocator.create(dec.AvCodecContext);
         errdefer allocator.destroy(video_ctx);
 
         try video_ctx.init(.video, fmt_ctx, .{ .dev_type = hw_device });
         errdefer video_ctx.deinit();
 
-        video_ctx.dump();
+        video_ctx.dump(fmt_ctx);
 
         const audio_ctx = try allocator.create(dec.AvCodecContext);
         errdefer allocator.destroy(audio_ctx);
@@ -1073,6 +1071,7 @@ pub const Decoder = struct {
             const data = st.?.codecpar.*.coded_side_data;
             const count: usize = @intCast(st.?.codecpar.*.nb_coded_side_data);
 
+            // FIXME(paoda): be a little bit more intentional about how this looks in the terminal
             for (0..count) |i| {
                 const ptr = &data[i];
                 log.debug("{}: {s}", .{ i, c.av_packet_side_data_name(ptr.type) });
@@ -1090,12 +1089,6 @@ pub const Decoder = struct {
             }
         }
 
-        const sw_fmt = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar.*.format;
-        switch (sw_fmt) {
-            c.AV_PIX_FMT_YUV420P10LE, c.AV_PIX_FMT_P010LE => return error.unsupported_colour_depth,
-            else => {},
-        }
-
         const resolution: Resolution = blk: {
             const ctx = video_ctx.inner.?;
 
@@ -1105,7 +1098,8 @@ pub const Decoder = struct {
             break :blk .{ .width = ctx.width, .height = ctx.height };
         };
 
-        log.info(
+        // FIXME(paoda): this could be prettier
+        log.debug(
             "display transform: angle={} pre={}x{} post={f}",
             .{
                 display_rotation,
@@ -1116,6 +1110,14 @@ pub const Decoder = struct {
         );
 
         if (resolution.width < resolution.height) return error.unsupported_orientation;
+
+        const sw_fmt = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar.*.format;
+        switch (sw_fmt) {
+            // TODO(paoda): support 10-bit
+            // TODO(paoda): communicate this to the user
+            c.AV_PIX_FMT_YUV420P10LE, c.AV_PIX_FMT_P010LE => return error.unsupported_colour_depth,
+            else => {},
+        }
 
         var frame_queue = try FrameQueue.init(allocator, .{
             .width = resolution.width,
@@ -1231,14 +1233,16 @@ pub const Encoder = struct {
 
     pub fn init(self: *Encoder, opt: Options, device_type: ?c.AVHWDeviceType, path: []const u8) !void {
         const codec_id = c.AV_CODEC_ID_HEVC; // FIXME(paoda): support H.264
+        // const codec_id = c.AV_CODEC_ID_H264;
 
         if (device_type) |dev| {
-            self.initHardware(opt, dev, codec_id, path) catch {
-                errors.add_encoding_fallback_err(dev, codec_id);
-                try self.initSoftware(opt, codec_id, path);
-            };
+            const dev_str = c.av_hwdevice_get_type_name(dev);
 
-            return;
+            if (self.initHardware(opt, dev, codec_id, path)) {
+                return log.info("init {s} encoder", .{dev_str});
+            } else |e| {
+                errors.add_encoding_fallback_err(dev_str, codec_id, e);
+            }
         }
 
         try self.initSoftware(opt, codec_id, path);
