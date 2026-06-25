@@ -290,6 +290,8 @@ pub const gui = struct {
 
         render: RenderOptions = .{},
 
+        fullscreen: bool = false,
+
         const Network = struct {
             local_addr: ?std.net.Address,
             qr: QrCode,
@@ -394,9 +396,13 @@ pub const gui = struct {
             zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
             defer zgui.popStyleVar(.{});
 
-            try drawSettings(allocator, state);
-            drawVideoWindow(maybe_video);
-            drawControls(state);
+            if (state.fullscreen) {
+                drawVideoWindow(state, maybe_video);
+            } else {
+                try drawSettings(allocator, state);
+                drawVideoWindow(state, maybe_video);
+                drawControls(state);
+            }
 
             if (errors.messages.items.len != 0) {
                 const x, const y = zgui.getMainViewport().getCenter();
@@ -891,7 +897,8 @@ pub const gui = struct {
         defer zone.end();
 
         zgui.text("TIPS:", .{});
-        zgui.bulletText("CTRL+Click to manually input a value!", .{});
+        zgui.bulletText("CTRL+Click to manually input a value", .{});
+        zgui.bulletText("Click on the video preview to toggle fullscreen", .{});
         zgui.bulletText("For YouTube: 3840x2160 @ 60_000kbps", .{});
 
         const version_label = blk: {
@@ -907,7 +914,7 @@ pub const gui = struct {
         zgui.textDisabled("{s}", .{version_label});
     }
 
-    fn drawVideoWindow(maybe_video: ?VideoContext) void {
+    fn drawVideoWindow(state: *State, maybe_video: ?VideoContext) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -953,6 +960,11 @@ pub const gui = struct {
             .uv0 = .{ 0.0, 1.0 },
             .uv1 = .{ 1.0, 0.0 },
         });
+
+        // FIXME(paoda): change drag and drop to only accept in this area
+        if (zgui.isItemHovered(.{}) and zgui.isMouseClicked(.left)) {
+            state.fullscreen = !state.fullscreen;
+        }
     }
 
     fn drawControls(state: *State) void {
