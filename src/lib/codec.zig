@@ -637,12 +637,20 @@ pub const video = struct {
                     0 => {
                         defer c.av_frame_unref(src_frame.ptr());
 
-                        c.av_frame_unref(mid_frame.ptr());
-                        c.av_frame_unref(dst_frame.ptr());
+                        if (decoder.display_rotation == 0) {
+                            // common path, skip the AvFilterGraph
+                            const dst = frame_queue.acquire() catch |e| if (e != error.early_exit) return e else return;
+                            defer frame_queue.commit(dst);
 
-                        try convert(sws, mid_frame, src_frame);
-                        try filter.push(mid_frame.ptr());
-                        try drainFilter(&filter, frame_queue, dst_frame.ptr());
+                            try convert(sws, .{ .inner = dst }, src_frame);
+                        } else {
+                            c.av_frame_unref(mid_frame.ptr());
+                            c.av_frame_unref(dst_frame.ptr());
+
+                            try convert(sws, mid_frame, src_frame);
+                            try filter.push(mid_frame.ptr());
+                            try drainFilter(&filter, frame_queue, dst_frame.ptr());
+                        }
                     },
                     c.AVERROR(c.EAGAIN) => break :recv_loop,
                     c.AVERROR_EOF => {
@@ -1349,8 +1357,6 @@ pub const Encoder = struct {
             },
             ._hw = blk: {
                 if (codec.hw == null) break :blk null;
-
-                // communicates to the encoder that we are looking for software encoding
                 if (codec_ctx.ptr().hw_frames_ctx == null) break :blk null;
                 const frame = try AvFrame.init();
 
