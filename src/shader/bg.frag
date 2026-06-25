@@ -14,6 +14,7 @@ uniform mat3 u_colour_space;
 uniform float u_intensity;
 uniform float u_radius;
 uniform float u_zoom;
+uniform bool u_green_screen;
 
 uniform vec3 u_tint;
 
@@ -32,6 +33,11 @@ vec3 sampleTex(vec2 pos) {
 }
 
 void main() {
+    if (u_green_screen) {
+        frag_colour = vec4(0, 1, 0, 1.0);
+        return;
+    }
+
     vec2 zoom_uv = (uv - 0.5) / u_zoom + 0.5;
 
     vec2 pos = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);

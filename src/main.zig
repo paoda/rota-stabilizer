@@ -142,6 +142,8 @@ pub const RenderOptions = struct {
     zoom: f32 = 1.0,
     background_zoom: f32 = 1.0,
     border_radius: f32 = 100.0,
+
+    green_screen: bool = false,
 };
 
 pub fn render(
@@ -201,6 +203,7 @@ pub fn render(
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_zoom"), opt.background_zoom);
         gl.Uniform3fv(gl.GetUniformLocation(prog, "u_tint"), 1, &.{opt.tint});
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_intensity"), opt.tint_intensity);
+        gl.Uniform1i(gl.GetUniformLocation(prog, "u_green_screen"), @intFromBool(opt.green_screen));
 
         gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else { // draw transparency in place of background
@@ -229,7 +232,9 @@ pub fn render(
 
         gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_radius"), manager.meta.circle_radius);
         gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_opacity"), opt.circle_opacity);
-        if (opt.show_circle) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+        // this puck is often transparent which doesn't work at all with the green screen so just disable it
+        if (opt.show_circle and !opt.green_screen) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Draw Ring (matches ring in gameplay)
         gl.UseProgram(ring_prog);
@@ -241,7 +246,8 @@ pub fn render(
 
         gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_radius"), manager.meta.ring_radius);
         gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_thickness"), manager.meta.ring_thickness);
-        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_opacity"), opt.ring_opacity);
+        gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_opacity"), if (opt.green_screen) 1.0 else opt.ring_opacity);
+
         if (opt.show_ring) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
@@ -282,7 +288,7 @@ pub fn render(
 
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_ratio"), magic_aspect_ratio);
         gl.Uniform1f(gl.GetUniformLocation(prog, "u_border_radius"), opt.border_radius);
-        gl.Uniform1f(gl.GetUniformLocation(prog, "u_opacity"), opt.border_opacity);
+        gl.Uniform1f(gl.GetUniformLocation(prog, "u_opacity"), if (opt.green_screen) 1.0 else opt.border_opacity);
         gl.Uniform1i(gl.GetUniformLocation(prog, "u_show_border"), @intFromBool(opt.show_border));
         gl.Uniform2i(gl.GetUniformLocation(prog, "u_resolution"), camera.video_resolution.width, camera.video_resolution.height);
 

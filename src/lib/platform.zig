@@ -557,8 +557,8 @@ pub const gui = struct {
         const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
         const is_possible = input_path.len != 0;
 
-        if (!is_possible) zgui.beginDisabled(.{});
-        defer if (!is_possible) zgui.endDisabled();
+        zgui.beginDisabled(.{ .disabled = !is_possible });
+        defer zgui.endDisabled();
 
         // center the cursor
         const w = 80;
@@ -680,8 +680,8 @@ pub const gui = struct {
             zgui.textDisabled("Background", .{});
             _ = zgui.checkbox("##BackgroundEnabled", .{ .v = &state.render.show_background });
 
-            if (!state.render.show_background) zgui.beginDisabled(.{});
-            defer if (!state.render.show_background) zgui.endDisabled();
+            zgui.beginDisabled(.{ .disabled = !state.render.show_background });
+            defer zgui.endDisabled();
 
             zgui.sameLine(.{});
             zgui.text("Zoom", .{});
@@ -724,18 +724,23 @@ pub const gui = struct {
                 _ = zgui.tableNextColumn();
                 _ = zgui.checkbox("##BorderEnabled", .{ .v = &state.render.show_border });
 
-                if (!state.render.show_border) zgui.beginDisabled(.{});
-                defer if (!state.render.show_border) zgui.endDisabled();
+                zgui.beginDisabled(.{ .disabled = !state.render.show_border });
+                defer zgui.endDisabled();
 
-                _ = zgui.tableNextColumn();
-                zgui.text("Opacity", .{});
-
-                _ = zgui.tableNextColumn();
                 {
-                    zgui.pushItemWidth(-1.0);
-                    defer zgui.popItemWidth();
+                    zgui.beginDisabled(.{ .disabled = state.render.green_screen });
+                    defer zgui.endDisabled();
 
-                    _ = zgui.sliderFloat("##Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
+                    _ = zgui.tableNextColumn();
+                    zgui.text("Opacity", .{});
+
+                    _ = zgui.tableNextColumn();
+                    {
+                        zgui.pushItemWidth(-1.0);
+                        defer zgui.popItemWidth();
+
+                        _ = zgui.sliderFloat("##Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
+                    }
                 }
 
                 _ = zgui.tableNextColumn();
@@ -761,8 +766,8 @@ pub const gui = struct {
 
             zgui.sameLine(.{});
 
-            if (!state.render.show_ring) zgui.beginDisabled(.{});
-            defer if (!state.render.show_ring) zgui.endDisabled();
+            zgui.beginDisabled(.{ .disabled = !state.render.show_ring or state.render.green_screen });
+            defer zgui.endDisabled();
 
             zgui.text("Opacity", .{});
 
@@ -781,12 +786,21 @@ pub const gui = struct {
 
         {
             zgui.textDisabled("Circle", .{});
-            _ = zgui.checkbox("##CircleEnabled", .{ .v = &state.render.show_circle });
+
+            zgui.beginDisabled(.{ .disabled = state.render.green_screen });
+            defer zgui.endDisabled();
+
+            if (state.render.green_screen) {
+                var dummy = false;
+                _ = zgui.checkbox("##CircleEnabled", .{ .v = &dummy });
+            } else {
+                _ = zgui.checkbox("##CircleEnabled", .{ .v = &state.render.show_circle });
+            }
 
             zgui.sameLine(.{});
 
-            if (!state.render.show_circle) zgui.beginDisabled(.{});
-            defer if (!state.render.show_circle) zgui.endDisabled();
+            zgui.beginDisabled(.{ .disabled = !state.render.show_circle });
+            defer zgui.endDisabled();
 
             zgui.text("Opacity", .{});
 
@@ -822,22 +836,31 @@ pub const gui = struct {
 
             zgui.spacing();
 
-            zgui.alignTextToFramePadding();
-            zgui.text("Tint", .{});
-
-            zgui.sameLine(.{});
-            _ = zgui.colorEdit3("##Tint", .{ .col = &state.render.tint, .flags = .{ .no_inputs = true } });
-
-            zgui.sameLine(.{});
-            zgui.text("Intensity", .{});
-
-            zgui.sameLine(.{});
             {
-                zgui.pushItemWidth(-1.0);
-                defer zgui.popItemWidth();
+                zgui.beginDisabled(.{ .disabled = state.render.green_screen });
+                defer zgui.endDisabled();
 
-                _ = zgui.sliderFloat("##Intensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
+                zgui.alignTextToFramePadding();
+                zgui.text("Tint", .{});
+
+                zgui.sameLine(.{});
+                _ = zgui.colorEdit3("##Tint", .{ .col = &state.render.tint, .flags = .{ .no_inputs = true } });
+
+                zgui.sameLine(.{});
+                zgui.text("Intensity", .{});
+
+                zgui.sameLine(.{});
+                {
+                    zgui.pushItemWidth(-1.0);
+                    defer zgui.popItemWidth();
+
+                    _ = zgui.sliderFloat("##Intensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
+                }
             }
+
+            zgui.spacing();
+
+            _ = zgui.checkbox("Green Screen", .{ .v = &state.render.green_screen });
         }
     }
 
