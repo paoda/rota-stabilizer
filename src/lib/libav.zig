@@ -55,7 +55,7 @@ pub const enc = struct {
                 for (0..0x100) |j| { // FIXME(paoda): some arbitrary limit
                     const config: *const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec, @intCast(j)) orelse break;
 
-                    if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX == 0) continue;
+                    if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;
                     log.debug("\tfound {s} device", .{c.av_hwdevice_get_type_name(config.device_type)});
 
                     if (config.device_type != dev_type) continue;
@@ -115,66 +115,8 @@ pub const enc = struct {
         }
     };
 
-    const builtin = @import("builtin");
-
-    const AvHwDeviceContext = struct {
-        inner: [2]?*c.AVBufferRef,
-
-        fn init(hw_device: c.AVHWDeviceType) !AvHwDeviceContext {
-            if (hw_device == c.AV_HWDEVICE_TYPE_QSV) return initIntel();
-
-            var p: ?*c.AVBufferRef = null;
-            _ = try err(c.av_hwdevice_ctx_create(&p, hw_device, null, null, 0));
-
-            return .{ .inner = .{ null, p } };
-        }
-
-        fn initIntel() !AvHwDeviceContext {
-            std.debug.assert(builtin.os.tag == .windows);
-
-            var parent: ?*c.AVBufferRef = null;
-            var child: ?*c.AVBufferRef = null;
-
-            _ = try err(c.av_hwdevice_ctx_create(&parent, c.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0));
-            _ = try err(c.av_hwdevice_ctx_create_derived(&child, c.AV_HWDEVICE_TYPE_QSV, parent, 0));
-
-            return .{ .inner = .{ parent, child } };
-        }
-
-        fn ptr(self: AvHwDeviceContext) *c.AVBufferRef {
-            return self.inner[1].?;
-        }
-
-        fn deinit(self: *AvHwDeviceContext) void {
-            for (&self.inner) |*ctx| {
-                c.av_buffer_unref(ctx);
-            }
-        }
-    };
-
-    const AvHwFrameRef = struct {
-        inner: ?*c.AVBufferRef,
-
-        fn init(device_ctx: AvHwDeviceContext) !AvHwFrameRef {
-            const p: ?*c.AVBufferRef = c.av_hwframe_ctx_alloc(device_ctx.ptr());
-            if (p == null) return error.ffmpeg_error;
-
-            return .{ .inner = p };
-        }
-
-        fn ptr(self: AvHwFrameRef) *c.AVBufferRef {
-            return self.inner.?;
-        }
-
-        fn deinit(self: *AvHwFrameRef) void {
-            c.av_buffer_unref(&self.inner);
-        }
-    };
-
     pub const AvCodecContext = struct {
         inner: ?*c.AVCodecContext,
-
-        hw: ?struct { dev_ctx: AvHwDeviceContext } = null,
 
         const Options = struct {
             resolution: Resolution,
@@ -201,7 +143,8 @@ pub const enc = struct {
             ctx.time_base = inpt_vid.*.time_base;
             ctx.framerate = inpt_vid.*.avg_frame_rate;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
-            ctx.pix_fmt = codec.pix_fmt;
+            // qsv seems to want system memory input (NV12 from cpu) for it to work on platforms like Gemini Lake
+            ctx.pix_fmt = if (codec.hw != null) c.AV_PIX_FMT_NV12 else codec.pix_fmt;
             ctx.bit_rate = opt.bit_rate * KBPS_TO_BPS;
             ctx.gop_size = @intFromFloat(c.av_q2d(ctx.framerate) / 2);
 
@@ -217,17 +160,6 @@ pub const enc = struct {
                 ctx.flags |= c.AV_CODEC_FLAG_GLOBAL_HEADER;
             }
 
-            if (codec.hw) |hw| {
-                var dev_ctx = try AvHwDeviceContext.init(hw.dev_type);
-                errdefer dev_ctx.deinit();
-
-                ctx.hw_device_ctx = c.av_buffer_ref(dev_ctx.ptr());
-
-                try setHwframeContext(p.?, dev_ctx, codec.pix_fmt);
-
-                return .{ .inner = p, .hw = .{ .dev_ctx = dev_ctx } };
-            }
-
             return .{ .inner = p };
         }
 
@@ -235,25 +167,7 @@ pub const enc = struct {
             return self.inner.?;
         }
 
-        fn setHwframeContext(codec_ctx: *c.AVCodecContext, device_ctx: AvHwDeviceContext, pix_fmt: c.AVPixelFormat) !void {
-            var hw_frame_ref = try AvHwFrameRef.init(device_ctx);
-            defer hw_frame_ref.deinit();
-
-            var ctx: *c.AVHWFramesContext = @ptrCast(@alignCast(hw_frame_ref.ptr().data));
-            ctx.format = pix_fmt;
-            ctx.sw_format = c.AV_PIX_FMT_NV12;
-            ctx.width = codec_ctx.width;
-            ctx.height = codec_ctx.height;
-            ctx.initial_pool_size = 20; // FIXME: magic number, why?
-
-            _ = try err(c.av_hwframe_ctx_init(hw_frame_ref.ptr()));
-            codec_ctx.hw_frames_ctx = c.av_buffer_ref(hw_frame_ref.ptr());
-        }
-
         pub fn deinit(self: *AvCodecContext) void {
-            // FIXME: do we need to call av_buffer_unref on codec.hw_frames_ctx?
-
-            if (self.hw) |*hw| hw.dev_ctx.deinit();
             c.avcodec_free_context(&self.inner);
         }
     };
