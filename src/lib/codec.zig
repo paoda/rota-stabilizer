@@ -1232,20 +1232,25 @@ pub const Encoder = struct {
     };
 
     pub fn init(self: *Encoder, opt: Options, device_type: ?c.AVHWDeviceType, path: []const u8) !void {
-        const codec_id = c.AV_CODEC_ID_HEVC; // FIXME(paoda): support H.264
-        // const codec_id = c.AV_CODEC_ID_H264;
+        const codec = c.AV_CODEC_ID_HEVC;
 
         if (device_type) |dev| {
             const dev_str = c.av_hwdevice_get_type_name(dev);
 
-            if (self.initHardware(opt, dev, codec_id, path)) {
-                return log.info("init {s} encoder", .{dev_str});
+            if (self.initHardware(opt, dev, codec, path)) {
+                return log.info("init {s} hevc encoder", .{dev_str});
+            } else |_| {
+                log.warn("failed to init {s} hevc encoder, trying h264", .{dev_str});
+            }
+
+            if (self.initHardware(opt, dev, c.AV_CODEC_ID_H264, path)) {
+                return log.info("init {s} h264 encoder", .{dev_str});
             } else |e| {
-                errors.add_encoding_fallback_err(dev_str, codec_id, e);
+                errors.add_encoding_fallback_err(dev_str, c.AV_CODEC_ID_H264, e);
             }
         }
 
-        try self.initSoftware(opt, codec_id, path);
+        try self.initSoftware(opt, codec, path);
     }
 
     pub fn deinit(self: *Encoder) void {
