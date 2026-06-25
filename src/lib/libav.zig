@@ -36,7 +36,11 @@ pub const enc = struct {
         }
 
         pub fn findHardware(dev_type: c.AVHWDeviceType, codec_id: c.AVCodecID) ?AvCodec {
-            log.debug("search for hardware encoder", .{});
+            const needle_str = c.av_hwdevice_get_type_name(dev_type);
+            const codec_name = c.avcodec_get_name(codec_id);
+
+            log.debug("searching for {s} {s} encoder", .{ needle_str, codec_name });
+
             const av_codec_iterate = struct {
                 fn inner(idx: *?*anyopaque) ?*const c.AVCodec {
                     return c.av_codec_iterate(idx);
@@ -48,14 +52,20 @@ pub const enc = struct {
                 if (c.av_codec_is_encoder(codec) == 0) continue;
                 if (codec.id != codec_id) continue;
 
-                for (0..0x100) |j| { // FIXME: some arbitrary limit
+                for (0..0x100) |j| { // FIXME(paoda): some arbitrary limit
                     const config: *const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec, @intCast(j)) orelse break;
 
-                    if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX == 0) continue;
-                    if (config.device_type != dev_type) continue;
+                    if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;
+                    log.debug("\tfound {s} device", .{c.av_hwdevice_get_type_name(config.device_type)});
 
-                    log.info("found {s} encoder for {s} ", .{ c.av_hwdevice_get_type_name(dev_type), codec.name });
-                    return .{ .inner = codec, .pix_fmt = config.pix_fmt, .hw = .{ .dev_type = dev_type } };
+                    if (config.device_type != dev_type) continue;
+                    log.debug("found {s} {s} encoder", .{ needle_str, codec.name });
+
+                    return .{
+                        .inner = codec,
+                        .pix_fmt = config.pix_fmt,
+                        .hw = .{ .dev_type = dev_type },
+                    };
                 }
             }
 
@@ -105,48 +115,8 @@ pub const enc = struct {
         }
     };
 
-    const AvHwDeviceContext = struct {
-        inner: ?*c.AVBufferRef,
-
-        fn init(hw_device: c.AVHWDeviceType) !AvHwDeviceContext {
-            var p: ?*c.AVBufferRef = null;
-            _ = try err(c.av_hwdevice_ctx_create(&p, hw_device, null, null, 0));
-
-            return .{ .inner = p };
-        }
-
-        fn ptr(self: AvHwDeviceContext) *c.AVBufferRef {
-            return self.inner.?;
-        }
-
-        fn deinit(self: *AvHwDeviceContext) void {
-            c.av_buffer_unref(&self.inner);
-        }
-    };
-
-    const AvHwFrameRef = struct {
-        inner: ?*c.AVBufferRef,
-
-        fn init(device_ctx: AvHwDeviceContext) !AvHwFrameRef {
-            const p: ?*c.AVBufferRef = c.av_hwframe_ctx_alloc(device_ctx.ptr());
-            if (p == null) return error.ffmpeg_error;
-
-            return .{ .inner = p };
-        }
-
-        fn ptr(self: AvHwFrameRef) *c.AVBufferRef {
-            return self.inner.?;
-        }
-
-        fn deinit(self: *AvHwFrameRef) void {
-            c.av_buffer_unref(&self.inner);
-        }
-    };
-
     pub const AvCodecContext = struct {
         inner: ?*c.AVCodecContext,
-
-        hw: ?struct { dev_ctx: AvHwDeviceContext } = null,
 
         const Options = struct {
             resolution: Resolution,
@@ -173,12 +143,13 @@ pub const enc = struct {
             ctx.time_base = inpt_vid.*.time_base;
             ctx.framerate = inpt_vid.*.avg_frame_rate;
             ctx.sample_aspect_ratio = .{ .num = 1, .den = 1 };
-            ctx.pix_fmt = codec.pix_fmt;
+            // qsv seems to want system memory input (NV12 from cpu) for it to work on platforms like Gemini Lake
+            ctx.pix_fmt = if (codec.hw != null) c.AV_PIX_FMT_NV12 else codec.pix_fmt;
             ctx.bit_rate = opt.bit_rate * KBPS_TO_BPS;
             ctx.gop_size = @intFromFloat(c.av_q2d(ctx.framerate) / 2);
 
-            ctx.thread_count = 0;
-            ctx.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
+            ctx.thread_count = if (codec.hw) |_| 1 else 0;
+            ctx.thread_type = if (codec.hw) |_| 0 else c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
 
             ctx.color_range = c.AVCOL_RANGE_MPEG;
             ctx.color_primaries = c.AVCOL_PRI_BT709;
@@ -189,15 +160,6 @@ pub const enc = struct {
                 ctx.flags |= c.AV_CODEC_FLAG_GLOBAL_HEADER;
             }
 
-            if (codec.hw) |hw| {
-                var dev_ctx = try AvHwDeviceContext.init(hw.dev_type);
-                errdefer dev_ctx.deinit();
-
-                try setHwframeContext(p.?, dev_ctx, codec.pix_fmt);
-
-                return .{ .inner = p, .hw = .{ .dev_ctx = dev_ctx } };
-            }
-
             return .{ .inner = p };
         }
 
@@ -205,25 +167,7 @@ pub const enc = struct {
             return self.inner.?;
         }
 
-        fn setHwframeContext(codec_ctx: *c.AVCodecContext, device_ctx: AvHwDeviceContext, pix_fmt: c.AVPixelFormat) !void {
-            var hw_frame_ref = try AvHwFrameRef.init(device_ctx);
-            defer hw_frame_ref.deinit(); // FIXME: this might cause issues?
-
-            var ctx: *c.AVHWFramesContext = @ptrCast(@alignCast(hw_frame_ref.ptr().data));
-            ctx.format = pix_fmt;
-            ctx.sw_format = c.AV_PIX_FMT_NV12;
-            ctx.width = codec_ctx.width;
-            ctx.height = codec_ctx.height;
-            ctx.initial_pool_size = 20; // FIXME: magic number, why?
-
-            _ = try err(c.av_hwframe_ctx_init(hw_frame_ref.ptr()));
-            codec_ctx.hw_frames_ctx = c.av_buffer_ref(hw_frame_ref.ptr());
-        }
-
         pub fn deinit(self: *AvCodecContext) void {
-            // FIXME: do we need to call av_buffer_unref on codec.hw_frames_ctx?
-
-            if (self.hw) |*hw| hw.dev_ctx.deinit();
             c.avcodec_free_context(&self.inner);
         }
     };
@@ -244,21 +188,22 @@ pub const dec = struct {
 
         const log = std.log.scoped(.dec_codec);
 
-        // FIXME: why is this heap allocated?
         pub fn init(self: *AvCodecContext, comptime kind: Kind, fmt_ctx: AvFormatContext, opt: Options) InitError!void {
-            if (kind == .video) blk: {
-                if (opt.dev_type == c.AV_HWDEVICE_TYPE_NONE) break :blk;
+            if (kind == .video and opt.dev_type != c.AV_HWDEVICE_TYPE_NONE) {
+                const dev_str = c.av_hwdevice_get_type_name(opt.dev_type);
 
-                self.initHardware(fmt_ctx, opt.dev_type) catch {
-                    break :blk log.err("failed to set up hardware device, defaulting to software", .{});
-                };
+                if (self.initHardware(fmt_ctx, opt.dev_type)) {
+                    return log.info("init {s} decoder", .{dev_str}); // TODO(paoda): report error to user here?
+                } else |e| {
+                    log.err("failed to init {s} decode: {}, defaulting to software", .{ dev_str, e });
+                }
             }
 
             try self.initSoftware(kind, fmt_ctx);
         }
 
-        // TODO: dump audio information as well?
-        pub fn dump(self: @This()) void {
+        // TODO(paoda): dump audio information as well?
+        pub fn dump(self: @This(), fmt_ctx: AvFormatContext) void {
             const inner = self.inner.?;
 
             const width: u32 = @intCast(inner.width);
@@ -267,15 +212,20 @@ pub const dec = struct {
             const gcd = std.math.gcd(width, height);
             const aspect_ratio = @as(f32, @floatFromInt(inner.width)) / @as(f32, @floatFromInt(inner.height));
 
-            log.debug("bit_rate: {d:.2}kbps", .{@as(f32, @floatFromInt(inner.bit_rate)) / KBPS_TO_BPS});
-            log.debug("resolution: {}x{}", .{ inner.width, inner.height });
-            log.debug("pix_fmt: {s}", .{getPixelFormatName(inner.pix_fmt)});
-            log.debug("sw_pix_fmt: {s}", .{getPixelFormatName(inner.sw_pix_fmt)});
-            log.debug("aspect ratio: {}:{} | {d:.3}", .{ width / gcd, height / gcd, aspect_ratio });
-            log.debug("colour primaries: {s}", .{c.av_color_primaries_name(inner.color_primaries)});
-            log.debug("colour transfer: {s}", .{c.av_color_transfer_name(inner.color_trc)});
-            log.debug("colour space: {s}", .{c.av_color_space_name(inner.colorspace)});
-            log.debug("colour range: {s}", .{c.av_color_range_name(inner.color_range)});
+            log.debug("AVFormatContext + AVCodecContext info:", .{});
+            log.debug("\tformat: {s} ", .{fmt_ctx.ptr().iformat.*.long_name});
+            log.debug("\tstream count: {}", .{fmt_ctx.ptr().nb_streams});
+            log.debug("\tbit_rate (fmt): {d:.2}kbps", .{@as(f32, @floatFromInt(fmt_ctx.ptr().bit_rate)) / KBPS_TO_BPS});
+
+            log.debug("\tbit_rate (codec): {d:.2}kbps", .{@as(f32, @floatFromInt(inner.bit_rate)) / KBPS_TO_BPS});
+            log.debug("\tresolution: {}x{}", .{ inner.width, inner.height });
+            log.debug("\tpix_fmt: {s}", .{getPixelFormatName(inner.pix_fmt)});
+            log.debug("\tsw_pix_fmt: {s}", .{getPixelFormatName(inner.sw_pix_fmt)});
+            log.debug("\taspect ratio: {}:{} | {d:.3}", .{ width / gcd, height / gcd, aspect_ratio });
+            log.debug("\tcolour primaries: {s}", .{c.av_color_primaries_name(inner.color_primaries)});
+            log.debug("\tcolour transfer: {s}", .{c.av_color_transfer_name(inner.color_trc)});
+            log.debug("\tcolour space: {s}", .{c.av_color_space_name(inner.colorspace)});
+            log.debug("\tcolour range: {s}", .{c.av_color_range_name(inner.color_range)});
         }
 
         pub fn deinit(self: *@This()) void {
@@ -311,39 +261,39 @@ pub const dec = struct {
             var ctx_ptr: ?*c.AVCodecContext = c.avcodec_alloc_context3(codec_ptr);
             errdefer c.avcodec_free_context(&ctx_ptr);
 
-            ctx_ptr.?.thread_count = 0;
-            ctx_ptr.?.thread_type = c.FF_THREAD_FRAME | c.FF_THREAD_SLICE;
-
-            _ = try err(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
-
-            var hw_device_ctx: ?*c.AVBufferRef = null;
-            var hw_pix_fmt: c.AVPixelFormat = undefined;
+            const needle_str = c.av_hwdevice_get_type_name(device_type);
 
             {
-                log.debug("search for hardware decoder", .{});
+                log.debug("searching for {s} {s} decoder", .{ needle_str, codec_ptr.?.name });
 
                 var i: c_int = 0;
                 while (true) {
                     defer i += 1;
 
-                    const config: ?*const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec_ptr.?, i);
-                    if (config == null) {
-                        log.err("no hardware {s} decoder found in {s} device", .{ codec_ptr.?.name, c.av_hwdevice_get_type_name(device_type) });
-                        return error.missing_decoder;
-                    }
+                    const config = blk: {
+                        const ptr: ?*const c.AVCodecHWConfig = c.avcodec_get_hw_config(codec_ptr.?, i);
 
-                    if (config.?.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;
-                    if (config.?.device_type != device_type) continue;
+                        break :blk ptr orelse {
+                            log.err("no {s} {s} decoder found", .{ needle_str, codec_ptr.?.name });
+                            return error.missing_decoder;
+                        };
+                    };
 
-                    hw_pix_fmt = config.?.pix_fmt;
-                    log.info("found {s} decoder for {s} ", .{ c.av_hwdevice_get_type_name(device_type), codec_ptr.?.name });
+                    if (config.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX == 0) continue;
+                    log.debug("\tfound {s} device", .{c.av_hwdevice_get_type_name(config.device_type)});
 
-                    _ = try err(c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0));
+                    if (config.device_type != device_type) continue;
+                    log.debug("found {s} {s} decoder", .{ needle_str, codec_ptr.?.name });
+
+                    var hw_device_ctx: ?*c.AVBufferRef = null;
+
+                    const device_str = if (device_type == c.AV_HWDEVICE_TYPE_QSV) "auto".ptr else null;
+                    _ = try err(c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, device_str, null, 0));
                     errdefer c.av_buffer_unref(&hw_device_ctx);
 
                     ctx_ptr.?.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
 
-                    self.device = .{ .ctx = hw_device_ctx, .pix_fmt = hw_pix_fmt };
+                    self.device = .{ .ctx = hw_device_ctx, .pix_fmt = config.pix_fmt };
 
                     ctx_ptr.?.@"opaque" = &self.device.?;
                     ctx_ptr.?.get_format = Device.getFormat;
@@ -351,6 +301,9 @@ pub const dec = struct {
                     break;
                 }
             }
+
+            _ = try err(c.avcodec_parameters_to_context(ctx_ptr, fmt_ctx.ptr().streams[@intCast(stream)].*.codecpar));
+            ctx_ptr.?.pkt_timebase = fmt_ctx.ptr().streams[@intCast(stream)].*.time_base;
 
             _ = try err(c.avcodec_open2(ctx_ptr, codec_ptr, null));
 
@@ -378,7 +331,7 @@ pub const dec = struct {
 
             for (fmts) |fmt| {
                 if (fmt == self.pix_fmt) {
-                    log.debug("match for {s} found", .{c.av_get_pix_fmt_name(fmt)});
+                    log.debug("match for pix fmt {s} found", .{c.av_get_pix_fmt_name(fmt)});
                     return self.pix_fmt;
                 }
             }
@@ -401,16 +354,6 @@ pub const dec = struct {
             _ = try err(c.avformat_find_stream_info(p, null));
 
             return .{ .inner = p };
-        }
-
-        pub fn dump(self: @This()) void {
-            const inner = self.inner.?;
-
-            // bit_rate exists here too
-
-            log.debug("format: {s} ", .{inner.iformat.*.long_name});
-            log.debug("stream count: {}", .{inner.nb_streams});
-            log.debug("bit_rate: {d:.2}kbps", .{@as(f32, @floatFromInt(inner.bit_rate)) / KBPS_TO_BPS});
         }
 
         pub inline fn ptr(self: @This()) *c.AVFormatContext {

@@ -21,7 +21,27 @@ const AV_HWDEVICE_TYPE_AMF: c_int = if (@hasDecl(c, "AV_HWDEVICE_TYPE_AMF")) c.A
 
 const errors = &@import("../lib.zig").errors;
 
-pub const HwDeviceType = switch (builtin.os.tag) {
+const DecodeHwDeviceType = switch (builtin.os.tag) {
+    .macos => enum(c.AVHWDeviceType) {
+        VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    .windows => enum(c.AVHWDeviceType) {
+        CUDA = c.AV_HWDEVICE_TYPE_CUDA,
+        D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
+        Vulkan = c.AV_HWDEVICE_TYPE_VULKAN,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    .linux => enum(c.AVHWDeviceType) {
+        CUDA = c.AV_HWDEVICE_TYPE_CUDA,
+        VAAPI = c.AV_HWDEVICE_TYPE_VAAPI,
+        Vulkan = c.AV_HWDEVICE_TYPE_VULKAN,
+        Software = c.AV_HWDEVICE_TYPE_NONE,
+    },
+    else => unreachable,
+};
+
+const EncodeHwDeviceType = switch (builtin.os.tag) {
     .macos => enum(c.AVHWDeviceType) {
         VideoToolbox = c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
         Software = c.AV_HWDEVICE_TYPE_NONE,
@@ -29,7 +49,6 @@ pub const HwDeviceType = switch (builtin.os.tag) {
     .windows => enum(c.AVHWDeviceType) {
         CUDA = c.AV_HWDEVICE_TYPE_CUDA,
         QSV = c.AV_HWDEVICE_TYPE_QSV,
-        D3D11VA = c.AV_HWDEVICE_TYPE_D3D11VA,
         AMF = AV_HWDEVICE_TYPE_AMF,
         Vulkan = c.AV_HWDEVICE_TYPE_VULKAN,
         Software = c.AV_HWDEVICE_TYPE_NONE,
@@ -174,24 +193,24 @@ pub inline fn errify(value: anytype) error{sdl_error}!switch (@typeInfo(@TypeOf(
     };
 }
 
-pub fn guessHardware() struct { HwDeviceType, HwDeviceType } {
-    const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
+pub fn guessHardware() struct { DecodeHwDeviceType, EncodeHwDeviceType } {
+    if (builtin.os.tag == .macos) return .{ .VideoToolbox, .VideoToolbox };
 
-    if (builtin.os.tag == .macos) {
-        const is_apple = std.mem.indexOf(u8, vendor, "Apple") != null;
-        if (is_apple) return .{ .VideoToolbox, .VideoToolbox } else return .{ .Software, .Software };
-    }
+    const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
 
     const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
     if (is_nvidia) return .{ .CUDA, .CUDA };
 
-    // FIXME is it fine to use QSV like this?
     const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
-    if (is_intel) return .{ .QSV, .QSV };
+    if (is_intel) return switch (builtin.os.tag) {
+        .linux => .{ .VAAPI, .VAAPI },
+        // FIXME(paoda): qsv encoding?
+        .windows => .{ .D3D11VA, .QSV },
+        else => unreachable,
+    };
 
     const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null;
     const is_ati = std.mem.indexOf(u8, vendor, "ATI") != null;
-
     if (is_amd or is_ati) return switch (builtin.os.tag) {
         .linux => .{ .VAAPI, .VAAPI },
         .windows => .{ .D3D11VA, .AMF },
@@ -253,8 +272,8 @@ pub const gui = struct {
         output_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
         default_path: ?[:0]const u8,
 
-        hw_dec: HwDeviceType,
-        hw_enc: HwDeviceType,
+        hw_dec: DecodeHwDeviceType,
+        hw_enc: EncodeHwDeviceType,
 
         bit_rate: i32 = 30_000,
         resolution: [2]i32,

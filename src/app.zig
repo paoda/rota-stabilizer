@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const tracy = @import("tracy");
 const gl = @import("gl");
 const c = @import("lib.zig").c;
@@ -124,13 +125,15 @@ const PlaybackSession = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
 
+        log.debug("PlaybackSession init", .{});
+
+        if (!verifyPath(allocator, path)) return error.silent;
+
         const hw_device: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
-        log.debug("using {s} for hw decode", .{getHwDeviceName(hw_device)});
+        log.info("trying {s} for hw decode", .{getHwDeviceName(hw_device)});
 
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
-
-        if (!verifyPath(allocator, path)) return error.silent;
 
         decoder.init(allocator, hw_device, state.volume.value, path, false) catch |e| switch (e) {
             error.missing_file => {
@@ -371,9 +374,15 @@ const EncodeSession = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.init" });
         defer zone.end();
 
+        log.debug("EncodeSession init", .{});
+
+        if (!verifyPath(allocator, src_path)) return error.silent;
+        if (!verifyPath(allocator, dst_path)) return error.silent;
+
         const hw_dec: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
         const hw_enc: c.AVHWDeviceType = @intFromEnum(state.hw_enc);
-        log.debug("dec using {s}, enc using {s}", .{ getHwDeviceName(hw_dec), getHwDeviceName(hw_enc) });
+        log.debug("trying {s} for hw decode", .{getHwDeviceName(hw_dec)});
+        log.debug("trying {s} for hw encode", .{getHwDeviceName(hw_enc)});
 
         var render_view: Viewport = .default;
         try render_view.push(state.resolution[0], state.resolution[1]);
@@ -384,10 +393,8 @@ const EncodeSession = struct {
         const decoder = try allocator.create(Decoder);
         errdefer allocator.destroy(decoder);
 
-        if (!verifyPath(allocator, src_path)) return error.silent;
-        if (!verifyPath(allocator, dst_path)) return error.silent;
-
         // FIXME(paoda): error reporting is wrong when writing to a file in a directory that doesn't exist
+        // FIXME(paoda): volume should be optional and that informs us whether we should init AudioClock or not
 
         decoder.init(allocator, hw_dec, 0.0, src_path, true) catch |e| switch (e) {
             error.missing_file => {
@@ -726,7 +733,12 @@ fn verifyPath(allocator: std.mem.Allocator, path: []const u8) bool {
     var valid_ext: bool = false;
     // TODO(paoda): dont' hardcode these
     inline for (&.{ ".mp4", ".mkv", ".mov", ".webm" }) |str| {
-        if (std.mem.eql(u8, ext, str)) valid_ext = true;
+        const is_valid = switch (builtin.os.tag) {
+            .windows => std.ascii.eqlIgnoreCase(ext, str),
+            else => std.mem.eql(u8, ext, str),
+        };
+
+        if (is_valid) valid_ext = true;
     }
 
     if (!valid_ext) {

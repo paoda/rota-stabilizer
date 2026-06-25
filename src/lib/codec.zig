@@ -637,12 +637,20 @@ pub const video = struct {
                     0 => {
                         defer c.av_frame_unref(src_frame.ptr());
 
-                        c.av_frame_unref(mid_frame.ptr());
-                        c.av_frame_unref(dst_frame.ptr());
+                        if (decoder.display_rotation == 0) {
+                            // common path, skip the AvFilterGraph
+                            const dst = frame_queue.acquire() catch |e| if (e != error.early_exit) return e else return;
+                            defer frame_queue.commit(dst);
 
-                        try convert(sws, mid_frame, src_frame);
-                        try filter.push(mid_frame.ptr());
-                        try drainFilter(&filter, frame_queue, dst_frame.ptr());
+                            try convert(sws, .{ .inner = dst }, src_frame);
+                        } else {
+                            c.av_frame_unref(mid_frame.ptr());
+                            c.av_frame_unref(dst_frame.ptr());
+
+                            try convert(sws, mid_frame, src_frame);
+                            try filter.push(mid_frame.ptr());
+                            try drainFilter(&filter, frame_queue, dst_frame.ptr());
+                        }
                     },
                     c.AVERROR(c.EAGAIN) => break :recv_loop,
                     c.AVERROR_EOF => {
@@ -1050,15 +1058,13 @@ pub const Decoder = struct {
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 
-        fmt_ctx.dump();
-
         const video_ctx = try allocator.create(dec.AvCodecContext);
         errdefer allocator.destroy(video_ctx);
 
         try video_ctx.init(.video, fmt_ctx, .{ .dev_type = hw_device });
         errdefer video_ctx.deinit();
 
-        video_ctx.dump();
+        video_ctx.dump(fmt_ctx);
 
         const audio_ctx = try allocator.create(dec.AvCodecContext);
         errdefer allocator.destroy(audio_ctx);
@@ -1073,6 +1079,7 @@ pub const Decoder = struct {
             const data = st.?.codecpar.*.coded_side_data;
             const count: usize = @intCast(st.?.codecpar.*.nb_coded_side_data);
 
+            // FIXME(paoda): be a little bit more intentional about how this looks in the terminal
             for (0..count) |i| {
                 const ptr = &data[i];
                 log.debug("{}: {s}", .{ i, c.av_packet_side_data_name(ptr.type) });
@@ -1090,12 +1097,6 @@ pub const Decoder = struct {
             }
         }
 
-        const sw_fmt = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar.*.format;
-        switch (sw_fmt) {
-            c.AV_PIX_FMT_YUV420P10LE, c.AV_PIX_FMT_P010LE => return error.unsupported_colour_depth,
-            else => {},
-        }
-
         const resolution: Resolution = blk: {
             const ctx = video_ctx.inner.?;
 
@@ -1105,7 +1106,8 @@ pub const Decoder = struct {
             break :blk .{ .width = ctx.width, .height = ctx.height };
         };
 
-        log.info(
+        // FIXME(paoda): this could be prettier
+        log.debug(
             "display transform: angle={} pre={}x{} post={f}",
             .{
                 display_rotation,
@@ -1116,6 +1118,14 @@ pub const Decoder = struct {
         );
 
         if (resolution.width < resolution.height) return error.unsupported_orientation;
+
+        const sw_fmt = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar.*.format;
+        switch (sw_fmt) {
+            // TODO(paoda): support 10-bit
+            // TODO(paoda): communicate this to the user
+            c.AV_PIX_FMT_YUV420P10LE, c.AV_PIX_FMT_P010LE => return error.unsupported_colour_depth,
+            else => {},
+        }
 
         var frame_queue = try FrameQueue.init(allocator, .{
             .width = resolution.width,
@@ -1220,6 +1230,9 @@ pub const Encoder = struct {
 
     _hw: ?struct { frame: AvFrame } = null,
 
+    // guards against duplicate video DTS, which are supposed to be monotonic
+    last_video_dts: ?i64 = null,
+
     const log = std.log.scoped(.encode);
 
     pub const Options = struct {
@@ -1230,18 +1243,25 @@ pub const Encoder = struct {
     };
 
     pub fn init(self: *Encoder, opt: Options, device_type: ?c.AVHWDeviceType, path: []const u8) !void {
-        const codec_id = c.AV_CODEC_ID_HEVC; // FIXME(paoda): support H.264
+        const codec = c.AV_CODEC_ID_HEVC;
 
         if (device_type) |dev| {
-            self.initHardware(opt, dev, codec_id, path) catch {
-                errors.add_encoding_fallback_err(dev, codec_id);
-                try self.initSoftware(opt, codec_id, path);
-            };
+            const dev_str = c.av_hwdevice_get_type_name(dev);
 
-            return;
+            if (self.initHardware(opt, dev, codec, path)) {
+                return log.info("init {s} hevc encoder", .{dev_str});
+            } else |_| {
+                log.warn("failed to init {s} hevc encoder, trying h264", .{dev_str});
+            }
+
+            if (self.initHardware(opt, dev, c.AV_CODEC_ID_H264, path)) {
+                return log.info("init {s} h264 encoder", .{dev_str});
+            } else |e| {
+                errors.add_encoding_fallback_err(dev_str, c.AV_CODEC_ID_H264, e);
+            }
         }
 
-        try self.initSoftware(opt, codec_id, path);
+        try self.initSoftware(opt, codec, path);
     }
 
     pub fn deinit(self: *Encoder) void {
@@ -1337,6 +1357,7 @@ pub const Encoder = struct {
             },
             ._hw = blk: {
                 if (codec.hw == null) break :blk null;
+                if (codec_ctx.ptr().hw_frames_ctx == null) break :blk null;
                 const frame = try AvFrame.init();
 
                 break :blk .{ .frame = frame };
@@ -1471,6 +1492,16 @@ pub const Encoder = struct {
 
             c.av_packet_rescale_ts(pkt, codec_ctx.time_base, video_stream.time_base);
             pkt.stream_index = video_stream.index;
+
+            // some encoders can produce duplicate DTS when working with time_base and weird
+            // framerates, we have to guard against this by ensuring that all DTS are monotonic and increasing
+            if (self.last_video_dts) |dts| {
+                if (pkt.dts <= dts) {
+                    pkt.dts = dts + 1;
+                    pkt.pts = @max(pkt.pts, pkt.dts);
+                }
+            }
+            self.last_video_dts = pkt.dts;
 
             {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "av_interleaved_write_frame" });
