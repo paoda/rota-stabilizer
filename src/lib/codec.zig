@@ -1346,6 +1346,9 @@ pub const Encoder = struct {
             },
             ._hw = blk: {
                 if (codec.hw == null) break :blk null;
+
+                // communicates to the encoder that we are looking for software encoding
+                if (codec_ctx.ptr().hw_frames_ctx == null) break :blk null;
                 const frame = try AvFrame.init();
 
                 break :blk .{ .frame = frame };
