@@ -73,7 +73,7 @@ pub fn main() !void {
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    try state.init(allocator, startup.render_target);
+    try state.init(allocator, ui.view, startup.render_target);
     defer state.deinit(allocator);
 
     const handle = try std.Thread.spawn(.{}, runHttpServer, .{8080});

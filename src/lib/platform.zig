@@ -289,6 +289,7 @@ pub const gui = struct {
         render: RenderOptions = .{},
 
         fullscreen: bool = false,
+        init_view: Viewport,
 
         const Network = struct {
             local_addr: ?std.net.Address,
@@ -322,7 +323,7 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init(self: *State, allocator: std.mem.Allocator, render_target: Resolution) !void {
+        pub fn init(self: *State, allocator: std.mem.Allocator, view: Viewport, render_target: Resolution) !void {
             const hw_dec, const hw_enc = guessHardware();
 
             self.* = .{
@@ -331,6 +332,7 @@ pub const gui = struct {
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
+                .init_view = view,
             };
         }
 
@@ -354,7 +356,7 @@ pub const gui = struct {
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
-        {
+        if (!state.fullscreen) {
             const viewport = zgui.getMainViewport();
             const pos = viewport.getWorkPos();
             const size = viewport.getWorkSize();
@@ -939,15 +941,47 @@ pub const gui = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        var pushed: u32 = 1;
         zgui.pushStyleVar2f(.{ .idx = .window_padding, .v = .{ 0.0, 0.0 } });
-        defer zgui.popStyleVar(.{ .count = 1 });
+        defer zgui.popStyleVar(.{ .count = @intCast(pushed) });
 
-        const showing = zgui.begin("Video", .{});
+        const name = if (state.fullscreen) "##FullscreenVideo" else "Video";
 
+        const showing = blk: {
+            if (state.fullscreen) {
+                const viewport = zgui.getMainViewport();
+                const pos = viewport.getWorkPos();
+                const size = viewport.getWorkSize();
+
+                zgui.setNextWindowPos(.{ .x = pos[0], .y = pos[1], .cond = .always });
+                zgui.setNextWindowSize(.{ .w = size[0], .h = size[1], .cond = .always });
+
+                zgui.pushStyleVar1f(.{ .idx = .window_border_size, .v = 0.0 });
+                pushed += 1;
+
+                break :blk zgui.begin(name, .{ .flags = .{
+                    .no_title_bar = true,
+                    .no_move = true,
+                    .no_resize = true,
+                    .no_collapse = true,
+                    .no_bring_to_front_on_focus = true,
+                    .no_nav_focus = true,
+                    .no_docking = true,
+                    .no_background = true,
+                    .no_scrollbar = true,
+                } });
+            }
+
+            break :blk zgui.begin(name, .{});
+        };
         defer zgui.end();
 
         if (!showing) return;
 
+        drawVideoContent(ui, state, maybe_video);
+    }
+
+    fn drawVideoContent(ui: Ui, state: *State, maybe_video: ?VideoContext) void {
         const vid = maybe_video orelse {
             const text = "DRAG AND DROP A VIDEO FILE ANYWHERE";
 
@@ -968,7 +1002,6 @@ pub const gui = struct {
         const w = if (window_aspect > video_aspect) dh * video_aspect else dw;
         const h = if (window_aspect > video_aspect) dh else dw / video_aspect;
 
-        // horizontal + vertical center
         const pos = zgui.getCursorPos();
         zgui.setCursorPos(.{
             pos[0] + (dw - w) * 0.5,
@@ -984,16 +1017,21 @@ pub const gui = struct {
 
         // FIXME(paoda): change drag and drop to only accept in this area
         if (zgui.isItemHovered(.{}) and zgui.isMouseClicked(.left)) {
-            state.fullscreen = !state.fullscreen;
+            toggleVideoFullscreen(ui, state, video_aspect);
+        }
+    }
 
-            if (state.fullscreen) blk: {
-                _, const height = ui.view.get();
+    fn toggleVideoFullscreen(ui: Ui, state: *State, video_aspect: f32) void {
+        state.fullscreen = !state.fullscreen;
 
-                const fheight: f32 = @floatFromInt(height);
-                const new_width: c_int = @intFromFloat(fheight * video_aspect);
+        if (state.fullscreen) {
+            _, const height = ui.view.get();
 
-                if (!c.SDL_SetWindowSize(ui.window, new_width, height)) break :blk;
-            }
+            const new_width: c_int = @intFromFloat(@as(f32, @floatFromInt(height)) * video_aspect);
+            _ = c.SDL_SetWindowSize(ui.window, new_width, height);
+        } else {
+            const width, const height = state.init_view.get();
+            _ = c.SDL_SetWindowSize(ui.window, width, height);
         }
     }
 
