@@ -61,13 +61,8 @@ pub fn main() !void {
     errors.init(allocator);
     defer errors.deinit();
 
-    const ui = try Ui.init(allocator, startup.ui_window);
+    var ui = try Ui.init(allocator, startup.ui_window);
     defer ui.deinit();
-
-    const ui_width, const ui_height = try ui.windowSize();
-
-    var ui_view: Viewport = .default;
-    try ui_view.push(ui_width, ui_height);
 
     if (builtin.mode == .Debug) c.av_log_set_level(c.AV_LOG_VERBOSE);
     signal.setupHandler(); // NB: Has to come after SDL Init
@@ -98,7 +93,7 @@ pub fn main() !void {
 
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
-                    c.SDL_EVENT_WINDOW_RESIZED => ui_view.reset(event.window.data1, event.window.data2),
+                    c.SDL_EVENT_WINDOW_RESIZED => ui.view.reset(event.window.data1, event.window.data2),
                     c.SDL_EVENT_DROP_FILE => {
                         const path = std.mem.sliceTo(event.drop.data, 0);
 
@@ -120,7 +115,7 @@ pub fn main() !void {
         app.poll(allocator, ui, state);
         try app.run(state.render);
 
-        try platform.gui.draw(allocator, state, ui_view, app.video());
+        try platform.gui.draw(allocator, ui, state, app.video());
 
         try ui.swap();
     }

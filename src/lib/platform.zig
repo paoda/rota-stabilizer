@@ -74,6 +74,8 @@ pub const Ui = struct {
     window: *c.SDL_Window,
     gl_ctx: c.SDL_GLContext,
 
+    view: Viewport,
+
     const log = std.log.scoped(.ui);
 
     pub fn init(allocator: std.mem.Allocator, resolution: Resolution) !Ui {
@@ -107,6 +109,9 @@ pub const Ui = struct {
         gl.makeProcTableCurrent(&gl_procs);
         errdefer gl.makeProcTableCurrent(null);
 
+        var view: Viewport = .default;
+        try view.push(width, height);
+
         zgui.init(allocator);
         errdefer zgui.deinit();
 
@@ -132,7 +137,7 @@ pub const Ui = struct {
         try nfd.init();
         errdefer nfd.deinit();
 
-        return .{ .window = window, .gl_ctx = gl_ctx };
+        return .{ .window = window, .gl_ctx = gl_ctx, .view = view };
     }
 
     pub fn deinit(self: @This()) void {
@@ -147,13 +152,6 @@ pub const Ui = struct {
         c.SDL_DestroyWindow(self.window);
 
         c.SDL_Quit();
-    }
-
-    pub fn windowSize(self: @This()) ![2]c_int {
-        var w: c_int, var h: c_int = .{ undefined, undefined };
-        try errify(c.SDL_GetWindowSizeInPixels(self.window, &w, &h));
-
-        return .{ w, h };
     }
 
     pub fn refreshRate(self: @This()) !f32 {
@@ -346,11 +344,11 @@ pub const gui = struct {
         }
     };
 
-    pub fn draw(allocator: std.mem.Allocator, state: *State, ui_view: Viewport, maybe_video: ?VideoContext) !void {
+    pub fn draw(allocator: std.mem.Allocator, ui: Ui, state: *State, maybe_video: ?VideoContext) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const width, const height = ui_view.get();
+        const width, const height = ui.view.get();
 
         zgui.backend.newFrame(@intCast(width), @intCast(height));
 
@@ -385,7 +383,7 @@ pub const gui = struct {
             zgui.popStyleVar(.{ .count = 3 });
 
             if (!built_layout) {
-                setupDockingLayout("MainDockSpace", ui_view);
+                setupDockingLayout("MainDockSpace", ui.view);
                 built_layout = true;
             }
 
@@ -397,10 +395,10 @@ pub const gui = struct {
             defer zgui.popStyleVar(.{});
 
             if (state.fullscreen) {
-                drawVideoWindow(state, maybe_video);
+                drawVideoWindow(ui, state, maybe_video);
             } else {
                 try drawSettings(allocator, state);
-                drawVideoWindow(state, maybe_video);
+                drawVideoWindow(ui, state, maybe_video);
                 drawControls(state);
             }
 
@@ -921,7 +919,7 @@ pub const gui = struct {
 
         zgui.text("TIPS:", .{});
         zgui.bulletText("CTRL+Click to manually input a value", .{});
-        zgui.bulletText("Click on the video preview to toggle fullscreen", .{});
+        zgui.bulletText("Click on the video to toggle fullscreen", .{});
         zgui.bulletText("For YouTube: 3840x2160 @ 60_000kbps", .{});
 
         const version_label = blk: {
@@ -937,7 +935,7 @@ pub const gui = struct {
         zgui.textDisabled("{s}", .{version_label});
     }
 
-    fn drawVideoWindow(state: *State, maybe_video: ?VideoContext) void {
+    fn drawVideoWindow(ui: Ui, state: *State, maybe_video: ?VideoContext) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -987,6 +985,15 @@ pub const gui = struct {
         // FIXME(paoda): change drag and drop to only accept in this area
         if (zgui.isItemHovered(.{}) and zgui.isMouseClicked(.left)) {
             state.fullscreen = !state.fullscreen;
+
+            if (state.fullscreen) blk: {
+                _, const height = ui.view.get();
+
+                const fheight: f32 = @floatFromInt(height);
+                const new_width: c_int = @intFromFloat(fheight * video_aspect);
+
+                if (!c.SDL_SetWindowSize(ui.window, new_width, height)) break :blk;
+            }
         }
     }
 
