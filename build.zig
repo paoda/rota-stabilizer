@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) !void {
         .macos => blk: {
             const result = try std.process.Child.run(.{
                 .allocator = b.allocator,
-                .argv = &.{ "xcrun", "--show-sdk-path" },
+                .argv = &.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" },
             });
 
             const sdk_root = std.mem.trim(u8, result.stdout, " \n");
