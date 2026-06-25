@@ -355,9 +355,16 @@ pub const gui = struct {
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
         {
-            const view_pos = zgui.getMainViewport().getWorkPos();
-            zgui.setNextWindowPos(.{ .x = view_pos[0], .y = view_pos[1], .cond = .always });
-            zgui.setNextWindowSize(.{ .w = @floatFromInt(width), .h = @floatFromInt(height), .cond = .always });
+            const viewport = zgui.getMainViewport();
+            const pos = viewport.getWorkPos();
+            const size = viewport.getWorkSize();
+
+            zgui.setNextWindowPos(.{ .x = pos[0], .y = pos[1], .cond = .always });
+            zgui.setNextWindowSize(.{ .w = size[0], .h = size[1], .cond = .always });
+
+            zgui.pushStyleVar1f(.{ .idx = .window_rounding, .v = 0.0 });
+            zgui.pushStyleVar1f(.{ .idx = .window_border_size, .v = 0.0 });
+            zgui.pushStyleVar2f(.{ .idx = .window_padding, .v = .{ 0.0, 0.0 } });
 
             _ = zgui.begin("MainDockSpace", .{
                 .flags = .{
@@ -372,6 +379,8 @@ pub const gui = struct {
                 },
             });
             defer zgui.end();
+
+            zgui.popStyleVar(.{ .count = 3 });
 
             if (!built_layout) {
                 setupDockingLayout("MainDockSpace", ui_view);
