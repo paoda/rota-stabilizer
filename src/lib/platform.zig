@@ -912,7 +912,7 @@ pub const gui = struct {
         if (!showing) return;
 
         const vid = maybe_video orelse {
-            const text = "VIDEO PREVIEW";
+            const text = "DRAG AND DROP A VIDEO FILE ANYWHERE";
 
             const panel_width, const panel_height = zgui.getContentRegionAvail();
             const text_width, const text_height = zgui.calcTextSize(text, .{});

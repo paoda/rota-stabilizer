@@ -99,6 +99,16 @@ pub fn main() !void {
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
                     c.SDL_EVENT_WINDOW_RESIZED => ui_view.reset(event.window.data1, event.window.data2),
+                    c.SDL_EVENT_DROP_FILE => {
+                        const path = std.mem.sliceTo(event.drop.data, 0);
+
+                        // similar to setPath in platform.zig
+                        const len = @min(path.len, std.fs.max_path_bytes - 1);
+                        @memset(state.input_path[0..], 0);
+                        @memcpy(state.input_path[0..len], path[0..len]);
+
+                        log.debug("write '{s}' to input_path from drag and drop", .{path});
+                    },
                     else => {},
                 }
             }
