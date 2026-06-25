@@ -328,8 +328,195 @@ const PlaybackSession = struct {
     }
 };
 
-const EncodeSession = struct {
+const EncodeWorker = struct {
+    const pool_size = 4;
+
+    const CpuNv12 = struct {
+        data: []u8,
+        y_len: usize,
+        pts: i64 = 0,
+
+        fn y(self: *const CpuNv12) []const u8 {
+            return self.data[0..self.y_len];
+        }
+
+        fn uv(self: *const CpuNv12) []const u8 {
+            return self.data[self.y_len..];
+        }
+    };
+
+    const Job = union(enum) {
+        video: *CpuNv12,
+        audio: *c.AVPacket,
+        flush,
+    };
+
+    allocator: std.mem.Allocator,
     encoder: *Encoder,
+    audio_stream: *c.AVStream,
+
+    jobs: std.ArrayListUnmanaged(Job),
+    job_mutex: std.Thread.Mutex,
+    job_cond: std.Thread.Condition,
+
+    frames: [pool_size]CpuNv12,
+    free_stack: [pool_size]*CpuNv12,
+    free_count: usize,
+    pool_data: []u8,
+    pool_mutex: std.Thread.Mutex,
+    pool_cond: std.Thread.Condition,
+
+    thread: std.Thread,
+    done: std.atomic.Value(bool),
+
+    const log = std.log.scoped(.encode_worker);
+
+    pub fn init(
+        worker: *EncodeWorker,
+        allocator: std.mem.Allocator,
+        encoder: *Encoder,
+        audio_stream: *c.AVStream,
+        y_size: usize,
+        uv_size: usize,
+    ) !void {
+        const frame_size = y_size + uv_size;
+        const pool_data = try allocator.alloc(u8, frame_size * pool_size);
+        errdefer allocator.free(pool_data);
+
+        worker.allocator = allocator;
+        worker.encoder = encoder;
+        worker.audio_stream = audio_stream;
+        worker.jobs = .empty;
+        worker.job_mutex = .{};
+        worker.job_cond = .{};
+        worker.pool_mutex = .{};
+        worker.pool_cond = .{};
+        worker.done = .init(false);
+        worker.pool_data = pool_data;
+        worker.free_count = pool_size;
+
+        for (&worker.frames, 0..) |*frame, i| {
+            frame.* = .{
+                .data = pool_data[i * frame_size ..][0..frame_size],
+                .y_len = y_size,
+            };
+            worker.free_stack[i] = frame;
+        }
+
+        worker.thread = try std.Thread.spawn(.{}, run, .{worker});
+    }
+
+    pub fn deinit(worker: *EncodeWorker) void {
+        worker.allocator.free(worker.pool_data);
+        worker.jobs.deinit(worker.allocator);
+        worker.allocator.destroy(worker.encoder);
+    }
+
+    pub fn wake(worker: *EncodeWorker) void {
+        {
+            worker.job_mutex.lock();
+            defer worker.job_mutex.unlock();
+            worker.job_cond.signal();
+        }
+        {
+            worker.pool_mutex.lock();
+            defer worker.pool_mutex.unlock();
+            worker.pool_cond.signal();
+        }
+    }
+
+    pub fn join(worker: *EncodeWorker) void {
+        worker.thread.join();
+    }
+
+    pub fn acquireFrame(worker: *EncodeWorker) ?*CpuNv12 {
+        worker.pool_mutex.lock();
+        defer worker.pool_mutex.unlock();
+
+        while (worker.free_count == 0) {
+            if (signal.should_quit.load(.monotonic)) return null;
+            worker.pool_cond.wait(&worker.pool_mutex);
+        }
+
+        worker.free_count -= 1;
+        return worker.free_stack[worker.free_count];
+    }
+
+    fn releaseFrame(worker: *EncodeWorker, frame: *CpuNv12) void {
+        worker.pool_mutex.lock();
+        defer worker.pool_mutex.unlock();
+
+        worker.free_stack[worker.free_count] = frame;
+        worker.free_count += 1;
+        worker.pool_cond.signal();
+    }
+
+    fn submit(worker: *EncodeWorker, job: Job) !void {
+        worker.job_mutex.lock();
+        defer worker.job_mutex.unlock();
+
+        try worker.jobs.append(worker.allocator, job);
+        worker.job_cond.signal();
+    }
+
+    pub fn submitVideo(worker: *EncodeWorker, frame: *CpuNv12) !void {
+        try worker.submit(.{ .video = frame });
+    }
+
+    pub fn submitAudio(worker: *EncodeWorker, pkt: *c.AVPacket) !void {
+        try worker.submit(.{ .audio = pkt });
+    }
+
+    pub fn submitFlush(worker: *EncodeWorker) !void {
+        try worker.submit(.flush);
+    }
+
+    fn pop(worker: *EncodeWorker) ?Job {
+        worker.job_mutex.lock();
+        defer worker.job_mutex.unlock();
+
+        while (worker.jobs.items.len == 0) {
+            if (signal.should_quit.load(.monotonic)) return null;
+            worker.job_cond.wait(&worker.job_mutex);
+        }
+
+        return worker.jobs.orderedRemove(0);
+    }
+
+    fn run(worker: *EncodeWorker) void {
+        while (true) {
+            const job = worker.pop() orelse {
+                worker.encoder.deinit();
+                worker.done.store(true, .monotonic);
+                return;
+            };
+
+            switch (job) {
+                .video => |frame| {
+                    defer worker.releaseFrame(frame);
+                    worker.encoder.encodeNv12Frame(frame.y(), frame.uv(), frame.pts) catch |e| {
+                        log.err("encode frame: {}", .{e});
+                    };
+                },
+                .audio => |pkt| {
+                    worker.encoder.writeAudioPacket(worker.audio_stream, pkt) catch |e| {
+                        log.err("mux audio: {}", .{e});
+                    };
+                    var p: ?*c.AVPacket = pkt;
+                    c.av_packet_free(&p);
+                },
+                .flush => {
+                    worker.encoder.deinit();
+                    worker.done.store(true, .monotonic);
+                    return;
+                },
+            }
+        }
+    }
+};
+
+const EncodeSession = struct {
+    worker: *EncodeWorker,
     decoder: *Decoder,
 
     manager: *GpuResourceManager,
@@ -368,6 +555,8 @@ const EncodeSession = struct {
         self.decoder.queue.pkt.video.interrupt();
         self.decoder.queue.pkt.audio.interrupt();
         self.decoder.queue.frame.interrupt();
+
+        self.worker.wake();
     }
 
     pub fn init(allocator: std.mem.Allocator, state: *GuiState, ui: Ui, src_path: []const u8, dst_path: []const u8) !EncodeSession {
@@ -406,7 +595,15 @@ const EncodeSession = struct {
         errdefer decoder.deinit(allocator);
 
         const encoder = try allocator.create(Encoder);
-        errdefer allocator.destroy(encoder);
+
+        // Track encoder ownership: after transferring to worker, encoder is freed
+        // by worker.deinit() — the errdefers below must not touch it.
+        var encoder_needs_deinit = false;
+        var encoder_needs_destroy = true;
+        errdefer {
+            if (encoder_needs_deinit) encoder.deinit();
+            if (encoder_needs_destroy) allocator.destroy(encoder);
+        }
 
         encoder.init(.{ .encode_view = encode_view, .decoder = decoder, .bit_rate = state.bit_rate }, hw_enc, dst_path) catch |e| switch (e) {
             error.missing_file => {
@@ -415,7 +612,7 @@ const EncodeSession = struct {
             },
             else => return e,
         };
-        errdefer encoder.deinit();
+        encoder_needs_deinit = true;
 
         const double_buffer = try allocator.create(DoubleBuffer);
         errdefer allocator.destroy(double_buffer);
@@ -426,6 +623,27 @@ const EncodeSession = struct {
         errdefer manager.deinit(allocator);
 
         try manager.setupEncodingTargets(encode_view, encoder._frame);
+
+        // Compute CPU frame pool sizes from encoder's frame layout
+        const linesize_init: Linesize(c.AV_PIX_FMT_NV12) = .init(encoder._frame);
+        const enc_dims = encode_view.get();
+        const y_size: usize = @intCast(linesize_init.y * enc_dims[1]);
+        const uv_size: usize = @intCast(linesize_init.uv * @divTrunc(enc_dims[1], 2));
+
+        const worker = try allocator.create(EncodeWorker);
+        errdefer allocator.destroy(worker);
+
+        try worker.init(allocator, encoder, decoder.stream(.audio), y_size, uv_size);
+        // Ownership transferred: worker.deinit() will call encoder.deinit() and allocator.destroy(encoder)
+        encoder_needs_deinit = false;
+        encoder_needs_destroy = false;
+
+        errdefer {
+            signal.should_quit.store(true, .monotonic);
+            worker.wake();
+            worker.join();
+            worker.deinit();
+        }
 
         const handles = try decoder.spawn(true);
         errdefer handles.deinit();
@@ -451,7 +669,7 @@ const EncodeSession = struct {
         };
 
         return .{
-            .encoder = encoder,
+            .worker = worker,
             .decoder = decoder,
             .manager = manager,
             .double_buffer = double_buffer,
@@ -475,14 +693,14 @@ const EncodeSession = struct {
         defer zone.end();
 
         self.stop();
+        self.worker.join();
 
         self.handles.deinit();
         self.manager.deinit(allocator);
-
         allocator.destroy(self.double_buffer);
 
-        self.encoder.deinit();
-        allocator.destroy(self.encoder);
+        self.worker.deinit();
+        allocator.destroy(self.worker);
 
         self.decoder.deinit(allocator);
         allocator.destroy(self.decoder);
@@ -492,8 +710,9 @@ const EncodeSession = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.run" });
         defer zone.end();
 
-        const audio_stream = self.decoder.stream(.audio);
-        const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(self.encoder._frame);
+        if (self.is_finished) return;
+
+        const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(self.worker.encoder._frame);
 
         var timer = try std.time.Timer.start();
 
@@ -504,19 +723,15 @@ const EncodeSession = struct {
 
         const target_ns: u64 = @intFromFloat(interval_s * std.time.ns_per_s);
 
-        // hack for when interval_s is 0.0;
-        // FIXME: I feel like this really should just be a ran in another thread....
+        // hack for when interval_s is 0.0 (very high refresh rate displays)
         var just_once = interval_s < std.math.floatEps(f32);
 
         while (timer.read() < target_ns or just_once) {
             just_once = false;
 
-            // Process any pending audio packets (remux to output)
+            // Pass audio packets to the encode worker (it owns and frees them)
             while (self.decoder.queue.pkt.audio.tryPop()) |pkt| {
-                try self.encoder.writeAudioPacket(audio_stream, pkt);
-
-                var tmp: ?*c.AVPacket = pkt;
-                c.av_packet_free(&tmp);
+                try self.worker.submitAudio(pkt);
             }
 
             if (self.decoder.queue.frame.pop()) |frame| {
@@ -576,10 +791,19 @@ const EncodeSession = struct {
                     }
 
                     if (self.upload_buffer.next()) |upload| blk: {
-                        const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse break :blk;
-                        defer unmapNv12Frame(self.manager, upload.id);
+                        const y_pbo, const uv_pbo = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse break :blk;
 
-                        try self.encoder.encodeNv12Frame(y, uv, upload.pts);
+                        const cpu_frame = self.worker.acquireFrame() orelse {
+                            unmapNv12Frame(self.manager, upload.id);
+                            break :blk;
+                        };
+                        cpu_frame.pts = upload.pts;
+                        @memcpy(cpu_frame.data[0..cpu_frame.y_len], y_pbo);
+                        @memcpy(cpu_frame.data[cpu_frame.y_len..], uv_pbo);
+
+                        unmapNv12Frame(self.manager, upload.id);
+
+                        try self.worker.submitVideo(cpu_frame);
                         self.frame_count += 1;
                     }
                 }
@@ -592,13 +816,23 @@ const EncodeSession = struct {
                 self.upload_buffer.skip(); // to access the pending frames
 
                 while (self.upload_buffer.flush()) |upload| {
-                    const y, const uv = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse continue;
-                    defer unmapNv12Frame(self.manager, upload.id);
+                    const y_pbo, const uv_pbo = mapNv12Frame(self.manager, self.encode_view, upload.id, linesize) orelse continue;
 
-                    try self.encoder.encodeNv12Frame(y, uv, upload.pts);
+                    const cpu_frame = self.worker.acquireFrame() orelse {
+                        unmapNv12Frame(self.manager, upload.id);
+                        continue;
+                    };
+                    cpu_frame.pts = upload.pts;
+                    @memcpy(cpu_frame.data[0..cpu_frame.y_len], y_pbo);
+                    @memcpy(cpu_frame.data[cpu_frame.y_len..], uv_pbo);
+
+                    unmapNv12Frame(self.manager, upload.id);
+
+                    try self.worker.submitVideo(cpu_frame);
                     self.frame_count += 1;
                 }
 
+                try self.worker.submitFlush();
                 self.is_finished = true;
                 break;
             }
@@ -624,7 +858,7 @@ pub const App = struct {
                 const den: f32 = @floatFromInt(self.session.encode.frame_total);
                 state.encode_progress = num / den;
 
-                if (self.session.encode.is_finished) {
+                if (self.session.encode.worker.done.load(.monotonic)) {
                     state.request = .idle; // reset to idle when encoding is complete
 
                     if (@abs(state.encode_progress - 1.0) < std.math.floatEps(f32)) {
