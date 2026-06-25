@@ -1222,6 +1222,9 @@ pub const Encoder = struct {
 
     _hw: ?struct { frame: AvFrame } = null,
 
+    // guards against duplicate video DTS, which are supposed to be monotonic
+    last_video_dts: ?i64 = null,
+
     const log = std.log.scoped(.encode);
 
     pub const Options = struct {
@@ -1483,6 +1486,16 @@ pub const Encoder = struct {
 
             c.av_packet_rescale_ts(pkt, codec_ctx.time_base, video_stream.time_base);
             pkt.stream_index = video_stream.index;
+
+            // some encoders can produce duplicate DTS when working with time_base and weird
+            // framerates, we have to guard against this by ensuring that all DTS are monotonic and increasing
+            if (self.last_video_dts) |dts| {
+                if (pkt.dts <= dts) {
+                    pkt.dts = dts + 1;
+                    pkt.pts = @max(pkt.pts, pkt.dts);
+                }
+            }
+            self.last_video_dts = pkt.dts;
 
             {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "av_interleaved_write_frame" });
