@@ -130,7 +130,7 @@ pub const Ui = struct {
         log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
 
         gl.Enable(gl.BLEND);
-        gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.BlendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.Disable(gl.FRAMEBUFFER_SRGB);
         _ = c.SDL_GL_SetSwapInterval(1);
 
@@ -727,20 +727,15 @@ pub const gui = struct {
                 zgui.beginDisabled(.{ .disabled = !state.render.show_border });
                 defer zgui.endDisabled();
 
+                _ = zgui.tableNextColumn();
+                zgui.text("Opacity", .{});
+
+                _ = zgui.tableNextColumn();
                 {
-                    zgui.beginDisabled(.{ .disabled = state.render.green_screen });
-                    defer zgui.endDisabled();
+                    zgui.pushItemWidth(-1.0);
+                    defer zgui.popItemWidth();
 
-                    _ = zgui.tableNextColumn();
-                    zgui.text("Opacity", .{});
-
-                    _ = zgui.tableNextColumn();
-                    {
-                        zgui.pushItemWidth(-1.0);
-                        defer zgui.popItemWidth();
-
-                        _ = zgui.sliderFloat("##Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
-                    }
+                    _ = zgui.sliderFloat("##Opacity", .{ .v = &state.render.border_opacity, .min = 0.0, .max = 1.0 });
                 }
 
                 _ = zgui.tableNextColumn();
@@ -766,7 +761,7 @@ pub const gui = struct {
 
             zgui.sameLine(.{});
 
-            zgui.beginDisabled(.{ .disabled = !state.render.show_ring or state.render.green_screen });
+            zgui.beginDisabled(.{ .disabled = !state.render.show_ring });
             defer zgui.endDisabled();
 
             zgui.text("Opacity", .{});
@@ -787,15 +782,7 @@ pub const gui = struct {
         {
             zgui.textDisabled("Circle", .{});
 
-            zgui.beginDisabled(.{ .disabled = state.render.green_screen });
-            defer zgui.endDisabled();
-
-            if (state.render.green_screen) {
-                var dummy = false;
-                _ = zgui.checkbox("##CircleEnabled", .{ .v = &dummy });
-            } else {
-                _ = zgui.checkbox("##CircleEnabled", .{ .v = &state.render.show_circle });
-            }
+            _ = zgui.checkbox("##CircleEnabled", .{ .v = &state.render.show_circle });
 
             zgui.sameLine(.{});
 
@@ -837,9 +824,6 @@ pub const gui = struct {
             zgui.spacing();
 
             {
-                zgui.beginDisabled(.{ .disabled = state.render.green_screen });
-                defer zgui.endDisabled();
-
                 zgui.alignTextToFramePadding();
                 zgui.text("Tint", .{});
 
@@ -857,10 +841,6 @@ pub const gui = struct {
                     _ = zgui.sliderFloat("##Intensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
                 }
             }
-
-            zgui.spacing();
-
-            _ = zgui.checkbox("Green Screen", .{ .v = &state.render.green_screen });
         }
     }
 
