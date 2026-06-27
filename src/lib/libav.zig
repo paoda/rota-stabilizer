@@ -8,6 +8,7 @@ const errors = &@import("../lib.zig").errors;
 const KBPS_TO_BPS = 1000;
 
 const Resolution = @import("../lib.zig").Resolution;
+const signal = &@import("../lib/platform.zig").signal;
 
 pub const Error = error{ ffmpeg_error, missing_file };
 
@@ -346,9 +347,16 @@ pub const dec = struct {
 
         const log = std.log.scoped(.dec_fmt);
 
+        fn handleInterrupt(_: ?*anyopaque) callconv(.c) c_int {
+            return @intFromBool(signal.should_quit.load(.monotonic));
+        }
+
         pub fn init(path: []const u8) !AvFormatContext {
             var p: ?*c.AVFormatContext = c.avformat_alloc_context();
             errdefer c.avformat_close_input(&p);
+
+            const fmt = p.?;
+            fmt.interrupt_callback.callback = handleInterrupt;
 
             _ = try err(c.avformat_open_input(&p, path.ptr, null, null));
             _ = try err(c.avformat_find_stream_info(p, null));

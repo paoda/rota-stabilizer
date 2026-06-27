@@ -240,6 +240,9 @@ pub const audio = struct {
         };
 
         pub fn init(ctx: *const dec.AvCodecContext, volume: f32) InitError!@This() {
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "audio.Clock.init" });
+            defer zone.end();
+
             var desired: c.SDL_AudioSpec = std.mem.zeroes(c.SDL_AudioSpec);
             desired.freq = ctx.inner.?.sample_rate;
             desired.format = c.SDL_AUDIO_F32;
@@ -807,6 +810,9 @@ pub const FrameQueue = struct {
     // INVARIANT: This is an SPSC Queue
 
     pub fn init(allocator: std.mem.Allocator, opt: Resolution) InitError!FrameQueue {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "FrameQueue.init" });
+        defer zone.end();
+
         comptime std.debug.assert(std.math.isPowerOfTwo(capacity));
 
         const frames = try allocator.alloc(c.AVFrame, capacity);
@@ -1055,6 +1061,9 @@ pub const Decoder = struct {
 
     // TODO: DecoderOptions
     pub fn init(self: *Decoder, allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, volume: f32, path: []const u8, headless: bool) InitError!void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Decoder.init" });
+        defer zone.end();
+
         var fmt_ctx = try dec.AvFormatContext.init(path);
         errdefer fmt_ctx.deinit();
 

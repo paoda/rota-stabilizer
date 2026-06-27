@@ -243,6 +243,9 @@ pub const GpuResourceManager = struct {
     const SetupError = error{framebuffer_check_failed};
 
     pub fn init(allocator: std.mem.Allocator, render_view: Viewport, dimensions: Resolution) InitError!*GpuResourceManager {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "GpuResourceManager.init" });
+        defer zone.end();
+
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
 
@@ -295,7 +298,7 @@ pub const GpuResourceManager = struct {
         gl.BindTexture(gl.TEXTURE_2D, out_tex);
         defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGB8, width, height, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
@@ -963,6 +966,30 @@ pub const Errors = struct {
 
     pub fn add_unknown_err(self: *Errors, e: anyerror) void {
         self.print("unhandled err: {}\n", .{e});
+    }
+
+    pub fn add_non_srt_uri_err(self: *Errors, uri: std.Uri) void {
+        self.print("'{f}' must be a SRT stream (srt://)\n", .{uri});
+    }
+
+    pub fn add_missing_srt_host_err(self: *Errors, uri: std.Uri) void {
+        self.print("'{f}' must specify the host '0.0.0.0'\n", .{uri});
+    }
+
+    pub fn add_incorrect_srt_host_err(self: *Errors, uri: std.Uri) void {
+        self.print("'{f}' did not have '0.0.0.0' as its host\n", .{uri});
+    }
+
+    pub fn add_missing_srt_port_err(self: *Errors, uri: std.Uri) void {
+        self.print("'{f}' must specify a port\n", .{uri});
+    }
+
+    pub fn add_missing_srt_query_err(self: *Errors, uri: std.Uri) void {
+        self.print("'{f}' must specify the query 'mode=listener'\n", .{uri});
+    }
+
+    pub fn add_incorrect_srt_mode_err(self: *Errors, uri: std.Uri) void {
+        self.print("'{f}' did not have the query 'mode=listener'\n", .{uri});
     }
 
     // TODO(paoda): maybe add a scope thing here?

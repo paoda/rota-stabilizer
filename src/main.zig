@@ -31,8 +31,6 @@ const vec2 = @import("lib/math.zig").vec2;
 
 const sleep = @import("lib.zig").sleep;
 
-const RGB24_BPP = @import("lib.zig").RGB24_BPP;
-
 const Y_BPP = @import("lib.zig").Y_BPP;
 const UV_BPP = @import("lib.zig").UV_BPP;
 
@@ -61,13 +59,8 @@ pub fn main() !void {
     errors.init(allocator);
     defer errors.deinit();
 
-    const ui = try Ui.init(allocator, startup.ui_window);
+    var ui = try Ui.init(allocator, startup.ui_window);
     defer ui.deinit();
-
-    const ui_width, const ui_height = try ui.windowSize();
-
-    var ui_view: Viewport = .default;
-    try ui_view.push(ui_width, ui_height);
 
     if (builtin.mode == .Debug) c.av_log_set_level(c.AV_LOG_VERBOSE);
     signal.setupHandler(); // NB: Has to come after SDL Init
@@ -78,7 +71,7 @@ pub fn main() !void {
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    try state.init(allocator, startup.render_target);
+    try state.init(allocator, ui.view, startup.render_target);
     defer state.deinit(allocator);
 
     const handle = try std.Thread.spawn(.{}, runHttpServer, .{8080});
@@ -98,7 +91,7 @@ pub fn main() !void {
 
                 switch (event.type) {
                     c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
-                    c.SDL_EVENT_WINDOW_RESIZED => ui_view.reset(event.window.data1, event.window.data2),
+                    c.SDL_EVENT_WINDOW_RESIZED => ui.view.reset(event.window.data1, event.window.data2),
                     c.SDL_EVENT_DROP_FILE => {
                         const path = std.mem.sliceTo(event.drop.data, 0);
 
@@ -114,13 +107,13 @@ pub fn main() !void {
             }
         }
 
-        gl.ClearColor(0, 0, 0, 1.0);
+        gl.ClearColor(0, 0, 0, 0.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
         app.poll(allocator, ui, state);
         try app.run(state.render);
 
-        try platform.gui.draw(allocator, state, ui_view, app.video());
+        try platform.gui.draw(allocator, ui, state, app.video());
 
         try ui.swap();
     }
@@ -229,6 +222,7 @@ pub fn render(
 
         gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_radius"), manager.meta.circle_radius);
         gl.Uniform1f(gl.GetUniformLocation(circle_prog, "u_opacity"), opt.circle_opacity);
+
         if (opt.show_circle) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Draw Ring (matches ring in gameplay)
@@ -242,6 +236,7 @@ pub fn render(
         gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_radius"), manager.meta.ring_radius);
         gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_thickness"), manager.meta.ring_thickness);
         gl.Uniform1f(gl.GetUniformLocation(ring_prog, "u_opacity"), opt.ring_opacity);
+
         if (opt.show_ring) gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
@@ -704,6 +699,8 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
 }
 
 fn runHttpServer(port: u16) !void {
+    tracy.setThreadName("http server");
+
     const log = std.log.scoped(.http);
 
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -737,6 +734,7 @@ fn runHttpServer(port: u16) !void {
 }
 
 fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Connection) void {
+    tracy.setThreadName("http conn");
     defer conn.stream.close();
 
     const log = std.log.scoped(.http_conn);
@@ -763,6 +761,9 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
 }
 
 fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_addr: std.net.Address) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "handleRequest" });
+    defer zone.end();
+
     const log = std.log.scoped(.http_req);
 
     var req = try server.receiveHead();

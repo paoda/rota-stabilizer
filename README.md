@@ -18,6 +18,7 @@ Thus, this stabilizer only requires a screen recording with [Streaming Mode](htt
 - pretty ui (blurred background, ring, device border)
 - ui customization
 - easy upload from mobile device via QR Code
+- transparent background (for OBS) support
 
 ## Download (Nightly)
 
@@ -40,6 +41,17 @@ Alternatively:
 5. Feel free to use the Render and Hardware & Output tabs to configure the stabilizer to your liking.
 6. For Realtime, playback, hit Play. To produce a video file, hit Encode
 7. The stabilized footage will be saved to your chosen output path. If you didn't select one, it will default to `rota-stabilizer/` in your `Videos/` (Win/Linux), or `Movies` (macOS) folder.
+
+#### How to Enable Transparency
+
+In rota-stabilizer:
+1. Disable the background in the "Render" tab
+
+In OBS (Windows):
+1. Add a "Game Capture" source to the current scene
+2. Select "Capture specific window" from the "Mode" dropdown
+3. In the "Window" dropdown, choose the option that says "Rotaeno Stabilizer" (rota-stabilizer must already be running)
+4. Check "Allow Transparency", then click OK
 
 ## Building
 

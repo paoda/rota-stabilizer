@@ -74,6 +74,8 @@ pub const Ui = struct {
     window: *c.SDL_Window,
     gl_ctx: c.SDL_GLContext,
 
+    view: Viewport,
+
     const log = std.log.scoped(.ui);
 
     pub fn init(allocator: std.mem.Allocator, resolution: Resolution) !Ui {
@@ -107,6 +109,9 @@ pub const Ui = struct {
         gl.makeProcTableCurrent(&gl_procs);
         errdefer gl.makeProcTableCurrent(null);
 
+        var view: Viewport = .default;
+        try view.push(width, height);
+
         zgui.init(allocator);
         errdefer zgui.deinit();
 
@@ -125,14 +130,14 @@ pub const Ui = struct {
         log.info("OpenGL support (want 3.3): {?s}", .{gl.GetString(gl.VERSION)});
 
         gl.Enable(gl.BLEND);
-        gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.BlendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.Disable(gl.FRAMEBUFFER_SRGB);
         _ = c.SDL_GL_SetSwapInterval(1);
 
         try nfd.init();
         errdefer nfd.deinit();
 
-        return .{ .window = window, .gl_ctx = gl_ctx };
+        return .{ .window = window, .gl_ctx = gl_ctx, .view = view };
     }
 
     pub fn deinit(self: @This()) void {
@@ -147,13 +152,6 @@ pub const Ui = struct {
         c.SDL_DestroyWindow(self.window);
 
         c.SDL_Quit();
-    }
-
-    pub fn windowSize(self: @This()) ![2]c_int {
-        var w: c_int, var h: c_int = .{ undefined, undefined };
-        try errify(c.SDL_GetWindowSizeInPixels(self.window, &w, &h));
-
-        return .{ w, h };
     }
 
     pub fn refreshRate(self: @This()) !f32 {
@@ -278,6 +276,7 @@ pub const gui = struct {
         bit_rate: i32 = 30_000,
         resolution: [2]i32,
 
+        is_listening: bool = false,
         encode_progress: f32 = 0.0,
         progress: VideoProgress = .default,
 
@@ -289,6 +288,9 @@ pub const gui = struct {
         volume: VolumeState = .default,
 
         render: RenderOptions = .{},
+
+        fullscreen: bool = false,
+        init_view: Viewport,
 
         const Network = struct {
             local_addr: ?std.net.Address,
@@ -322,7 +324,7 @@ pub const gui = struct {
             cache: f32,
         };
 
-        pub fn init(self: *State, allocator: std.mem.Allocator, render_target: Resolution) !void {
+        pub fn init(self: *State, allocator: std.mem.Allocator, view: Viewport, render_target: Resolution) !void {
             const hw_dec, const hw_enc = guessHardware();
 
             self.* = .{
@@ -331,6 +333,7 @@ pub const gui = struct {
                 .hw_dec = hw_dec,
                 .hw_enc = hw_enc,
                 .resolution = .{ render_target.width, render_target.height },
+                .init_view = view,
             };
         }
 
@@ -344,20 +347,27 @@ pub const gui = struct {
         }
     };
 
-    pub fn draw(allocator: std.mem.Allocator, state: *State, ui_view: Viewport, maybe_video: ?VideoContext) !void {
+    pub fn draw(allocator: std.mem.Allocator, ui: Ui, state: *State, maybe_video: ?VideoContext) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const width, const height = ui_view.get();
+        const width, const height = ui.view.get();
 
         zgui.backend.newFrame(@intCast(width), @intCast(height));
 
         if (builtin.mode == .Debug) zgui.showDemoWindow(null);
 
-        {
-            const view_pos = zgui.getMainViewport().getWorkPos();
-            zgui.setNextWindowPos(.{ .x = view_pos[0], .y = view_pos[1], .cond = .always });
-            zgui.setNextWindowSize(.{ .w = @floatFromInt(width), .h = @floatFromInt(height), .cond = .always });
+        if (!state.fullscreen) {
+            const viewport = zgui.getMainViewport();
+            const pos = viewport.getWorkPos();
+            const size = viewport.getWorkSize();
+
+            zgui.setNextWindowPos(.{ .x = pos[0], .y = pos[1], .cond = .always });
+            zgui.setNextWindowSize(.{ .w = size[0], .h = size[1], .cond = .always });
+
+            zgui.pushStyleVar1f(.{ .idx = .window_rounding, .v = 0.0 });
+            zgui.pushStyleVar1f(.{ .idx = .window_border_size, .v = 0.0 });
+            zgui.pushStyleVar2f(.{ .idx = .window_padding, .v = .{ 0.0, 0.0 } });
 
             _ = zgui.begin("MainDockSpace", .{
                 .flags = .{
@@ -373,8 +383,10 @@ pub const gui = struct {
             });
             defer zgui.end();
 
+            zgui.popStyleVar(.{ .count = 3 });
+
             if (!built_layout) {
-                setupDockingLayout("MainDockSpace", ui_view);
+                setupDockingLayout("MainDockSpace", ui.view);
                 built_layout = true;
             }
 
@@ -385,9 +397,13 @@ pub const gui = struct {
             zgui.pushStyleVar1f(.{ .idx = .frame_rounding, .v = 1.0 });
             defer zgui.popStyleVar(.{});
 
-            try drawSettings(allocator, state);
-            drawVideoWindow(maybe_video);
-            drawControls(state);
+            if (state.fullscreen) {
+                drawVideoWindow(ui, state, maybe_video);
+            } else {
+                try drawSettings(allocator, state);
+                drawVideoWindow(ui, state, maybe_video);
+                drawControls(state);
+            }
 
             if (errors.messages.items.len != 0) {
                 const x, const y = zgui.getMainViewport().getCenter();
@@ -439,7 +455,7 @@ pub const gui = struct {
 
         var left_id: zgui.Ident = undefined;
         var video_id: zgui.Ident = undefined;
-        _ = zgui.dockBuilderSplitNode(dock_id, .left, 0.25, &left_id, &video_id);
+        _ = zgui.dockBuilderSplitNode(dock_id, .left, 0.30, &left_id, &video_id);
 
         var settings_id: zgui.Ident = undefined;
         var controls_id: zgui.Ident = undefined;
@@ -542,24 +558,22 @@ pub const gui = struct {
         const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
         const is_possible = input_path.len != 0;
 
-        if (!is_possible) zgui.beginDisabled(.{});
-        defer if (!is_possible) zgui.endDisabled();
-
-        // center the cursor
-        const w = 80;
+        const w = 75;
         const spacing = zgui.getStyle().item_spacing[0];
-        const width = (w * 3.0) + (spacing * 2.0);
+        const width = (w * 4.0) + (spacing * 3.0);
 
-        const avail_width = zgui.getContentRegionAvail()[0];
-        zgui.setCursorPosX((avail_width - width) / 2.0);
+        zgui.beginDisabled(.{ .disabled = !is_possible });
 
-        if (zgui.button("\u{25ba} Play", .{ .w = 80, .h = 30 })) {
+        const off = (zgui.getContentRegionAvail()[0] - width) / 2.0;
+        if (off > 0) zgui.setCursorPosX(zgui.getCursorPosX() + off);
+
+        if (zgui.button("\u{25ba} Play", .{ .w = w, .h = 30 })) {
             state.request = .{ .playback = input_path };
         }
 
         zgui.sameLine(.{});
 
-        if (zgui.button("\u{25cf} Encode", .{ .w = 80, .h = 30 })) {
+        if (zgui.button("\u{2913} Encode", .{ .w = w, .h = 30 })) {
             const path = blk: {
                 const str = std.mem.sliceTo(state.output_path[0..], 0);
 
@@ -579,11 +593,34 @@ pub const gui = struct {
             state.encode_progress = 0.0; // FIXME: don't set this here
         }
 
+        zgui.endDisabled();
+
         zgui.sameLine(.{});
 
-        if (zgui.button("\u{25a0} Stop", .{ .w = 80, .h = 30 })) {
+        {
+            zgui.beginDisabled(.{ .disabled = state.is_listening });
+            defer zgui.endDisabled();
+
+            if (zgui.button("\u{25cf} Stream", .{ .w = w, .h = 30 })) {
+                state.request = .listen;
+            }
+        }
+
+        zgui.sameLine(.{});
+
+        if (zgui.button("\u{25a0} Stop", .{ .w = w, .h = 30 })) {
             state.request = .idle;
             state.encode_progress = 0.0; // FIXME: don't set this here
+        }
+
+        if (state.is_listening) {
+            const msg = "Awaiting SRT connection on 0.0.0.0:8090\u{2026}";
+            const text_size = zgui.calcTextSize(msg, .{});
+
+            const off_text = (zgui.getContentRegionAvail()[0] - text_size[0]) / 2.0;
+            if (off_text > 0) zgui.setCursorPosX(zgui.getCursorPosX() + off_text);
+
+            zgui.textDisabled(msg, .{});
         }
     }
 
@@ -665,8 +702,8 @@ pub const gui = struct {
             zgui.textDisabled("Background", .{});
             _ = zgui.checkbox("##BackgroundEnabled", .{ .v = &state.render.show_background });
 
-            if (!state.render.show_background) zgui.beginDisabled(.{});
-            defer if (!state.render.show_background) zgui.endDisabled();
+            zgui.beginDisabled(.{ .disabled = !state.render.show_background });
+            defer zgui.endDisabled();
 
             zgui.sameLine(.{});
             zgui.text("Zoom", .{});
@@ -709,8 +746,8 @@ pub const gui = struct {
                 _ = zgui.tableNextColumn();
                 _ = zgui.checkbox("##BorderEnabled", .{ .v = &state.render.show_border });
 
-                if (!state.render.show_border) zgui.beginDisabled(.{});
-                defer if (!state.render.show_border) zgui.endDisabled();
+                zgui.beginDisabled(.{ .disabled = !state.render.show_border });
+                defer zgui.endDisabled();
 
                 _ = zgui.tableNextColumn();
                 zgui.text("Opacity", .{});
@@ -746,8 +783,8 @@ pub const gui = struct {
 
             zgui.sameLine(.{});
 
-            if (!state.render.show_ring) zgui.beginDisabled(.{});
-            defer if (!state.render.show_ring) zgui.endDisabled();
+            zgui.beginDisabled(.{ .disabled = !state.render.show_ring });
+            defer zgui.endDisabled();
 
             zgui.text("Opacity", .{});
 
@@ -766,12 +803,13 @@ pub const gui = struct {
 
         {
             zgui.textDisabled("Circle", .{});
+
             _ = zgui.checkbox("##CircleEnabled", .{ .v = &state.render.show_circle });
 
             zgui.sameLine(.{});
 
-            if (!state.render.show_circle) zgui.beginDisabled(.{});
-            defer if (!state.render.show_circle) zgui.endDisabled();
+            zgui.beginDisabled(.{ .disabled = !state.render.show_circle });
+            defer zgui.endDisabled();
 
             zgui.text("Opacity", .{});
 
@@ -807,21 +845,23 @@ pub const gui = struct {
 
             zgui.spacing();
 
-            zgui.alignTextToFramePadding();
-            zgui.text("Tint", .{});
-
-            zgui.sameLine(.{});
-            _ = zgui.colorEdit3("##Tint", .{ .col = &state.render.tint, .flags = .{ .no_inputs = true } });
-
-            zgui.sameLine(.{});
-            zgui.text("Intensity", .{});
-
-            zgui.sameLine(.{});
             {
-                zgui.pushItemWidth(-1.0);
-                defer zgui.popItemWidth();
+                zgui.alignTextToFramePadding();
+                zgui.text("Tint", .{});
 
-                _ = zgui.sliderFloat("##Intensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
+                zgui.sameLine(.{});
+                _ = zgui.colorEdit3("##Tint", .{ .col = &state.render.tint, .flags = .{ .no_inputs = true } });
+
+                zgui.sameLine(.{});
+                zgui.text("Intensity", .{});
+
+                zgui.sameLine(.{});
+                {
+                    zgui.pushItemWidth(-1.0);
+                    defer zgui.popItemWidth();
+
+                    _ = zgui.sliderFloat("##Intensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
+                }
             }
         }
     }
@@ -882,7 +922,8 @@ pub const gui = struct {
         defer zone.end();
 
         zgui.text("TIPS:", .{});
-        zgui.bulletText("CTRL+Click to manually input a value!", .{});
+        zgui.bulletText("CTRL+Click to manually input a value", .{});
+        zgui.bulletText("Click on the video to toggle fullscreen", .{});
         zgui.bulletText("For YouTube: 3840x2160 @ 60_000kbps", .{});
 
         const version_label = blk: {
@@ -898,19 +939,51 @@ pub const gui = struct {
         zgui.textDisabled("{s}", .{version_label});
     }
 
-    fn drawVideoWindow(maybe_video: ?VideoContext) void {
+    fn drawVideoWindow(ui: Ui, state: *State, maybe_video: ?VideoContext) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        var pushed: u32 = 1;
         zgui.pushStyleVar2f(.{ .idx = .window_padding, .v = .{ 0.0, 0.0 } });
-        defer zgui.popStyleVar(.{ .count = 1 });
+        defer zgui.popStyleVar(.{ .count = @intCast(pushed) });
 
-        const showing = zgui.begin("Video", .{});
+        const name = if (state.fullscreen) "##FullscreenVideo" else "Video";
 
+        const showing = blk: {
+            if (state.fullscreen) {
+                const viewport = zgui.getMainViewport();
+                const pos = viewport.getWorkPos();
+                const size = viewport.getWorkSize();
+
+                zgui.setNextWindowPos(.{ .x = pos[0], .y = pos[1], .cond = .always });
+                zgui.setNextWindowSize(.{ .w = size[0], .h = size[1], .cond = .always });
+
+                zgui.pushStyleVar1f(.{ .idx = .window_border_size, .v = 0.0 });
+                pushed += 1;
+
+                break :blk zgui.begin(name, .{ .flags = .{
+                    .no_title_bar = true,
+                    .no_move = true,
+                    .no_resize = true,
+                    .no_collapse = true,
+                    .no_bring_to_front_on_focus = true,
+                    .no_nav_focus = true,
+                    .no_docking = true,
+                    .no_background = true,
+                    .no_scrollbar = true,
+                } });
+            }
+
+            break :blk zgui.begin(name, .{});
+        };
         defer zgui.end();
 
         if (!showing) return;
 
+        drawVideoContent(ui, state, maybe_video);
+    }
+
+    fn drawVideoContent(ui: Ui, state: *State, maybe_video: ?VideoContext) void {
         const vid = maybe_video orelse {
             const text = "DRAG AND DROP A VIDEO FILE ANYWHERE";
 
@@ -931,7 +1004,6 @@ pub const gui = struct {
         const w = if (window_aspect > video_aspect) dh * video_aspect else dw;
         const h = if (window_aspect > video_aspect) dh else dw / video_aspect;
 
-        // horizontal + vertical center
         const pos = zgui.getCursorPos();
         zgui.setCursorPos(.{
             pos[0] + (dw - w) * 0.5,
@@ -944,6 +1016,25 @@ pub const gui = struct {
             .uv0 = .{ 0.0, 1.0 },
             .uv1 = .{ 1.0, 0.0 },
         });
+
+        // FIXME(paoda): change drag and drop to only accept in this area
+        if (zgui.isItemHovered(.{}) and zgui.isMouseClicked(.left)) {
+            toggleVideoFullscreen(ui, state, video_aspect);
+        }
+    }
+
+    fn toggleVideoFullscreen(ui: Ui, state: *State, video_aspect: f32) void {
+        state.fullscreen = !state.fullscreen;
+
+        if (state.fullscreen) {
+            _, const height = ui.view.get();
+
+            const new_width: c_int = @intFromFloat(@as(f32, @floatFromInt(height)) * video_aspect);
+            _ = c.SDL_SetWindowSize(ui.window, new_width, height);
+        } else {
+            const width, const height = state.init_view.get();
+            _ = c.SDL_SetWindowSize(ui.window, width, height);
+        }
     }
 
     fn drawControls(state: *State) void {
