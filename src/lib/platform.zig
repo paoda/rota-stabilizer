@@ -455,7 +455,7 @@ pub const gui = struct {
 
         var left_id: zgui.Ident = undefined;
         var video_id: zgui.Ident = undefined;
-        _ = zgui.dockBuilderSplitNode(dock_id, .left, 0.25, &left_id, &video_id);
+        _ = zgui.dockBuilderSplitNode(dock_id, .left, 0.30, &left_id, &video_id);
 
         var settings_id: zgui.Ident = undefined;
         var controls_id: zgui.Ident = undefined;
@@ -558,15 +558,14 @@ pub const gui = struct {
         const input_path: [:0]const u8 = std.mem.sliceTo(state.input_path[0..], 0);
         const is_possible = input_path.len != 0;
 
-        zgui.beginDisabled(.{ .disabled = !is_possible });
-
-        // center the cursor
-        const w = 65;
+        const w = 75;
         const spacing = zgui.getStyle().item_spacing[0];
         const width = (w * 4.0) + (spacing * 3.0);
 
-        const avail_width = zgui.getContentRegionAvail()[0];
-        zgui.setCursorPosX((avail_width - width) / 2.0);
+        zgui.beginDisabled(.{ .disabled = !is_possible });
+
+        const off = (zgui.getContentRegionAvail()[0] - width) / 2.0;
+        if (off > 0) zgui.setCursorPosX(zgui.getCursorPosX() + off);
 
         if (zgui.button("\u{25ba} Play", .{ .w = w, .h = 30 })) {
             state.request = .{ .playback = input_path };
@@ -574,7 +573,7 @@ pub const gui = struct {
 
         zgui.sameLine(.{});
 
-        if (zgui.button("\u{25cf} Encode", .{ .w = w, .h = 30 })) {
+        if (zgui.button("\u{2913} Encode", .{ .w = w, .h = 30 })) {
             const path = blk: {
                 const str = std.mem.sliceTo(state.output_path[0..], 0);
 
@@ -602,7 +601,7 @@ pub const gui = struct {
             zgui.beginDisabled(.{ .disabled = state.is_listening });
             defer zgui.endDisabled();
 
-            if (zgui.button("\u{25ba} Stream", .{ .w = w, .h = 30 })) {
+            if (zgui.button("\u{25cf} Stream", .{ .w = w, .h = 30 })) {
                 state.request = .listen;
             }
         }
@@ -617,7 +616,10 @@ pub const gui = struct {
         if (state.is_listening) {
             const msg = "Awaiting SRT connection on 0.0.0.0:8090\u{2026}";
             const text_size = zgui.calcTextSize(msg, .{});
-            zgui.setCursorPosX((avail_width - text_size[0]) / 2.0);
+
+            const off_text = (zgui.getContentRegionAvail()[0] - text_size[0]) / 2.0;
+            if (off_text > 0) zgui.setCursorPosX(zgui.getCursorPosX() + off_text);
+
             zgui.textDisabled(msg, .{});
         }
     }
