@@ -276,6 +276,7 @@ pub const gui = struct {
         bit_rate: i32 = 30_000,
         resolution: [2]i32,
 
+        is_listening: bool = false,
         encode_progress: f32 = 0.0,
         progress: VideoProgress = .default,
 
@@ -558,23 +559,22 @@ pub const gui = struct {
         const is_possible = input_path.len != 0;
 
         zgui.beginDisabled(.{ .disabled = !is_possible });
-        defer zgui.endDisabled();
 
         // center the cursor
-        const w = 80;
+        const w = 65;
         const spacing = zgui.getStyle().item_spacing[0];
-        const width = (w * 3.0) + (spacing * 2.0);
+        const width = (w * 4.0) + (spacing * 3.0);
 
         const avail_width = zgui.getContentRegionAvail()[0];
         zgui.setCursorPosX((avail_width - width) / 2.0);
 
-        if (zgui.button("\u{25ba} Play", .{ .w = 80, .h = 30 })) {
+        if (zgui.button("\u{25ba} Play", .{ .w = w, .h = 30 })) {
             state.request = .{ .playback = input_path };
         }
 
         zgui.sameLine(.{});
 
-        if (zgui.button("\u{25cf} Encode", .{ .w = 80, .h = 30 })) {
+        if (zgui.button("\u{25cf} Encode", .{ .w = w, .h = 30 })) {
             const path = blk: {
                 const str = std.mem.sliceTo(state.output_path[0..], 0);
 
@@ -594,11 +594,31 @@ pub const gui = struct {
             state.encode_progress = 0.0; // FIXME: don't set this here
         }
 
+        zgui.endDisabled();
+
         zgui.sameLine(.{});
 
-        if (zgui.button("\u{25a0} Stop", .{ .w = 80, .h = 30 })) {
+        {
+            zgui.beginDisabled(.{ .disabled = state.is_listening });
+            defer zgui.endDisabled();
+
+            if (zgui.button("\u{25ba} Stream", .{ .w = w, .h = 30 })) {
+                state.request = .listen;
+            }
+        }
+
+        zgui.sameLine(.{});
+
+        if (zgui.button("\u{25a0} Stop", .{ .w = w, .h = 30 })) {
             state.request = .idle;
             state.encode_progress = 0.0; // FIXME: don't set this here
+        }
+
+        if (state.is_listening) {
+            const msg = "Awaiting SRT connection on 0.0.0.0:8090\u{2026}";
+            const text_size = zgui.calcTextSize(msg, .{});
+            zgui.setCursorPosX((avail_width - text_size[0]) / 2.0);
+            zgui.textDisabled(msg, .{});
         }
     }
 

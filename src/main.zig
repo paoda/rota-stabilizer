@@ -135,7 +135,6 @@ pub const RenderOptions = struct {
     zoom: f32 = 1.0,
     background_zoom: f32 = 1.0,
     border_radius: f32 = 100.0,
-
 };
 
 pub fn render(

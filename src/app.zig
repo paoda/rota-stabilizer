@@ -36,12 +36,13 @@ const mapNv12Frame = @import("main.zig").mapNv12Frame;
 const unmapNv12Frame = @import("main.zig").unmapNv12Frame;
 const trace = @import("lib.zig").trace;
 
-const State = enum { idle, playback, encode };
+const State = enum { idle, playback, encode, listen };
 
 pub const Request = union(State) {
     idle: void,
     playback: []const u8,
     encode: struct { src_path: []const u8, dst_path: []const u8 },
+    listen: void,
 };
 
 pub const Action = union(enum) {
@@ -54,6 +55,7 @@ const Session = union(State) {
     idle: IdleSession,
     playback: PlaybackSession,
     encode: EncodeSession,
+    listen: ListenSession,
 
     pub fn deinit(self: *Session, allocator: std.mem.Allocator) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Session.deinit" });
@@ -63,6 +65,7 @@ const Session = union(State) {
             .idle => |s| s.deinit(),
             .playback => |*s| s.deinit(allocator),
             .encode => |*s| s.deinit(allocator),
+            .listen => |*s| s.deinit(allocator),
         }
     }
 };
@@ -82,6 +85,110 @@ const IdleSession = struct {
     }
 
     pub fn deinit(_: IdleSession) void {}
+};
+
+const ListenSession = struct {
+    thread: std.Thread,
+
+    is_done: std.atomic.Value(bool) = .init(false),
+    err: ?anyerror = null,
+    accepted: ?Accepted = null,
+
+    const Accepted = struct {
+        decoder: *Decoder,
+        double_buffer: *DoubleBuffer,
+        handles: Decoder.Handles,
+
+        fn stop(self: *const @This()) void {
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.Accepted.stop" });
+            defer zone.end();
+
+            while (!signal.should_quit.load(.monotonic)) {
+                signal.should_quit.store(true, .monotonic);
+                std.atomic.spinLoopHint();
+            }
+
+            self.decoder.queue.pkt.video.interrupt();
+            self.decoder.queue.pkt.audio.interrupt();
+            self.decoder.queue.frame.interrupt();
+        }
+
+        fn deinit(self: Accepted, allocator: std.mem.Allocator) void {
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.Accepted.deinit" });
+            defer zone.end();
+
+            self.stop();
+            self.handles.deinit();
+
+            allocator.destroy(self.double_buffer);
+
+            self.decoder.deinit(allocator);
+            allocator.destroy(self.decoder);
+        }
+    };
+
+    const uri = "srt://0.0.0.0:8090?mode=listener";
+    const log = std.log.scoped(.listen_session);
+
+    fn init(self: *ListenSession, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) std.Thread.SpawnError!void {
+        self.thread = try std.Thread.spawn(.{}, listen, .{ self, allocator, device_type, volume });
+    }
+
+    fn deinit(self: *ListenSession, allocator: std.mem.Allocator) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.deinit" });
+        defer zone.end();
+
+        if (!self.is_done.load(.acquire)) {
+            // avformat_open_input is still blocking, let's interrupt it
+            while (!signal.should_quit.load(.monotonic)) {
+                signal.should_quit.store(true, .monotonic);
+                std.atomic.spinLoopHint();
+            }
+        }
+
+        self.thread.join();
+
+        if (self.accepted) |accepted| accepted.deinit(allocator);
+    }
+
+    fn listen(self: *ListenSession, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) void {
+        tracy.setThreadName("listen");
+
+        if (setup(allocator, device_type, volume)) |accepted| {
+            self.accepted = accepted;
+        } else |e| {
+            self.err = e;
+        }
+
+        self.is_done.store(true, .release);
+    }
+
+    fn setup(allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) !Accepted {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.setup" });
+        defer zone.end();
+
+        const decoder = try allocator.create(Decoder);
+        errdefer allocator.destroy(decoder);
+
+        try decoder.init(allocator, device_type, volume, uri, false);
+        errdefer decoder.deinit(allocator);
+
+        const double_buffer = try allocator.create(DoubleBuffer);
+        errdefer allocator.destroy(double_buffer);
+
+        double_buffer.* = .{};
+
+        const handles = try decoder.spawn(false);
+        errdefer handles.deinit();
+
+        log.debug("SRT connection established", .{});
+
+        return .{
+            .decoder = decoder,
+            .double_buffer = double_buffer,
+            .handles = handles,
+        };
+    }
 };
 
 const PlaybackSession = struct {
@@ -104,6 +211,7 @@ const PlaybackSession = struct {
     next_frame: ?*c.AVFrame = null,
 
     const InitError = error{ preload_fail, silent } || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError || EncodeError;
+
     const log = std.log.scoped(.playback_session);
 
     fn stop(self: *const @This()) void {
@@ -127,7 +235,7 @@ const PlaybackSession = struct {
 
         log.debug("PlaybackSession init", .{});
 
-        if (!verifyPath(allocator, path)) return error.silent;
+        if (!verifyInputPath(allocator, path)) return error.silent;
 
         const hw_device: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
         log.info("trying {s} for hw decode", .{getHwDeviceName(hw_device)});
@@ -151,6 +259,46 @@ const PlaybackSession = struct {
 
         const handles = try decoder.spawn(false);
         errdefer handles.deinit();
+
+        return initShared(
+            allocator,
+            state,
+            ui,
+            decoder,
+            double_buffer,
+            handles,
+        );
+    }
+
+    fn fromListenSession(allocator: std.mem.Allocator, state: *GuiState, ui: Ui, listen: *ListenSession) InitError!PlaybackSession {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.fromListenSession" });
+        defer zone.end();
+
+        const accepted = listen.accepted.?;
+
+        listen.accepted = null; // so listen.deinit() doesn't free them
+        defer listen.deinit(allocator);
+
+        return initShared(
+            allocator,
+            state,
+            ui,
+            accepted.decoder,
+            accepted.double_buffer,
+            accepted.handles,
+        );
+    }
+
+    fn initShared(
+        allocator: std.mem.Allocator,
+        state: *GuiState,
+        ui: Ui,
+        decoder: *Decoder,
+        double_buffer: *DoubleBuffer,
+        handles: Decoder.Handles,
+    ) InitError!PlaybackSession {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.initShared" });
+        defer zone.end();
 
         var render_view: Viewport = .default;
         try render_view.push(state.resolution[0], state.resolution[1]);
@@ -376,7 +524,7 @@ const EncodeSession = struct {
 
         log.debug("EncodeSession init", .{});
 
-        if (!verifyPath(allocator, src_path)) return error.silent;
+        if (!verifyInputPath(allocator, src_path)) return error.silent;
         if (!verifyPath(allocator, dst_path)) return error.silent;
 
         const hw_dec: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
@@ -651,6 +799,30 @@ pub const App = struct {
                     }
                 }
             },
+            .listen => |*listen| {
+                if (listen.is_done.load(.acquire)) {
+                    if (listen.err) |e| {
+                        state.request = .idle;
+
+                        // TODO(paoda): report this to the user
+                        log.err("failed to start stream: {}", .{e});
+                    } else {
+                        const maybe_session = PlaybackSession.fromListenSession(allocator, state, ui, listen);
+
+                        if (maybe_session) |session| {
+                            // force session change, don't go through regular process, so theres gotta be some self.reset() here
+                            state.is_listening = false;
+
+                            self.session = .{ .playback = session };
+                        } else |e| {
+                            state.request = .idle;
+
+                            // TODO(paoda): report this to user
+                            log.err("failed to convert ListenSession into PlaybackSession: {}", .{e});
+                        }
+                    }
+                }
+            },
             else => {},
         }
 
@@ -659,6 +831,20 @@ pub const App = struct {
 
         switch (request) {
             .idle => {}, // already idle
+            .listen => {
+                self.session = .{ .listen = .{ .thread = undefined } };
+
+                self.session.listen.init(
+                    allocator,
+                    @intFromEnum(state.hw_dec),
+                    state.volume.value,
+                ) catch |e| {
+                    self.session = .{ .idle = IdleSession.init() };
+                    return errors.add_unknown_err(e);
+                };
+
+                state.is_listening = true;
+            },
             .encode => |paths| {
                 const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch |e| switch (e) {
                     error.silent => return, // reporting handled already
@@ -686,6 +872,7 @@ pub const App = struct {
 
         state.encode_progress = 0.0;
         state.progress = .default;
+        state.is_listening = false;
 
         state.request = null;
     }
@@ -695,7 +882,7 @@ pub const App = struct {
         defer zone.end();
 
         switch (self.session) {
-            .idle => {},
+            .idle, .listen => {},
             inline .playback, .encode => |*s| try s.run(opt),
         }
     }
@@ -720,6 +907,46 @@ fn getHwDeviceName(t: c.AVHWDeviceType) []const u8 {
     if (t == c.AV_HWDEVICE_TYPE_NONE) return "software";
 
     return std.mem.span(c.av_hwdevice_get_type_name(t));
+}
+
+fn verifyInputPath(allocator: std.mem.Allocator, path: []const u8) bool {
+    if (std.Uri.parse(path)) |uri| {
+        if (!std.mem.eql(u8, uri.scheme, "srt")) {
+            errors.add_non_srt_uri_err(uri);
+            return false;
+        }
+
+        const host = uri.host orelse {
+            errors.add_missing_srt_host_err(uri);
+            return false;
+        };
+
+        if (!std.mem.eql(u8, host.percent_encoded, "0.0.0.0")) {
+            errors.add_incorrect_srt_host_err(uri);
+            return false;
+        }
+
+        if (uri.port == null) {
+            errors.add_missing_srt_port_err(uri);
+            return false;
+        }
+
+        const query = uri.query orelse {
+            errors.add_missing_srt_query_err(uri);
+            return false;
+        };
+
+        // TODO: support other queries (& + tokenize)
+        if (!std.mem.eql(u8, query.percent_encoded, "mode=listener")) {
+            errors.add_incorrect_srt_mode_err(uri);
+            return false;
+        }
+
+        return true;
+    } else |e| {
+        std.log.debug("uri parse failed (treating as file path): {}\n", .{e});
+        return verifyPath(allocator, path);
+    }
 }
 
 fn verifyPath(allocator: std.mem.Allocator, path: []const u8) bool {
