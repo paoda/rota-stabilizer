@@ -127,7 +127,8 @@ const ListenSession = struct {
         }
     };
 
-    const uri = "srt://0.0.0.0:8090?mode=listener";
+    // TODO(paoda): port and latency ms configurable
+    const uri = "srt://0.0.0.0:8090?mode=listener&latency=50000";
     const log = std.log.scoped(.listen_session);
 
     fn init(self: *ListenSession, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) std.Thread.SpawnError!void {
