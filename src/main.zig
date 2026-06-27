@@ -699,6 +699,8 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
 }
 
 fn runHttpServer(port: u16) !void {
+    tracy.setThreadName("http server");
+
     const log = std.log.scoped(.http);
 
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -732,6 +734,7 @@ fn runHttpServer(port: u16) !void {
 }
 
 fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Connection) void {
+    tracy.setThreadName("http conn");
     defer conn.stream.close();
 
     const log = std.log.scoped(.http_conn);
@@ -758,6 +761,9 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
 }
 
 fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_addr: std.net.Address) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "handleRequest" });
+    defer zone.end();
+
     const log = std.log.scoped(.http_req);
 
     var req = try server.receiveHead();

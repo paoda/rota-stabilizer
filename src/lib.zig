@@ -243,6 +243,9 @@ pub const GpuResourceManager = struct {
     const SetupError = error{framebuffer_check_failed};
 
     pub fn init(allocator: std.mem.Allocator, render_view: Viewport, dimensions: Resolution) InitError!*GpuResourceManager {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "GpuResourceManager.init" });
+        defer zone.end();
+
         const manager = try allocator.create(GpuResourceManager);
         errdefer allocator.destroy(manager);
 
