@@ -926,25 +926,55 @@ pub const Errors = struct {
         self.print("failed to determine local ip: {}\n", .{e});
     }
 
+    // FIXME(paoda): does the user care?
     pub fn add_win_signal_handler_err(self: *Errors, e: anyerror) void {
         self.print("failed to setup windows CTRL-C signal handler: {}\n", .{e});
     }
 
+    // FIXME(paoda): does this need a modal?
     pub fn add_set_volume_err(self: *Errors, volume: f32) void {
         self.print("failed to set device gain to {d:.2}: {s}\n", .{ volume, c.SDL_GetError() });
     }
 
-    pub fn add_missing_file(self: *Errors, path: []const u8) void {
-        self.print("failed to access '{s}'\n", .{path}); // from ffmpeg
+    pub fn add_missing_file_err(self: *Errors, path: []const u8) void {
+        self.print("'{s}' does not exist\n", .{path});
     }
 
-    pub fn add_encoding_fallback_err(self: *Errors, dev_str: [*:0]const u8, codec_id: c.AVCodecID, e: anyerror) void {
-        const codec_name = c.avcodec_get_name(codec_id);
-        self.print("failed to init {s} {s} encoder ({}). Defaulting to slower software.\n", .{ dev_str, codec_name, e });
+    pub fn add_missing_output_directory_err(self: *Errors, path: []const u8) void {
+        const dirname = std.fs.path.dirname(path);
+        const fmt = "'{s}' does not exist\n";
+
+        if (dirname) |str| {
+            self.print(fmt, .{str});
+        } else {
+            self.print(fmt, .{path});
+        }
+    }
+
+    pub fn add_missing_read_permission_err(self: *Errors, path: []const u8) void {
+        self.print("attempt to read '{s}' denied\n", .{path});
+    }
+
+    pub fn add_missing_write_permission_err(self: *Errors, path: []const u8) void {
+        self.print("attempt to write '{s}' deined\n", .{path});
+    }
+
+    pub fn add_encoding_fallback_err(self: *Errors, device_type: c.AVHWDeviceType, attemped: c.AVCodecID, next: c.AVCodecID, e: anyerror) void {
+        const dev_str = c.av_hwdevice_get_type_name(device_type);
+        const attempted_str = c.avcodec_get_name(attemped);
+
+        const str = "failed to init {s} {s} encoder ({}), ";
+
+        if (next == c.AV_CODEC_ID_NONE) {
+            self.print(str ++ "trying {s} software next (slow!)\n", .{ dev_str, attempted_str, e, dev_str });
+        } else {
+            const next_str = c.avcodec_get_name(next);
+            self.print(str ++ "trying {s} {s} next\n", .{ dev_str, attempted_str, e, dev_str, next_str });
+        }
     }
 
     pub fn add_missing_ext_err(self: *Errors, path: []const u8) void {
-        self.print("'{s}' does not end with a file extension'\n", .{path});
+        self.print("'{s}' does not end with a file extension\n", .{path});
     }
 
     pub fn add_invalid_video_ext_err(self: *Errors, path: []const u8) void {
@@ -953,12 +983,15 @@ pub const Errors = struct {
     }
 
     pub fn add_relative_path_err(self: *Errors, default_path: ?[:0]const u8, path: []const u8) void {
+        const str = "'{s}' is not an absolute path\n";
+
         if (default_path) |known_path| {
             const basename = std.fs.path.basename(path);
+            const sep_str = std.fs.path.sep_str;
 
-            self.print("'{s}' is not an absolute path.\nA well-formed path looks like '{s}{s}{s}'\n", .{ path, known_path, std.fs.path.sep_str, basename });
+            self.print(str ++ "A well-formed path looks like '{s}{s}{s}'\n", .{ path, known_path, sep_str, basename });
         } else {
-            self.print("'{s}' is not an absolute path.\n", .{path});
+            self.print(str, .{path});
         }
     }
 
@@ -979,12 +1012,12 @@ pub const Errors = struct {
         const height: u32 = @intCast(resolution.height);
 
         const factor = std.math.gcd(width, height);
-        self.print("'{s}' is {}x{}. Portrait videos are unsupported\n", .{ path, width / factor, height / factor });
+        self.print("'{s}' is {}x{}. portrait videos are unsupported\n", .{ path, width / factor, height / factor });
     }
 
     // TODO(paoda): maybe add a scope thing here?
     fn print(self: *Errors, comptime fmt: []const u8, args: anytype) void {
-        std.debug.assert(fmt[fmt.len - 1] == '\n');
+        comptime std.debug.assert(fmt[fmt.len - 1] == '\n');
 
         const text = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("oom in error reporter (it's over)");
 

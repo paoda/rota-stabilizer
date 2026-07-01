@@ -10,7 +10,7 @@ const KBPS_TO_BPS = 1000;
 const Resolution = @import("../lib.zig").Resolution;
 const signal = &@import("../lib/platform.zig").signal;
 
-pub const Error = error{ ffmpeg_error, missing_file };
+pub const Error = error{ ffmpeg_error, missing_file, missing_permissions };
 
 pub const enc = struct {
     const log = std.log.scoped(.encode);
@@ -459,6 +459,7 @@ pub inline fn err(value: c_int) Error!c_int {
 
     switch (value) {
         c.AVERROR(c.ENOENT) => return error.missing_file,
+        c.AVERROR(c.EACCES) => return error.missing_permissions,
         else => {
             errors.add_ffmpeg_err(value);
             return error.ffmpeg_error;

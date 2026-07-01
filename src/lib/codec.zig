@@ -1260,14 +1260,15 @@ pub const Encoder = struct {
 
             if (self.initHardware(opt, dev, codec, path)) {
                 return log.info("init {s} hevc encoder", .{dev_str});
-            } else |_| {
-                log.warn("failed to init {s} hevc encoder, trying h264", .{dev_str});
+            } else |e| switch (e) {
+                error.missing_file, error.missing_permissions => return e,
+                else => errors.add_encoding_fallback_err(dev, c.AV_CODEC_ID_H265, c.AV_CODEC_ID_H264, e),
             }
 
             if (self.initHardware(opt, dev, c.AV_CODEC_ID_H264, path)) {
                 return log.info("init {s} h264 encoder", .{dev_str});
             } else |e| {
-                errors.add_encoding_fallback_err(dev_str, c.AV_CODEC_ID_H264, e);
+                errors.add_encoding_fallback_err(dev, c.AV_CODEC_ID_H264, c.AV_CODEC_ID_NONE, e);
             }
         }
 
