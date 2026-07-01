@@ -985,7 +985,11 @@ pub const Errors = struct {
         const text = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("oom in error reporter (it's over)");
 
         if (tracy.enabled) tracy.message(.{ .text = text });
-        if (@import("builtin").mode == .Debug) std.debug.print("err: {s}", .{text});
+
+        if (@import("builtin").mode == .Debug) {
+            std.debug.print("err: {s}", .{text});
+            std.debug.dumpCurrentStackTrace(@returnAddress());
+        }
 
         self.messages.append(self.allocator, text) catch @panic("oom in error reporter ArrayList (it's over)");
     }
