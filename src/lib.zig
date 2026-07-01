@@ -950,7 +950,9 @@ pub const Errors = struct {
 
     pub fn add_relative_path_err(self: *Errors, default_path: ?[:0]const u8, path: []const u8) void {
         if (default_path) |known_path| {
-            self.print("'{s}' is not an absolute path.\nA well-formed path looks like '{s}{s}example.mp4'\n", .{ path, known_path, std.fs.path.sep_str });
+            const basename = std.fs.path.basename(path);
+
+            self.print("'{s}' is not an absolute path.\nA well-formed path looks like '{s}{s}{s}'\n", .{ path, known_path, std.fs.path.sep_str, basename });
         } else {
             self.print("'{s}' is not an absolute path.\n", .{path});
         }
