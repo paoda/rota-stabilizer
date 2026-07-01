@@ -950,7 +950,9 @@ pub const Errors = struct {
 
     pub fn add_relative_path_err(self: *Errors, default_path: ?[:0]const u8, path: []const u8) void {
         if (default_path) |known_path| {
-            self.print("'{s}' is not an absolute path.\nA well-formed path looks like '{s}{s}example.mp4'\n", .{ path, known_path, std.fs.path.sep_str });
+            const basename = std.fs.path.basename(path);
+
+            self.print("'{s}' is not an absolute path.\nA well-formed path looks like '{s}{s}{s}'\n", .{ path, known_path, std.fs.path.sep_str, basename });
         } else {
             self.print("'{s}' is not an absolute path.\n", .{path});
         }
@@ -968,28 +970,12 @@ pub const Errors = struct {
         self.print("unhandled err: {}\n", .{e});
     }
 
-    pub fn add_non_srt_uri_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must be a SRT stream (srt://)\n", .{uri});
-    }
+    pub fn add_portrait_err(self: *Errors, path: []const u8, resolution: Resolution) void {
+        const width: u32 = @intCast(resolution.width);
+        const height: u32 = @intCast(resolution.height);
 
-    pub fn add_missing_srt_host_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must specify the host '0.0.0.0'\n", .{uri});
-    }
-
-    pub fn add_incorrect_srt_host_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' did not have '0.0.0.0' as its host\n", .{uri});
-    }
-
-    pub fn add_missing_srt_port_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must specify a port\n", .{uri});
-    }
-
-    pub fn add_missing_srt_query_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must specify the query 'mode=listener'\n", .{uri});
-    }
-
-    pub fn add_incorrect_srt_mode_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' did not have the query 'mode=listener'\n", .{uri});
+        const factor = std.math.gcd(width, height);
+        self.print("'{s}' is {}x{}. Portrait videos are unsupported\n", .{ path, width / factor, height / factor });
     }
 
     // TODO(paoda): maybe add a scope thing here?

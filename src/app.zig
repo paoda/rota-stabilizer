@@ -236,7 +236,7 @@ const PlaybackSession = struct {
 
         log.debug("PlaybackSession init", .{});
 
-        if (!verifyInputPath(allocator, path)) return error.silent;
+        if (!verifyPath(allocator, path)) return error.silent;
 
         const hw_device: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
         log.info("trying {s} for hw decode", .{getHwDeviceName(hw_device)});
@@ -525,7 +525,7 @@ const EncodeSession = struct {
 
         log.debug("EncodeSession init", .{});
 
-        if (!verifyInputPath(allocator, src_path)) return error.silent;
+        if (!verifyPath(allocator, src_path)) return error.silent;
         if (!verifyPath(allocator, dst_path)) return error.silent;
 
         const hw_dec: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
@@ -908,46 +908,6 @@ fn getHwDeviceName(t: c.AVHWDeviceType) []const u8 {
     if (t == c.AV_HWDEVICE_TYPE_NONE) return "software";
 
     return std.mem.span(c.av_hwdevice_get_type_name(t));
-}
-
-fn verifyInputPath(allocator: std.mem.Allocator, path: []const u8) bool {
-    if (std.Uri.parse(path)) |uri| {
-        if (!std.mem.eql(u8, uri.scheme, "srt")) {
-            errors.add_non_srt_uri_err(uri);
-            return false;
-        }
-
-        const host = uri.host orelse {
-            errors.add_missing_srt_host_err(uri);
-            return false;
-        };
-
-        if (!std.mem.eql(u8, host.percent_encoded, "0.0.0.0")) {
-            errors.add_incorrect_srt_host_err(uri);
-            return false;
-        }
-
-        if (uri.port == null) {
-            errors.add_missing_srt_port_err(uri);
-            return false;
-        }
-
-        const query = uri.query orelse {
-            errors.add_missing_srt_query_err(uri);
-            return false;
-        };
-
-        // TODO: support other queries (& + tokenize)
-        if (!std.mem.eql(u8, query.percent_encoded, "mode=listener")) {
-            errors.add_incorrect_srt_mode_err(uri);
-            return false;
-        }
-
-        return true;
-    } else |e| {
-        std.log.debug("uri parse failed (treating as file path): {}\n", .{e});
-        return verifyPath(allocator, path);
-    }
 }
 
 fn verifyPath(allocator: std.mem.Allocator, path: []const u8) bool {
