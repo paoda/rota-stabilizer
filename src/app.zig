@@ -245,8 +245,12 @@ const PlaybackSession = struct {
         errdefer allocator.destroy(decoder);
 
         decoder.init(allocator, hw_device, state.volume.value, path, false) catch |e| switch (e) {
+            error.missing_permissions => {
+                errors.add_missing_read_permission_err(path);
+                return error.silent;
+            },
             error.missing_file => {
-                errors.add_missing_file(path);
+                errors.add_missing_file_err(path);
                 return error.silent;
             },
             else => return e,
@@ -546,8 +550,12 @@ const EncodeSession = struct {
         // FIXME(paoda): volume should be optional and that informs us whether we should init AudioClock or not
 
         decoder.init(allocator, hw_dec, 0.0, src_path, true) catch |e| switch (e) {
+            error.missing_permissions => {
+                errors.add_missing_read_permission_err(src_path);
+                return error.silent;
+            },
             error.missing_file => {
-                errors.add_missing_file(src_path);
+                errors.add_missing_file_err(src_path);
                 return error.silent;
             },
             else => return e,
@@ -559,8 +567,12 @@ const EncodeSession = struct {
 
         encoder.init(.{ .encode_view = encode_view, .decoder = decoder, .bit_rate = state.bit_rate }, hw_enc, dst_path) catch |e| switch (e) {
             error.missing_file => {
-                errors.add_missing_file(dst_path);
-                return error.ffmpeg_error;
+                errors.add_missing_output_directory_err(dst_path);
+                return error.silent;
+            },
+            error.missing_permissions => {
+                errors.add_missing_write_permission_err(dst_path);
+                return error.silent;
             },
             else => return e,
         };
