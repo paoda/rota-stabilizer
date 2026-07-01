@@ -405,32 +405,7 @@ pub const gui = struct {
                 drawControls(state);
             }
 
-            if (errors.messages.items.len != 0) {
-                const x, const y = zgui.getMainViewport().getCenter();
-                zgui.setNextWindowPos(.{ .x = x, .y = y, .cond = .appearing, .pivot_x = 0.5, .pivot_y = 0.5 });
-                zgui.openPopup("Error", .{});
-            }
-
-            if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
-                defer zgui.endPopup();
-
-                const message = errors.messages.items[0];
-                zgui.text("{s}", .{message});
-
-                const remaining = errors.messages.items.len -| 1;
-                if (remaining != 0) {
-                    zgui.textDisabled("({} more error(s) pending)", .{remaining});
-                }
-
-                zgui.spacing();
-                zgui.separator();
-
-                if (zgui.button("OK", .{ .w = -1.0 })) {
-                    _ = errors.messages.orderedRemove(0);
-                    errors.allocator.free(message);
-                    zgui.closeCurrentPopup();
-                }
-            }
+            drawErrorPopup();
         }
 
         {
@@ -438,6 +413,37 @@ pub const gui = struct {
             defer z.end();
 
             zgui.backend.draw();
+        }
+    }
+
+    fn drawErrorPopup() void {
+        errors.mutex.lock();
+        defer errors.mutex.unlock();
+
+        if (errors.messages.len() != 0 and !zgui.isPopupOpen("Error", .{})) {
+            const x, const y = zgui.getMainViewport().getCenter();
+            zgui.setNextWindowPos(.{ .x = x, .y = y, .cond = .appearing, .pivot_x = 0.5, .pivot_y = 0.5 });
+            zgui.openPopup("Error", .{});
+        }
+
+        if (zgui.beginPopupModal("Error", .{ .flags = .{ .always_auto_resize = true } })) {
+            defer zgui.endPopup();
+
+            // this and the allocator.free line assert that the mutex is live for at least as long as this block
+            zgui.text("{?s}", .{errors.messages.peek()});
+
+            const remaining = errors.messages.len() -| 1;
+            if (remaining != 0) {
+                zgui.textDisabled("({} more error(s) pending)", .{remaining});
+            }
+
+            zgui.spacing();
+            zgui.separator();
+
+            if (zgui.button("OK", .{ .w = -1.0 })) {
+                errors.allocator.free(errors.messages.pop() orelse unreachable);
+                zgui.closeCurrentPopup();
+            }
         }
     }
 

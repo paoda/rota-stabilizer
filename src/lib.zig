@@ -897,19 +897,23 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
 //
 // Errors is a method that reports errors and their context
 pub const Errors = struct {
-    messages: std.ArrayList([]const u8),
-
+    messages: RingBuffer([]const u8),
     allocator: std.mem.Allocator,
 
-    pub fn init(self: *Errors, allocator: std.mem.Allocator) void {
+    mutex: std.Thread.Mutex = .{}, // TODO(paoda): tracy?
+
+    pub fn init(self: *Errors, allocator: std.mem.Allocator) !void {
+        const buffer = try RingBuffer([]const u8).init(allocator, 32);
+        errdefer buffer.deinit(allocator);
+
         self.* = .{
             .allocator = allocator,
-            .messages = .empty,
+            .messages = buffer,
         };
     }
 
     pub fn deinit(self: *Errors) void {
-        for (self.messages.items) |message| {
+        while (self.messages.pop()) |message| {
             self.allocator.free(message);
         }
 
@@ -991,6 +995,76 @@ pub const Errors = struct {
             std.debug.dumpCurrentStackTrace(@returnAddress());
         }
 
-        self.messages.append(self.allocator, text) catch @panic("oom in error reporter ArrayList (it's over)");
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.messages.push(text) catch {
+            if (self.messages.pop()) |old| self.allocator.free(old);
+            self.messages.push(text) catch unreachable;
+        };
     }
 };
+
+pub fn RingBuffer(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const Index = usize;
+        const max_capacity = (@as(Index, 1) << @typeInfo(Index).int.bits - 1) - 1; // half the range of index type
+
+        const log = std.log.scoped(.ring_buffer);
+
+        read: Index,
+        write: Index,
+        buf: []T,
+
+        const Error = error{buffer_full};
+
+        pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
+            std.debug.assert(std.math.isPowerOfTwo(capacity));
+            std.debug.assert(capacity <= max_capacity); // smaller than mathematical limit
+            std.debug.assert(capacity != 0);
+
+            const buf = try allocator.alloc(T, capacity);
+            return .{ .read = 0, .write = 0, .buf = buf };
+        }
+
+        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+            allocator.free(self.buf);
+        }
+
+        pub fn push(self: *Self, value: T) Error!void {
+            if (self.isFull()) return error.buffer_full;
+            defer self.write += 1;
+
+            self.buf[self.mask(self.write)] = value;
+        }
+
+        pub fn pop(self: *Self) ?T {
+            if (self.isEmpty()) return null;
+            defer self.read += 1;
+
+            return self.buf[self.mask(self.read)];
+        }
+
+        pub fn peek(self: *const Self) ?T {
+            if (self.isEmpty()) return null;
+            return self.buf[self.mask(self.read)];
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.write - self.read;
+        }
+
+        fn isFull(self: *const Self) bool {
+            return self.len() == self.buf.len;
+        }
+
+        fn isEmpty(self: *const Self) bool {
+            return self.read == self.write;
+        }
+
+        fn mask(self: *const Self, idx: Index) Index {
+            return idx & (self.buf.len - 1);
+        }
+    };
+}

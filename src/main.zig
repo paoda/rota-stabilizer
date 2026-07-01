@@ -56,7 +56,7 @@ pub fn main() !void {
     var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
     const allocator = tracy_alloc.allocator();
 
-    errors.init(allocator);
+    try errors.init(allocator);
     defer errors.deinit();
 
     var ui = try Ui.init(allocator, startup.ui_window);
