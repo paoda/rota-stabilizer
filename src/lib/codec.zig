@@ -997,7 +997,6 @@ pub const Decoder = struct {
         ffmpeg_error,
         unsupported_display_matrix,
         unsupported_colour_depth,
-        unsupported_orientation,
     } || std.mem.Allocator.Error || FrameQueue.InitError || AudioClock.InitError || std.Thread.SpawnError;
 
     fmt_ctx: dec.AvFormatContext,
@@ -1126,7 +1125,9 @@ pub const Decoder = struct {
             },
         );
 
-        if (resolution.width < resolution.height) return error.unsupported_orientation;
+        if (resolution.width < resolution.height) {
+            errors.add_portrait_err(path, resolution);
+        }
 
         const sw_fmt = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar.*.format;
         switch (sw_fmt) {

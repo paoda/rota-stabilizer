@@ -37,7 +37,13 @@ void main() {
     float W = float(u_resolution.x);
     float H = float(u_resolution.y);
 
-    float gameplay_height = W / u_ratio;
+    float gameplay_height;
+    if (H > W) { // unlikely, we don't support portrait
+        gameplay_height = H;
+    } else {
+        gameplay_height = W / u_ratio;
+    }
+
     float height_diff = H - gameplay_height;
     float threshold = (height_diff / 2.0) / H;
 

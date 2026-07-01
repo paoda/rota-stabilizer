@@ -970,6 +970,14 @@ pub const Errors = struct {
         self.print("unhandled err: {}\n", .{e});
     }
 
+    pub fn add_portrait_err(self: *Errors, path: []const u8, resolution: Resolution) void {
+        const width: u32 = @intCast(resolution.width);
+        const height: u32 = @intCast(resolution.height);
+
+        const factor = std.math.gcd(width, height);
+        self.print("'{s}' is {}x{}. Portrait videos are unsupported\n", .{ path, width / factor, height / factor });
+    }
+
     // TODO(paoda): maybe add a scope thing here?
     fn print(self: *Errors, comptime fmt: []const u8, args: anytype) void {
         std.debug.assert(fmt[fmt.len - 1] == '\n');
