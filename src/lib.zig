@@ -968,30 +968,6 @@ pub const Errors = struct {
         self.print("unhandled err: {}\n", .{e});
     }
 
-    pub fn add_non_srt_uri_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must be a SRT stream (srt://)\n", .{uri});
-    }
-
-    pub fn add_missing_srt_host_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must specify the host '0.0.0.0'\n", .{uri});
-    }
-
-    pub fn add_incorrect_srt_host_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' did not have '0.0.0.0' as its host\n", .{uri});
-    }
-
-    pub fn add_missing_srt_port_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must specify a port\n", .{uri});
-    }
-
-    pub fn add_missing_srt_query_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' must specify the query 'mode=listener'\n", .{uri});
-    }
-
-    pub fn add_incorrect_srt_mode_err(self: *Errors, uri: std.Uri) void {
-        self.print("'{f}' did not have the query 'mode=listener'\n", .{uri});
-    }
-
     // TODO(paoda): maybe add a scope thing here?
     fn print(self: *Errors, comptime fmt: []const u8, args: anytype) void {
         std.debug.assert(fmt[fmt.len - 1] == '\n');
