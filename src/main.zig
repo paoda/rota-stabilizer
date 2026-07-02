@@ -739,6 +739,8 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
 
     const log = std.log.scoped(.http_conn);
 
+    setRecvTimeout(conn.stream, 30_000) catch |e| log.warn("recv timeout not set: {}", .{e});
+
     var arena = std.heap.ArenaAllocator.init(parent_allocator);
     defer arena.deinit();
 
@@ -755,6 +757,7 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
     while (server.reader.state == .ready) {
         handleRequest(allocator, &server, conn.address) catch |e| switch (e) {
             error.HttpConnectionClosing => return,
+            error.ReadFailed => return, // timeout or client vanished
             else => return log.err("request handler err: {}", .{e}),
         };
     }
@@ -912,4 +915,21 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_
         },
         else => try req.respond("Not Found", .{ .status = .not_found }),
     }
+}
+
+// FIXME(paoda): is there a better way?
+fn setRecvTimeout(stream: std.net.Stream, ms: u32) !void {
+    const opt: []const u8 = switch (builtin.os.tag) {
+        .windows => std.mem.asBytes(&ms),
+        else => blk: {
+            const timeval: std.posix.timeval = .{
+                .sec = @intCast(ms / 1000),
+                .usec = @intCast((ms % 1000) * 1000),
+            };
+
+            break :blk std.mem.asBytes(&timeval);
+        },
+    };
+
+    try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, opt);
 }
