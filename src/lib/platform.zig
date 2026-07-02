@@ -13,6 +13,7 @@ const default_font = @embedFile("asset/Inter-Medium.ttf");
 const Request = @import("../app.zig").Request;
 const Action = @import("../app.zig").Action;
 const Resolution = @import("../lib.zig").Resolution;
+const ContentRect = @import("../lib.zig").ContentRect;
 const Viewport = @import("../lib.zig").Viewport;
 const Errors = @import("../lib.zig").Errors;
 const GpuResourceManager = @import("../lib.zig").GpuResourceManager;
@@ -261,7 +262,12 @@ const startup = @import("../main.zig").startup;
 const RenderOptions = @import("../main.zig").RenderOptions;
 
 pub const gui = struct {
-    pub const VideoContext = struct { tex_id: c_uint, render_view: Viewport };
+    pub const VideoContext = struct {
+        tex_id: c_uint,
+        render_view: Viewport,
+
+        resolution: Resolution,
+    };
 
     var built_layout: bool = false;
 
@@ -288,6 +294,7 @@ pub const gui = struct {
         volume: VolumeState = .default,
 
         render: RenderOptions = .{},
+        source: VideoSourceInfo = .{},
 
         fullscreen: bool = false,
         init_view: Viewport,
@@ -315,6 +322,36 @@ pub const gui = struct {
 
             duration: ?f32,
             timestamp: f32,
+        };
+
+        pub const VideoSourceInfo = struct {
+            const DetectStatus = enum { idle, searching, validating, locked, failed };
+
+            resolution: [2]i32 = .{ 0, 0 },
+            detected: ?struct { rect: ContentRect, target: Resolution } = null,
+
+            // TODO(paoda): merge with enum in DetectStatus?
+            detect_status: DetectStatus = .idle,
+
+            pub fn isSetManually(self: VideoSourceInfo) bool {
+                const width, const height = self.resolution;
+                return width > 0 and height > 0;
+            }
+
+            pub fn effectiveRect(self: VideoSourceInfo, res: Resolution) ContentRect {
+                if (self.isSetManually()) {
+                    const width, const height = self.resolution;
+
+                    const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                    return .fromAspect(res, aspect);
+                }
+
+                if (self.detected) |result| {
+                    if (result.target.eql(res)) return result.rect;
+                }
+
+                return .full(res);
+            }
         };
 
         const VolumeState = struct {
@@ -400,7 +437,9 @@ pub const gui = struct {
             if (state.fullscreen) {
                 drawVideoWindow(ui, state, maybe_video);
             } else {
-                try drawSettings(allocator, state);
+                const maybe_frame = if (maybe_video) |vid| vid.resolution else null;
+
+                try drawSettings(allocator, state, maybe_frame);
                 drawVideoWindow(ui, state, maybe_video);
                 drawControls(state);
             }
@@ -474,7 +513,7 @@ pub const gui = struct {
         zgui.dockBuilderFinish(dock_id);
     }
 
-    fn drawSettings(allocator: std.mem.Allocator, state: *State) !void {
+    fn drawSettings(allocator: std.mem.Allocator, state: *State, maybe_frame: ?Resolution) !void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -500,7 +539,7 @@ pub const gui = struct {
                 defer zgui.endTabItem();
 
                 zgui.spacing();
-                drawRenderSettings(state);
+                drawRenderSettings(state, maybe_frame);
             }
 
             if (zgui.beginTabItem("Hardware & Output", .{})) {
@@ -695,7 +734,7 @@ pub const gui = struct {
         }
     }
 
-    fn drawRenderSettings(state: *State) void {
+    fn drawRenderSettings(state: *State, maybe_frame: ?Resolution) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -867,6 +906,78 @@ pub const gui = struct {
                     defer zgui.popItemWidth();
 
                     _ = zgui.sliderFloat("##Intensity", .{ .v = &state.render.tint_intensity, .min = 0.0, .max = 1.0 });
+                }
+            }
+        }
+
+        zgui.spacing();
+        zgui.separator();
+        zgui.spacing();
+
+        {
+            // TODO(paoda): delete this method, opt for picker UI
+
+            zgui.textDisabled("Source Device", .{});
+            zgui.sameLine(.{ .spacing = 2 });
+            zgui.textDisabled("(?)", .{});
+            if (zgui.isItemHovered(.{}) and zgui.beginTooltip()) {
+                defer zgui.endTooltip();
+
+                zgui.text("Native resolution of the recording device. When set, letterbox/pillarbox\nbars added by streaming apps (e.g. Moblin, Larix) are cropped.", .{});
+            }
+
+            if (zgui.beginTable("DeviceResolutionForm", .{ .column = 3 })) {
+                defer zgui.endTable();
+
+                zgui.tableSetupColumn("Label", .{ .flags = .{ .width_fixed = true } });
+                zgui.tableSetupColumn("Input", .{ .flags = .{ .width_fixed = true } });
+                zgui.tableSetupColumn("Button", .{ .flags = .{ .width_stretch = true } });
+
+                _ = zgui.tableNextColumn();
+                zgui.alignTextToFramePadding();
+                zgui.text("Resolution", .{});
+
+                _ = zgui.tableNextColumn();
+                {
+                    zgui.beginDisabled(.{ .disabled = state.source.detect_status == .idle or state.source.isSetManually() });
+                    defer zgui.endDisabled();
+
+                    if (zgui.button("Redetect", .{})) state.action = .Redetect;
+                }
+
+                _ = zgui.tableNextColumn();
+                {
+                    zgui.pushItemWidth(-1.0);
+                    defer zgui.popItemWidth();
+
+                    if (zgui.inputInt2("##DeviceResolution", .{ .v = &state.source.resolution })) {
+                        state.source.resolution[0] = @max(0, state.source.resolution[0]);
+                        state.source.resolution[1] = @max(0, state.source.resolution[1]);
+                    }
+                }
+            }
+
+            if (state.source.isSetManually()) {
+                const width, const height = state.source.resolution;
+                const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                zgui.textDisabled("({d:.3}:1)", .{aspect});
+            }
+
+            if (!state.source.isSetManually()) {
+                switch (state.source.detect_status) {
+                    .idle, .locked => {},
+                    .searching => zgui.textDisabled("detecting letterbox\u{2026}", .{}),
+                    .validating => zgui.textDisabled("verifying corner markers\u{2026}", .{}),
+                    .failed => zgui.textDisabled("auto-detect failed \u{2014} enter device W\u{d7}H above", .{}),
+                }
+            }
+
+            // the crop that's actually applied to the active video, manual or detected
+            if (maybe_frame) |frame| {
+                const rect = state.source.effectiveRect(frame);
+
+                if (!rect.frame.eql(frame)) {
+                    zgui.textDisabled("{f} of {f}", .{ rect.frame, frame });
                 }
             }
         }

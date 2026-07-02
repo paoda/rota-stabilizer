@@ -26,6 +26,7 @@ const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
 const Linesize = @import("lib.zig").Linesize;
 const Resolution = @import("lib.zig").Resolution;
+const ContentRect = @import("lib.zig").ContentRect;
 const mat2 = @import("lib/math.zig").mat2;
 const vec2 = @import("lib/math.zig").vec2;
 
@@ -540,19 +541,28 @@ pub const Camera = struct {
     }
 };
 
-pub fn uploadPlane(comptime ch: DoubleBuffer.Channel, res: *const GpuResourceManager, buffer: DoubleBuffer.Buffer, frame: *c.AVFrame) void {
+pub fn uploadPlane(
+    comptime ch: DoubleBuffer.Channel,
+    manager: *const GpuResourceManager,
+    buffer: DoubleBuffer.Buffer,
+    frame: *c.AVFrame,
+    rect: ContentRect,
+) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "upload " ++ @tagName(ch) ++ " plane" });
     defer zone.end();
 
+    std.debug.assert(rect.x & 1 == 0 and rect.y & 1 == 0); // NV12 chroma alignment
+    std.debug.assert(rect.x + rect.frame.width <= frame.width and rect.y + rect.frame.height <= frame.height);
+
     gl.BindBuffer(gl.PIXEL_UNPACK_BUFFER, 0); // Disable PBO to read directly from FFMpeg strided memory
 
-    gl.BindTexture(gl.TEXTURE_2D, res.tex.get(buffer.tex(ch)));
+    gl.BindTexture(gl.TEXTURE_2D, manager.tex.get(buffer.tex(ch)));
     defer gl.BindTexture(gl.TEXTURE_2D, 0);
 
     const is_y_plane = ch == .y;
 
-    const width: usize = @intCast(if (is_y_plane) frame.width else @divTrunc(frame.width, 2));
-    const height: usize = @intCast(if (is_y_plane) frame.height else @divTrunc(frame.height, 2));
+    const width: usize = @intCast(if (is_y_plane) rect.frame.width else @divTrunc(rect.frame.width, 2));
+    const height: usize = @intCast(if (is_y_plane) rect.frame.height else @divTrunc(rect.frame.height, 2));
     const idx: usize = if (is_y_plane) 0 else 1;
 
     // TODO: merge?
@@ -561,11 +571,26 @@ pub fn uploadPlane(comptime ch: DoubleBuffer.Channel, res: *const GpuResourceMan
 
     const fmt: c_uint = if (is_y_plane) gl.RED else gl.RG;
 
+    // NB: in the interleaved half-res UV plane, a horizontal offset of rect.x
+    // luma pixels is rect.x bytes (rect.x / 2 texels × 2 bytes per texel)
+    const row: usize = @intCast(if (is_y_plane) rect.y else @divTrunc(rect.y, 2));
+    const offset = row * @as(usize, @intCast(frame.linesize[idx])) + @as(usize, @intCast(rect.x));
+
     gl.PixelStorei(gl.UNPACK_ALIGNMENT, alignment);
     gl.PixelStorei(gl.UNPACK_ROW_LENGTH, @intCast(@divTrunc(frame.linesize[idx], bpp)));
     defer gl.PixelStorei(gl.UNPACK_ROW_LENGTH, 0);
 
-    gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, @intCast(width), @intCast(height), fmt, gl.UNSIGNED_BYTE, frame.data[idx]);
+    gl.TexSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        @intCast(width),
+        @intCast(height),
+        fmt,
+        gl.UNSIGNED_BYTE,
+        frame.data[idx] + offset,
+    );
 }
 
 pub fn writeToNv12Tex(res: *const GpuResourceManager, view: *Viewport, fbs: FbStack, camera: Camera) !void {
@@ -659,7 +684,7 @@ pub fn shutdown(queues: *Decoder.Queues) void {
     queues.frame.interrupt();
 }
 
-pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer) ?f64 {
+pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer, rect: ContentRect) ?f64 {
     const FrameQueue = @import("lib/codec.zig").FrameQueue;
 
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -675,13 +700,13 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
     const timestamp = @as(f64, @floatFromInt(frame.pts)) * time_base;
 
     const front = double_buffer.front();
-    uploadPlane(.y, res, front, frame);
-    uploadPlane(.uv, res, front, frame);
+    uploadPlane(.y, res, front, frame, rect);
+    uploadPlane(.uv, res, front, frame, rect);
     front.setDisplayTime(timestamp);
 
     const back = double_buffer.back();
-    uploadPlane(.y, res, back, frame);
-    uploadPlane(.uv, res, back, frame);
+    uploadPlane(.y, res, back, frame, rect);
+    uploadPlane(.uv, res, back, frame, rect);
     back.setDisplayTime(timestamp);
 
     // might as well completely fill the queue before we start
@@ -932,4 +957,9 @@ fn setRecvTimeout(stream: std.net.Stream, ms: u32) !void {
     };
 
     try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, opt);
+}
+
+test {
+    _ = @import("lib.zig");
+    _ = @import("lib/Detector.zig");
 }
