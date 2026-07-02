@@ -16,6 +16,9 @@ const DoubleBuffer = @import("lib.zig").DoubleBuffer;
 const UploadBuffer = @import("lib.zig").UploadBuffer;
 const Linesize = @import("lib.zig").Linesize;
 
+const ContentRect = @import("lib.zig").ContentRect;
+const Detector = @import("lib/Detector.zig");
+
 const Ui = @import("lib/platform.zig").Ui;
 const GuiState = @import("lib/platform.zig").gui.State;
 const VideoContext = @import("lib/platform.zig").gui.VideoContext;
@@ -49,6 +52,7 @@ pub const Action = union(enum) {
     SetCameraZoom: f32,
     SetVolume: f32,
     Seek: f32,
+    Redetect: void,
 };
 
 const Session = union(State) {
@@ -209,6 +213,13 @@ const PlaybackSession = struct {
     lookahead: f64,
     delay_threshold: f64,
 
+    content_rect: ContentRect,
+
+    // TODO(paoda): remove pending_rect?
+    pending_rect: ?ContentRect = null,
+
+    detector: Detector,
+
     next_frame: ?*c.AVFrame = null,
 
     const InitError = error{ preload_fail, silent } || Decoder.InitError || Viewport.Error || GpuResourceManager.InitError || EncodeError;
@@ -308,13 +319,19 @@ const PlaybackSession = struct {
         var render_view: Viewport = .default;
         try render_view.push(state.resolution[0], state.resolution[1]);
 
-        const manager = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
+        const rect = state.source.effectiveRect(decoder.resolution);
+
+        const manager = try GpuResourceManager.init(allocator, render_view, rect.frame);
         errdefer manager.deinit(allocator);
 
-        const camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
+        const camera = Camera.init(render_view, rect.frame, decoder.colour_space);
         const angle_calc = try AngleCalc.init(manager, camera);
 
-        const start_time = preload(manager, decoder, double_buffer) orelse return error.preload_fail;
+        // FIXME(paoda): access colourSpaceMatrix differently
+        var detector = try Detector.init(allocator, decoder.resolution, camera.colourSpaceMatrix()[0], .{});
+        errdefer detector.deinit(allocator);
+
+        const start_time = preload(manager, decoder, double_buffer, rect) orelse return error.preload_fail;
         log.debug("video start time: {d}s", .{start_time});
 
         var fbs: FbStack = .default;
@@ -356,6 +373,9 @@ const PlaybackSession = struct {
             .lookahead = lookahead,
             .delay_threshold = delay_threshold,
 
+            .content_rect = rect,
+            .detector = detector,
+
             .handles = handles,
             .render_view = render_view,
         };
@@ -369,11 +389,45 @@ const PlaybackSession = struct {
 
         self.handles.deinit();
         self.manager.deinit(allocator);
+        self.detector.deinit(allocator);
 
         allocator.destroy(self.double_buffer);
 
         self.decoder.deinit(allocator);
         allocator.destroy(self.decoder);
+    }
+
+    fn applyContentRect(self: *PlaybackSession, rect: ContentRect) void {
+        if (rect.eql(self.content_rect)) return;
+
+        log.info("content rect: {f} at ({}, {})", .{ rect.frame, rect.x, rect.y });
+
+        self.manager.resize(rect.frame);
+
+        const zoom = self.camera.zoom;
+        self.camera = Camera.init(self.render_view, rect.frame, self.decoder.colour_space);
+        self.camera.zoom = zoom;
+
+        // NB: AngleCalc only holds the manager pointer and the colour matrix; neither changes
+
+        self.content_rect = rect;
+    }
+
+    fn detect(self: *PlaybackSession, frame: *c.AVFrame) void {
+        if (!self.detector.enabled) return;
+
+        std.debug.assert(frame.width == self.detector.res.width and frame.height == self.detector.res.height);
+
+        const height: usize = @intCast(frame.height);
+        const y_stride: usize = @intCast(frame.linesize[0]);
+        const uv_stride: usize = @intCast(frame.linesize[1]);
+
+        // NB: (height + 1) / 2 is ceil division; NV12 chroma has a row for every
+        // *two* luma rows, so an odd-height video still owns that final UV row
+        self.detector.feed(
+            .{ .buf = frame.data[0][0 .. y_stride * height], .stride = y_stride },
+            .{ .buf = frame.data[1][0 .. uv_stride * ((height + 1) / 2)], .stride = uv_stride },
+        );
     }
 
     pub fn run(self: *PlaybackSession, opt: RenderOptions) !void {
@@ -386,7 +440,12 @@ const PlaybackSession = struct {
         var is_dirty: bool = false;
 
         while (true) {
-            if (self.next_frame == null) self.next_frame = self.decoder.queue.frame.tryPop() orelse break;
+            if (self.next_frame == null) {
+                const next_frame = self.decoder.queue.frame.tryPop() orelse break;
+
+                self.detect(next_frame);
+                self.next_frame = next_frame;
+            }
 
             // FIXME: self.next_frame guaranteed to be true here
 
@@ -441,8 +500,15 @@ const PlaybackSession = struct {
 
                     tracy.plot(.{ .name = "Buffered Frames", .value = .{ .i64 = @intCast(self.decoder.queue.frame.len()) } });
 
-                    uploadPlane(.y, self.manager, back, frame);
-                    uploadPlane(.uv, self.manager, back, frame);
+                    // NB: applied right before an upload so the resized textures
+                    // are never rendered while still holding stale content
+                    if (self.pending_rect) |rect| {
+                        self.applyContentRect(rect);
+                        self.pending_rect = null;
+                    }
+
+                    uploadPlane(.y, self.manager, back, frame, self.content_rect);
+                    uploadPlane(.uv, self.manager, back, frame, self.content_rect);
                     back.setDisplayTime(frame_time);
                 }
 
@@ -499,6 +565,8 @@ const EncodeSession = struct {
     upload_buffer: UploadBuffer,
 
     fbs: FbStack,
+
+    content_rect: ContentRect,
 
     frame_count: usize = 0,
     frame_total: usize,
@@ -583,7 +651,9 @@ const EncodeSession = struct {
 
         double_buffer.* = .{};
 
-        const manager = try GpuResourceManager.init(allocator, render_view, decoder.resolution);
+        const rect = state.source.effectiveRect(decoder.resolution);
+
+        const manager = try GpuResourceManager.init(allocator, render_view, rect.frame);
         errdefer manager.deinit(allocator);
 
         try manager.setupEncodingTargets(encode_view, encoder._frame);
@@ -591,14 +661,14 @@ const EncodeSession = struct {
         const handles = try decoder.spawn(true);
         errdefer handles.deinit();
 
-        const camera = Camera.init(render_view, decoder.resolution, decoder.colour_space);
+        const camera = Camera.init(render_view, rect.frame, decoder.colour_space);
         const angle_calc = try AngleCalc.init(manager, camera);
 
         // TODO: Track + Display Encode Progress
 
         var fbs: FbStack = .default;
 
-        _ = preload(manager, decoder, double_buffer) orelse return error.preload_fail;
+        _ = preload(manager, decoder, double_buffer, rect) orelse return error.preload_fail;
         try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
@@ -620,6 +690,7 @@ const EncodeSession = struct {
             .camera = camera,
             .angle_calc = angle_calc,
             .fbs = fbs,
+            .content_rect = rect,
             .refresh_rate = ui.refreshRate() catch 60.0,
 
             .handles = handles,
@@ -688,8 +759,8 @@ const EncodeSession = struct {
                 defer z.end();
 
                 const back = self.double_buffer.back();
-                uploadPlane(.y, self.manager, back, frame);
-                uploadPlane(.uv, self.manager, back, frame);
+                uploadPlane(.y, self.manager, back, frame, self.content_rect);
+                uploadPlane(.uv, self.manager, back, frame, self.content_rect);
 
                 try render(&self.render_view, &self.fbs, back.flip(), self.angle_calc, self.manager, self.camera, opt);
                 try writeToNv12Tex(self.manager, &self.encode_view, self.fbs, self.camera);
@@ -802,6 +873,21 @@ pub const App = struct {
                 state.progress.timestamp = @floatCast(playback.double_buffer.back().displayTime());
                 state.progress.duration = @floatCast(self.session.playback.decoder.duration());
 
+                playback.detector.enabled = !state.source.isSetManually();
+
+                state.source.detect_status = switch (playback.detector.status) {
+                    .searching => .searching,
+                    .validating => .validating,
+                    .failed => .failed,
+                    .locked => |rect| blk: {
+                        state.source.detected = .{ .rect = rect, .target = playback.decoder.resolution };
+                        break :blk .locked;
+                    },
+                };
+
+                const rect = state.source.effectiveRect(playback.decoder.resolution);
+                playback.pending_rect = if (rect.eql(playback.content_rect)) null else rect;
+
                 if (state.action) |action| {
                     defer state.action = null;
 
@@ -809,6 +895,10 @@ pub const App = struct {
                         .SetCameraZoom => |zoom| playback.camera.zoom = zoom,
                         .SetVolume => |volume| audio.setVolume(volume),
                         .Seek => |timestamp| log.warn("TODO: Seek to {d:.3}s", .{timestamp}),
+                        .Redetect => {
+                            state.source.detected = null;
+                            playback.detector.reset();
+                        },
                     }
                 }
             },
@@ -887,6 +977,7 @@ pub const App = struct {
         state.progress = .default;
         state.is_listening = false;
 
+        state.source.detect_status = .idle;
         state.request = null;
     }
 
@@ -902,7 +993,11 @@ pub const App = struct {
 
     pub fn video(self: *const App) ?VideoContext {
         return switch (self.session) {
-            inline .playback, .encode => |s| .{ .tex_id = s.manager.tex.get(.out), .render_view = s.render_view },
+            inline .playback, .encode => |s| .{
+                .tex_id = s.manager.tex.get(.out),
+                .render_view = s.render_view,
+                .resolution = s.decoder.resolution,
+            },
             else => null,
         };
     }
