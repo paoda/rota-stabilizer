@@ -23,16 +23,15 @@ function sleep(ms) {
  */
 
 /**
- * @param {Blob} chunk 
+ * @param {ArrayBuffer} chunk
  * @param {File} file
  * @param {number} index
- * @param {number} totalChunks
  * @param {number} offset - byte offset where this chunk starts within the full file
  * @param {retryCallback} onRetry 
  * @returns {Promise<Response>}
  *
  */
-async function uploadChunkWithRetry(chunk, file, index, totalChunks, offset, onRetry) {
+async function uploadChunkWithRetry(chunk, file, index, offset, onRetry) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const response = await fetch('/upload', {
@@ -41,15 +40,15 @@ async function uploadChunkWithRetry(chunk, file, index, totalChunks, offset, onR
         headers: {
           'X-Filename': file.name,
           'X-Chunk-Index': `${index}`,
-          'X-Total-Chunks': `${totalChunks}`,
           'X-Chunk-Offset': `${offset}`,
           'X-File-Size': `${file.size}`
         }
       });
 
+      const body = await response.text();
       if (response.ok) return response;
 
-      const error = new Error(`Chunk ${index} failed: HTTP ${response.status}`);
+      const error = new Error(`Chunk ${index} failed: HTTP ${response.status} (${body})`);
       error.retryable = response.status >= 500;
 
       throw error;
@@ -88,9 +87,11 @@ uploadBtn.addEventListener('click', async () => {
     for (let i = 0; i < totalChunks; i++) {
       const start = i * chunkSize;
       const end = Math.min(start + chunkSize, file.size);
-      const chunk = file.slice(start, end);
 
-      await uploadChunkWithRetry(chunk, file, i, totalChunks, start, (attempt, max, delay) => {
+      // WebKit wedges on file-backed Blob bodies; materialize first
+      const chunk = await file.slice(start, end).arrayBuffer();
+      await uploadChunkWithRetry(chunk, file, i, start, (attempt, max, delay) => {
+
         statusText.innerText = `Chunk ${i} failed, retrying (${attempt}/${max}) in ${Math.round(delay / 1000)}s...`;
       });
 
@@ -108,3 +109,13 @@ uploadBtn.addEventListener('click', async () => {
     uploadBtn.disabled = false;
   }
 });
+
+const logEl = document.getElementById('log');
+const t0 = performance.now();
+
+function log(msg) {
+  logEl.textContent += `[${((performance.now() - t0) / 1000).toFixed(3)}] ${msg}\n`;
+}
+
+document.addEventListener('visibilitychange', () => log(`visibility: ${document.visibilityState}`));
+window.addEventListener('pagehide', () => log('pagehide'));
