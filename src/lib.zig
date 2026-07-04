@@ -977,19 +977,40 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
 // 2. Irrecoverable. These errors are allowed to crash the program if unhandled
 //
 // The way this program should work more or less, is that as soon as we have DearImgui drawing, all errors must more or less be treated as recoverable.
-//
+
 // Errors is a method that reports errors and their context
 pub const Errors = struct {
     messages: RingBuffer([]const u8),
     allocator: std.mem.Allocator,
 
-    mutex: std.Thread.Mutex = .{}, // TODO(paoda): tracy?
+    mutex: Mutex,
+
+    const Mutex = struct {
+        inner: std.atomic.Mutex = .unlocked,
+        _lock: *tracy.Lock,
+
+        pub fn init() Mutex {
+            return .{
+                .inner = .unlocked,
+                ._lock = .init(.{ .src = @src(), .name = "ErrorsMutex" }),
+            };
+        }
+
+        pub fn lock(self: *Mutex) void {
+            while (!self.inner.tryLock()) std.atomic.spinLoopHint();
+        }
+
+        pub fn unlock(self: *Mutex) void {
+            self.inner.unlock();
+        }
+    };
 
     pub fn init(self: *Errors, allocator: std.mem.Allocator) !void {
         const buffer = try RingBuffer([]const u8).init(allocator, 32);
         errdefer buffer.deinit(allocator);
 
         self.* = .{
+            .mutex = .init(),
             .allocator = allocator,
             .messages = buffer,
         };
@@ -1108,7 +1129,7 @@ pub const Errors = struct {
 
         if (@import("builtin").mode == .Debug) {
             std.debug.print("err: {s}", .{text});
-            std.debug.dumpCurrentStackTrace(@returnAddress());
+            std.debug.dumpCurrentStackTrace(.{ .first_address = @returnAddress() });
         }
 
         self.mutex.lock();

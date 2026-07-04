@@ -458,11 +458,15 @@ pub inline fn err(value: c_int) Error!c_int {
     if (value >= 0) return value;
 
     switch (value) {
-        c.AVERROR(c.ENOENT) => return error.missing_file,
-        c.AVERROR(c.EACCES) => return error.missing_permissions,
+        AVERROR(.NOENT) => return error.missing_file,
+        AVERROR(.ACCES) => return error.missing_permissions,
         else => {
             errors.add_ffmpeg_err(value);
             return error.ffmpeg_error;
         },
     }
+}
+
+pub inline fn AVERROR(e: std.posix.E) c_int {
+    return c.AVERROR(@as(c_int, @intFromEnum(e)));
 }

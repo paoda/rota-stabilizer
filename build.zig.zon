@@ -28,7 +28,7 @@
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -37,12 +37,12 @@
     // internet connectivity.
     .dependencies = .{
         .sdl = .{
-            .url = "git+https://github.com/castholm/SDL.git#76ee7f13177b5dfad124e7066dec29c90f7db275",
-            .hash = "sdl-0.4.2+3.4.4-SDL--nF2pQHiRAibwjhZ6jBJu0Omc3x4EoxPn6gxfnAi",
+            .url = "git+https://github.com/castholm/SDL#1b67d371a531ecb0499d4b80a865631c299f472a",
+            .hash = "sdl-0.5.2+3.4.12-SDL--qPKpwHc40bqAlYs7W9pXJVyLwsGDNa4shNXbOZr",
         },
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen.git#a1e969b3e35818785fab0373124f50463793b28a",
-            .hash = "zigglgen-0.4.0-bmyqLQGMLwA0EPVmSm-Nc6Olb84zBzvwMjguxwKYLf1S",
+            .url = "git+https://github.com/castholm/zigglgen#fdf06cc7ea9951203f91a27a5548f943cd6c1d59",
+            .hash = "zigglgen-0.5.1-ziggljvILwAsVanrBL96ZTzHPQ1vIQCV_Gnt3mqufzjz",
         },
         .ffmpeg = .{
             .url = "https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.zip",
@@ -50,24 +50,24 @@
             .lazy = true,
         },
         .tracy = .{
-            .url = "git+https://git.musuka.dev/paoda/tracy_zig#72efa5726086abf58b4850d059aa3299f9729275",
-            .hash = "tracy-0.1.0-R7l8BVRKAQBPCflWulJM1lcmEYBgTqLQAMog5lrgVJhw",
-        },
-        .zgui = .{
-            .url = "git+https://github.com/zig-gamedev/zgui#d6c4f53c2fbd54673790dc2a5208160a3586ef29",
-            .hash = "zgui-0.6.0-dev--L6sZCJKbgBZGCzVMcwD0bNGmpK6yO-UoIESHX5JiRet",
+            .url = "git+https://git.musuka.dev/paoda/tracy_zig#5b076db2dc91c2b112d6175082d6bedbeeaedcf2",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BbVQAQCPEW9nMOr_nOQVauea5VgZTQLCZLdVjijT",
         },
         .znfde = .{
-            .url = "git+https://codeberg.org/cyberegoorg/znfde#1e43e2b609d5f8c2008964615b8a0843e59aea5f",
-            .hash = "znfde-0.2.0-yqA0PjceBgCK2rdhlZFoaPJTwYiY5EkSTutZgM-iZV-H",
+            .url = "git+https://codeberg.org/cyberegoorg/znfde#29bae93a0e5fbaa5eff8734208cab948c4b41d0d",
+            .hash = "znfde-0.3.0-yqA0PlwhBgBvLZVE6bsIsVdtt82U3X4a9n3yPR78aUfl",
         },
         .known_folders = .{
-            .url = "git+https://github.com/ziglibs/known-folders#83d39161eac2ed6f37ad3cb4d9dd518696ce90bb",
-            .hash = "known_folders-0.0.0-Fy-PJv3LAAABBRVoZWVrKZdyLoUfl5VRY5fqRRRdnF5L",
+            .url = "git+https://github.com/ziglibs/known-folders#207c34a16e4365edc20d92c7892f962b3bed46e8",
+            .hash = "known_folders-0.0.0-Fy-PJsbKAACbDh9bBxR0MMThxZSS6A9RH4apWphNHY70",
         },
         .zqrcodegen = .{
-            .url = "git+https://git.musuka.dev/paoda/zqrcodegen#3947181164beb1d68c03c9fa41f67f81493745e5",
-            .hash = "zqrcodegen-0.1.0-SLCb_R0yAQA--coGNDrstMh-unTkfq7eY85axdfyWfyq",
+            .url = "git+https://git.musuka.dev/paoda/zqrcodegen.git#2fb77dcc7ad93ea1646aede8378979b6550e745a",
+            .hash = "zqrcodegen-0.1.0-SLCb_aoxAQBLdco_dxa8KEMudLmH3IqGU_tOQhvpO53Q",
+        },
+        .zimgui = .{
+            .url = "git+https://git.musuka.dev/paoda/zimgui.git#ff6bee4d2bd455788ba2ff4c03e048c7df55efb8",
+            .hash = "zimgui-0.0.0-bhLpHosoVADLYdKbq7EZXqyuISVSJyC4BpNExTJVNxKe",
         },
     },
     .paths = .{

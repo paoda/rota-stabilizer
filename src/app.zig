@@ -61,15 +61,15 @@ const Session = union(State) {
     encode: EncodeSession,
     listen: ListenSession,
 
-    pub fn deinit(self: *Session, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Session.deinit" });
         defer zone.end();
 
         switch (self.*) {
             .idle => |s| s.deinit(),
-            .playback => |*s| s.deinit(allocator),
-            .encode => |*s| s.deinit(allocator),
-            .listen => |*s| s.deinit(allocator),
+            .playback => |*s| s.deinit(io, allocator),
+            .encode => |*s| s.deinit(io, allocator),
+            .listen => |*s| s.deinit(io, allocator),
         }
     }
 };
@@ -103,7 +103,7 @@ const ListenSession = struct {
         double_buffer: *DoubleBuffer,
         handles: Decoder.Handles,
 
-        fn stop(self: *const @This()) void {
+        fn stop(self: *const @This(), io: std.Io) void {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.Accepted.stop" });
             defer zone.end();
 
@@ -112,21 +112,21 @@ const ListenSession = struct {
                 std.atomic.spinLoopHint();
             }
 
-            self.decoder.queue.pkt.video.interrupt();
-            self.decoder.queue.pkt.audio.interrupt();
-            self.decoder.queue.frame.interrupt();
+            self.decoder.queue.pkt.video.interrupt(io);
+            self.decoder.queue.pkt.audio.interrupt(io);
+            self.decoder.queue.frame.interrupt(io);
         }
 
-        fn deinit(self: Accepted, allocator: std.mem.Allocator) void {
+        fn deinit(self: Accepted, io: std.Io, allocator: std.mem.Allocator) void {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.Accepted.deinit" });
             defer zone.end();
 
-            self.stop();
+            self.stop(io);
             self.handles.deinit();
 
             allocator.destroy(self.double_buffer);
 
-            self.decoder.deinit(allocator);
+            self.decoder.deinit(io, allocator);
             allocator.destroy(self.decoder);
         }
     };
@@ -135,11 +135,11 @@ const ListenSession = struct {
     const uri = "srt://0.0.0.0:8090?mode=listener&latency=50000";
     const log = std.log.scoped(.listen_session);
 
-    fn init(self: *ListenSession, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, listen, .{ self, allocator, device_type, volume });
+    fn init(self: *ListenSession, io: std.Io, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) std.Thread.SpawnError!void {
+        self.thread = try std.Thread.spawn(.{}, listen, .{ self, io, allocator, device_type, volume });
     }
 
-    fn deinit(self: *ListenSession, allocator: std.mem.Allocator) void {
+    fn deinit(self: *ListenSession, io: std.Io, allocator: std.mem.Allocator) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.deinit" });
         defer zone.end();
 
@@ -153,13 +153,13 @@ const ListenSession = struct {
 
         self.thread.join();
 
-        if (self.accepted) |accepted| accepted.deinit(allocator);
+        if (self.accepted) |accepted| accepted.deinit(io, allocator);
     }
 
-    fn listen(self: *ListenSession, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) void {
+    fn listen(self: *ListenSession, io: std.Io, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) void {
         tracy.setThreadName("listen");
 
-        if (setup(allocator, device_type, volume)) |accepted| {
+        if (setup(io, allocator, device_type, volume)) |accepted| {
             self.accepted = accepted;
         } else |e| {
             self.err = e;
@@ -168,7 +168,7 @@ const ListenSession = struct {
         self.is_done.store(true, .release);
     }
 
-    fn setup(allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) !Accepted {
+    fn setup(io: std.Io, allocator: std.mem.Allocator, device_type: c.AVHWDeviceType, volume: f32) !Accepted {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.setup" });
         defer zone.end();
 
@@ -176,14 +176,14 @@ const ListenSession = struct {
         errdefer allocator.destroy(decoder);
 
         try decoder.init(allocator, device_type, volume, uri, false);
-        errdefer decoder.deinit(allocator);
+        errdefer decoder.deinit(io, allocator);
 
         const double_buffer = try allocator.create(DoubleBuffer);
         errdefer allocator.destroy(double_buffer);
 
         double_buffer.* = .{};
 
-        const handles = try decoder.spawn(false);
+        const handles = try decoder.spawn(io, false);
         errdefer handles.deinit();
 
         log.debug("SRT connection established", .{});
@@ -226,7 +226,7 @@ const PlaybackSession = struct {
 
     const log = std.log.scoped(.playback_session);
 
-    fn stop(self: *const @This()) void {
+    fn stop(self: *const @This(), io: std.Io) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.stop" });
         defer zone.end();
 
@@ -236,18 +236,18 @@ const PlaybackSession = struct {
             std.atomic.spinLoopHint();
         }
 
-        self.decoder.queue.pkt.video.interrupt();
-        self.decoder.queue.pkt.audio.interrupt();
-        self.decoder.queue.frame.interrupt();
+        self.decoder.queue.pkt.video.interrupt(io);
+        self.decoder.queue.pkt.audio.interrupt(io);
+        self.decoder.queue.frame.interrupt(io);
     }
 
-    pub fn init(allocator: std.mem.Allocator, state: *GuiState, ui: Ui, path: []const u8) InitError!PlaybackSession {
+    pub fn init(io: std.Io, environ_map: *const std.process.Environ.Map, allocator: std.mem.Allocator, state: *GuiState, ui: Ui, path: []const u8) InitError!PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.init" });
         defer zone.end();
 
         log.debug("PlaybackSession init", .{});
 
-        if (!verifyPath(allocator, path)) return error.silent;
+        if (!verifyPath(io, environ_map, allocator, path)) return error.silent;
 
         const hw_device: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
         log.info("trying {s} for hw decode", .{getHwDeviceName(hw_device)});
@@ -266,17 +266,18 @@ const PlaybackSession = struct {
             },
             else => return e,
         };
-        errdefer decoder.deinit(allocator);
+        errdefer decoder.deinit(io, allocator);
 
         const double_buffer = try allocator.create(DoubleBuffer);
         errdefer allocator.destroy(double_buffer);
 
         double_buffer.* = .{};
 
-        const handles = try decoder.spawn(false);
+        const handles = try decoder.spawn(io, false);
         errdefer handles.deinit();
 
         return initShared(
+            io,
             allocator,
             state,
             ui,
@@ -286,16 +287,17 @@ const PlaybackSession = struct {
         );
     }
 
-    fn fromListenSession(allocator: std.mem.Allocator, state: *GuiState, ui: Ui, listen: *ListenSession) InitError!PlaybackSession {
+    fn fromListenSession(io: std.Io, allocator: std.mem.Allocator, state: *GuiState, ui: Ui, listen: *ListenSession) InitError!PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.fromListenSession" });
         defer zone.end();
 
         const accepted = listen.accepted.?;
 
         listen.accepted = null; // so listen.deinit() doesn't free them
-        defer listen.deinit(allocator);
+        defer listen.deinit(io, allocator);
 
         return initShared(
+            io,
             allocator,
             state,
             ui,
@@ -306,6 +308,7 @@ const PlaybackSession = struct {
     }
 
     fn initShared(
+        io: std.Io,
         allocator: std.mem.Allocator,
         state: *GuiState,
         ui: Ui,
@@ -331,7 +334,7 @@ const PlaybackSession = struct {
         var detector = try Detector.init(allocator, decoder.resolution, camera.colourSpaceMatrix()[0], .{});
         errdefer detector.deinit(allocator);
 
-        const start_time = preload(manager, decoder, double_buffer, rect) orelse return error.preload_fail;
+        const start_time = preload(io, manager, decoder, double_buffer, rect) orelse return error.preload_fail;
         log.debug("video start time: {d}s", .{start_time});
 
         var fbs: FbStack = .default;
@@ -381,11 +384,11 @@ const PlaybackSession = struct {
         };
     }
 
-    pub fn deinit(self: *PlaybackSession, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *PlaybackSession, io: std.Io, allocator: std.mem.Allocator) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.deinit" });
         defer zone.end();
 
-        self.stop();
+        self.stop(io);
 
         self.handles.deinit();
         self.manager.deinit(allocator);
@@ -393,7 +396,7 @@ const PlaybackSession = struct {
 
         allocator.destroy(self.double_buffer);
 
-        self.decoder.deinit(allocator);
+        self.decoder.deinit(io, allocator);
         allocator.destroy(self.decoder);
     }
 
@@ -430,7 +433,7 @@ const PlaybackSession = struct {
         );
     }
 
-    pub fn run(self: *PlaybackSession, opt: RenderOptions) !void {
+    pub fn run(self: *PlaybackSession, io: std.Io, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.run" });
         defer zone.end();
 
@@ -441,7 +444,7 @@ const PlaybackSession = struct {
 
         while (true) {
             if (self.next_frame == null) {
-                const next_frame = self.decoder.queue.frame.tryPop() orelse break;
+                const next_frame = self.decoder.queue.frame.tryPop(io) orelse break;
 
                 self.detect(next_frame);
                 self.next_frame = next_frame;
@@ -467,7 +470,7 @@ const PlaybackSession = struct {
                     trace("dropped frame | d: {d:.3} a: {d:.3} v: {d:.3}", .{ diff_s, audio_time, frame_time });
 
                     // invalidate frame and mark the memory as free as we aren't gonna display it
-                    self.decoder.queue.frame.recycle(frame);
+                    self.decoder.queue.frame.recycle(io, frame);
                     self.next_frame = null;
 
                     continue; // we want to try the next frame
@@ -478,14 +481,14 @@ const PlaybackSession = struct {
 
                 // frame falls within +/- self.lookahead, but is greater than -self.delay_threshold
                 if (!already_uploaded and diff_s - self.lookahead <= 0) blk: {
-                    const next = self.decoder.queue.frame.peek() orelse break :blk;
+                    const next = self.decoder.queue.frame.peek(io) orelse break :blk;
                     const next_time = @as(f64, @floatFromInt(next.pts)) * time_base;
 
                     if ((next_time - (audio_time + estimated_upload_s)) <= 0) {
                         // the next next frame happens to also be ready
                         trace("skipped frame | d: {d:.3} a: {d:.3} v: {d:.3}", .{ diff_s, audio_time, frame_time });
 
-                        self.decoder.queue.frame.recycle(frame);
+                        self.decoder.queue.frame.recycle(io, frame);
                         self.next_frame = null;
 
                         continue; // we want to now grab that frame next iteration
@@ -520,7 +523,7 @@ const PlaybackSession = struct {
                     self.double_buffer.swap(); // frame has been uploaded, and marked for display so swap the buffers
 
                     // frame has been copied to gpu so we are ready to cleanup
-                    self.decoder.queue.frame.recycle(frame);
+                    self.decoder.queue.frame.recycle(io, frame);
                     self.next_frame = null;
 
                     tracy.frameMark("video");
@@ -576,7 +579,7 @@ const EncodeSession = struct {
 
     const log = std.log.scoped(.encode_session);
 
-    fn stop(self: *const @This()) void {
+    fn stop(self: *const @This(), io: std.Io) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.stop" });
         defer zone.end();
 
@@ -586,19 +589,19 @@ const EncodeSession = struct {
             std.atomic.spinLoopHint();
         }
 
-        self.decoder.queue.pkt.video.interrupt();
-        self.decoder.queue.pkt.audio.interrupt();
-        self.decoder.queue.frame.interrupt();
+        self.decoder.queue.pkt.video.interrupt(io);
+        self.decoder.queue.pkt.audio.interrupt(io);
+        self.decoder.queue.frame.interrupt(io);
     }
 
-    pub fn init(allocator: std.mem.Allocator, state: *GuiState, ui: Ui, src_path: []const u8, dst_path: []const u8) !EncodeSession {
+    pub fn init(io: std.Io, environ_map: *const std.process.Environ.Map, allocator: std.mem.Allocator, state: *GuiState, ui: Ui, src_path: []const u8, dst_path: []const u8) !EncodeSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.init" });
         defer zone.end();
 
         log.debug("EncodeSession init", .{});
 
-        if (!verifyPath(allocator, src_path)) return error.silent;
-        if (!verifyPath(allocator, dst_path)) return error.silent;
+        if (!verifyPath(io, environ_map, allocator, src_path)) return error.silent;
+        if (!verifyPath(io, environ_map, allocator, dst_path)) return error.silent;
 
         const hw_dec: c.AVHWDeviceType = @intFromEnum(state.hw_dec);
         const hw_enc: c.AVHWDeviceType = @intFromEnum(state.hw_enc);
@@ -628,7 +631,7 @@ const EncodeSession = struct {
             },
             else => return e,
         };
-        errdefer decoder.deinit(allocator);
+        errdefer decoder.deinit(io, allocator);
 
         const encoder = try allocator.create(Encoder);
         errdefer allocator.destroy(encoder);
@@ -658,7 +661,7 @@ const EncodeSession = struct {
 
         try manager.setupEncodingTargets(encode_view, encoder._frame);
 
-        const handles = try decoder.spawn(true);
+        const handles = try decoder.spawn(io, true);
         errdefer handles.deinit();
 
         const camera = Camera.init(render_view, rect.frame, decoder.colour_space);
@@ -668,7 +671,7 @@ const EncodeSession = struct {
 
         var fbs: FbStack = .default;
 
-        _ = preload(manager, decoder, double_buffer, rect) orelse return error.preload_fail;
+        _ = preload(io, manager, decoder, double_buffer, rect) orelse return error.preload_fail;
         try render(&render_view, &fbs, double_buffer.front(), angle_calc, manager, camera, state.render);
         try writeToNv12Tex(manager, &encode_view, fbs, camera);
 
@@ -702,11 +705,11 @@ const EncodeSession = struct {
         };
     }
 
-    pub fn deinit(self: *EncodeSession, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *EncodeSession, io: std.Io, allocator: std.mem.Allocator) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.deinit" });
         defer zone.end();
 
-        self.stop();
+        self.stop(io);
 
         self.handles.deinit();
         self.manager.deinit(allocator);
@@ -716,18 +719,23 @@ const EncodeSession = struct {
         self.encoder.deinit();
         allocator.destroy(self.encoder);
 
-        self.decoder.deinit(allocator);
+        self.decoder.deinit(io, allocator);
         allocator.destroy(self.decoder);
     }
 
-    pub fn run(self: *EncodeSession, opt: RenderOptions) !void {
+    pub fn run(self: *EncodeSession, io: std.Io, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "EncodeSession.run" });
         defer zone.end();
 
         const audio_stream = self.decoder.stream(.audio);
         const linesize: Linesize(c.AV_PIX_FMT_NV12) = .init(self.encoder._frame);
 
-        var timer = try std.time.Timer.start();
+        const start: std.Io.Clock.Timestamp = .now(io, .awake);
+        const elapsedNs = struct {
+            fn call(t: std.Io.Clock.Timestamp, clock_io: std.Io) u64 {
+                return @intCast(t.durationTo(.now(clock_io, .awake)).raw.nanoseconds);
+            }
+        }.call;
 
         const offset_s = 7 * 0.001; // P99.9 for input + draw is gonna be ~6ms
 
@@ -740,19 +748,19 @@ const EncodeSession = struct {
         // FIXME: I feel like this really should just be a ran in another thread....
         var just_once = interval_s < std.math.floatEps(f32);
 
-        while (timer.read() < target_ns or just_once) {
+        while (elapsedNs(start, io) < target_ns or just_once) {
             just_once = false;
 
             // Process any pending audio packets (remux to output)
-            while (self.decoder.queue.pkt.audio.tryPop()) |pkt| {
+            while (self.decoder.queue.pkt.audio.tryPop(io)) |pkt| {
                 try self.encoder.writeAudioPacket(audio_stream, pkt);
 
                 var tmp: ?*c.AVPacket = pkt;
                 c.av_packet_free(&tmp);
             }
 
-            if (self.decoder.queue.frame.pop()) |frame| {
-                defer self.decoder.queue.frame.recycle(frame);
+            if (self.decoder.queue.frame.pop(io)) |frame| {
+                defer self.decoder.queue.frame.recycle(io, frame);
                 defer self.double_buffer.swap();
 
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "frame received" });
@@ -845,7 +853,7 @@ pub const App = struct {
 
     const log = std.log.scoped(.app);
 
-    pub fn poll(self: *App, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) void {
+    pub fn poll(self: *App, io: std.Io, environ_map: *const std.process.Environ.Map, allocator: std.mem.Allocator, ui: Ui, state: *GuiState) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.poll" });
         defer zone.end();
 
@@ -910,7 +918,7 @@ pub const App = struct {
                         // TODO(paoda): report this to the user
                         log.err("failed to start stream: {}", .{e});
                     } else {
-                        const maybe_session = PlaybackSession.fromListenSession(allocator, state, ui, listen);
+                        const maybe_session = PlaybackSession.fromListenSession(io, allocator, state, ui, listen);
 
                         if (maybe_session) |session| {
                             // force session change, don't go through regular process, so theres gotta be some self.reset() here
@@ -930,7 +938,7 @@ pub const App = struct {
         }
 
         const request = state.request orelse return;
-        self.reset(allocator, state);
+        self.reset(io, allocator, state);
 
         switch (request) {
             .idle => {}, // already idle
@@ -938,6 +946,7 @@ pub const App = struct {
                 self.session = .{ .listen = .{ .thread = undefined } };
 
                 self.session.listen.init(
+                    io,
                     allocator,
                     @intFromEnum(state.hw_dec),
                     state.volume.value,
@@ -949,7 +958,7 @@ pub const App = struct {
                 state.is_listening = true;
             },
             .encode => |paths| {
-                const session = EncodeSession.init(allocator, state, ui, paths.src_path, paths.dst_path) catch |e| switch (e) {
+                const session = EncodeSession.init(io, environ_map, allocator, state, ui, paths.src_path, paths.dst_path) catch |e| switch (e) {
                     error.silent => return, // reporting handled already
                     else => return errors.add_unknown_err(e),
                 };
@@ -957,7 +966,7 @@ pub const App = struct {
                 self.session = .{ .encode = session };
             },
             .playback => |path| {
-                const session = PlaybackSession.init(allocator, state, ui, path) catch |e| switch (e) {
+                const session = PlaybackSession.init(io, environ_map, allocator, state, ui, path) catch |e| switch (e) {
                     error.silent => return, // reporting handled already
                     else => return errors.add_unknown_err(e),
                 };
@@ -966,11 +975,11 @@ pub const App = struct {
         }
     }
 
-    pub fn reset(self: *App, allocator: std.mem.Allocator, state: *GuiState) void {
+    pub fn reset(self: *App, io: std.Io, allocator: std.mem.Allocator, state: *GuiState) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.reset" });
         defer zone.end();
 
-        self.session.deinit(allocator);
+        self.session.deinit(io, allocator);
         self.session = .{ .idle = IdleSession.init() };
 
         state.encode_progress = 0.0;
@@ -981,13 +990,13 @@ pub const App = struct {
         state.request = null;
     }
 
-    pub fn run(self: *App, opt: RenderOptions) !void {
+    pub fn run(self: *App, io: std.Io, opt: RenderOptions) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.run" });
         defer zone.end();
 
         switch (self.session) {
             .idle, .listen => {},
-            inline .playback, .encode => |*s| try s.run(opt),
+            inline .playback, .encode => |*s| try s.run(io, opt),
         }
     }
 
@@ -1002,11 +1011,11 @@ pub const App = struct {
         };
     }
 
-    pub fn deinit(self: *App, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *App, io: std.Io, allocator: std.mem.Allocator) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "App.deinit" });
         defer zone.end();
 
-        self.session.deinit(allocator);
+        self.session.deinit(io, allocator);
         self.session = .idle;
     }
 };
@@ -1017,7 +1026,7 @@ fn getHwDeviceName(t: c.AVHWDeviceType) []const u8 {
     return std.mem.span(c.av_hwdevice_get_type_name(t));
 }
 
-fn verifyPath(allocator: std.mem.Allocator, path: []const u8) bool {
+fn verifyPath(io: std.Io, environ_map: *const std.process.Environ.Map, allocator: std.mem.Allocator, path: []const u8) bool {
     const ext = std.fs.path.extension(path);
 
     if (std.mem.eql(u8, ext, "")) {
@@ -1044,7 +1053,7 @@ fn verifyPath(allocator: std.mem.Allocator, path: []const u8) bool {
     const getVideoDirectory = @import("lib/platform.zig").getVideoDirectory;
 
     if (!std.fs.path.isAbsolute(path)) {
-        const default_path = getVideoDirectory(allocator) catch null;
+        const default_path = getVideoDirectory(io, environ_map, allocator) catch null;
         defer if (default_path) |p| allocator.free(p);
 
         errors.add_relative_path_err(default_path, path);

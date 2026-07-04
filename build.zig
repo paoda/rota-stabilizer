@@ -53,8 +53,7 @@ pub fn build(b: *std.Build) !void {
 
     const sdl = switch (target.result.os.tag) {
         .macos => blk: {
-            const result = try std.process.Child.run(.{
-                .allocator = b.allocator,
+            const result = try std.process.run(b.allocator, b.graph.io, .{
                 .argv = &.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" },
             });
 
@@ -62,25 +61,24 @@ pub fn build(b: *std.Build) !void {
 
             break :blk b.dependency("sdl", .{
                 .target = target,
-                .optimize = .ReleaseFast,
-                .preferred_linkage = .static,
+                .optimize = optimize,
                 .system_include_path = b.pathJoin(&.{ sdk_root, "usr", "include" }),
                 .system_framework_path = b.pathJoin(&.{ sdk_root, "System", "Library", "Frameworks" }),
                 .library_path = b.pathJoin(&.{ sdk_root, "usr", "lib" }),
             });
         },
-        else => b.dependency("sdl", .{ .target = target, .optimize = .ReleaseFast, .preferred_linkage = .static }),
+        else => b.dependency("sdl", .{ .target = target, .optimize = optimize }),
     };
 
     const sdl_lib = sdl.artifact("SDL3");
     exe_mod.linkLibrary(sdl_lib);
 
-    const zgui = b.dependency("zgui", .{ .target = target, .optimize = .ReleaseFast, .shared = false, .backend = .sdl3_opengl3 });
-    exe_mod.addImport("zgui", zgui.module("root"));
+    const zimgui = b.dependency("zimgui", .{ .target = target, .optimize = optimize });
+    exe_mod.addImport("zimgui", zimgui.module("dcimgui"));
 
-    const zgui_lib = zgui.artifact("imgui");
-    zgui_lib.linkLibrary(sdl_lib);
-    exe_mod.linkLibrary(zgui_lib);
+    const zimgui_lib = zimgui.artifact("dcimgui");
+    zimgui_lib.root_module.addIncludePath(sdl.path("include"));
+    exe_mod.linkLibrary(zimgui_lib);
 
     switch (target.result.os.tag) {
         .windows => {
@@ -90,15 +88,16 @@ pub fn build(b: *std.Build) !void {
 
             const ffmpeg_libs = [_][]const u8{ "avcodec", "avformat", "avfilter", "swscale", "avutil", "swresample" };
 
-            const base_path = ffmpeg.path("bin" ++ std.fs.path.sep_str);
-            const dir = try base_path.getPath3(b, null).openDir(".", .{ .iterate = true });
+            const base_lazy_path = ffmpeg.path("bin" ++ std.fs.path.sep_str);
+            const base_path = try base_lazy_path.getPath4(b, null);
+            const base_dir = try base_path.openDir(b.graph.io, ".", .{ .iterate = true });
 
-            var walk = try dir.walk(b.allocator);
+            var walk = try base_dir.walk(b.allocator);
             defer walk.deinit();
 
-            while (try walk.next()) |entry| {
+            while (try walk.next(b.graph.io)) |entry| {
                 const lib = containsAny(ffmpeg_libs[0..], entry.basename) orelse continue;
-                const src_path = try base_path.join(b.allocator, entry.basename);
+                const src_path = try base_lazy_path.join(b.allocator, entry.basename);
 
                 // b.installBinFile doesn't support LazyPath for some reason :\
                 b.getInstallStep().dependOn(&b.addInstallFileWithDir(src_path, .bin, entry.basename).step);
