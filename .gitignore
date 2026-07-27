@@ -1,5 +1,6 @@
 zig-out/
 .zig-cache/
+zig-pkg/
 
 # rr debugger
 zen_workaround.py

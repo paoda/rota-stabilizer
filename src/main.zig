@@ -2,9 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const gl = @import("gl");
 const tracy = @import("tracy");
-const zgui = @import("zgui");
+const imgui = @import("lib/imgui.zig");
+const c = @import("c");
 
-const c = @import("lib.zig").c;
 const platform = @import("lib/platform.zig");
 const signal = @import("lib/platform.zig").signal;
 
@@ -21,6 +21,7 @@ const PixelBufferPool = GpuResourceManager.PixelBufferPool;
 const Ui = @import("lib/platform.zig").Ui;
 const App = @import("app.zig").App;
 const Errors = @import("lib.zig").Errors;
+const FrameQueue = @import("lib/codec.zig").FrameQueue;
 
 const Mat2 = @import("lib/math.zig").Mat2;
 const Vec2 = @import("lib/math.zig").Vec2;
@@ -47,38 +48,37 @@ pub const tracy_options: tracy.Options = .{ .default_callstack_depth = 5 };
 
 const errors = &@import("lib.zig").errors;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const log = std.log.scoped(.main);
     errdefer |err| if (err == error.sdl_error) log.err("SDL Error: {s}", .{c.SDL_GetError()});
 
-    var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .{ .backing_allocator = std.heap.c_allocator };
-    defer std.debug.assert(gpa.deinit() == .ok);
-
-    var tracy_alloc: tracy.Allocator = .{ .parent = gpa.allocator() };
+    var tracy_alloc: tracy.Allocator = .{ .parent = init.gpa };
     const allocator = tracy_alloc.allocator();
 
     try errors.init(allocator);
     defer errors.deinit();
 
-    var ui = try Ui.init(allocator, startup.ui_window);
+    var ui = try Ui.init(startup.ui_window);
     defer ui.deinit();
 
     if (builtin.mode == .Debug) c.av_log_set_level(c.AV_LOG_VERBOSE);
-    signal.setupHandler(); // NB: Has to come after SDL Init
 
     var app: App = .default;
-    defer app.deinit(allocator);
+    defer app.deinit(allocator, init.io);
 
     const state = try allocator.create(platform.gui.State);
     defer allocator.destroy(state);
 
-    try state.init(allocator, ui.view, startup.render_target);
+    try state.init(allocator, init.io, init.environ_map, startup.render_target);
     defer state.deinit(allocator);
 
-    const handle = try std.Thread.spawn(.{}, runHttpServer, .{8080});
-    handle.detach();
+    // FIXME(paoda): what's the point of a group with only one task in it?
+    var http_group: std.Io.Group = .init;
+    defer http_group.cancel(init.io); // unblocks accept(); joins server + connections
 
-    while (!signal.should_quit.load(.monotonic)) {
+    try http_group.concurrent(init.io, httpServerTask, .{ allocator, init.io, init.environ_map, 8080 });
+
+    ui_loop: while (true) {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ui loop" });
         defer zone.end();
 
@@ -88,11 +88,12 @@ pub fn main() !void {
 
             var event: c.SDL_Event = undefined;
             while (c.SDL_PollEvent(&event)) {
-                _ = zgui.backend.processEvent(&event);
+                _ = imgui.backend.processEvent(&event);
 
                 switch (event.type) {
-                    c.SDL_EVENT_QUIT => signal.should_quit.store(true, .monotonic),
-                    c.SDL_EVENT_WINDOW_RESIZED => ui.view.reset(event.window.data1, event.window.data2),
+                    c.SDL_EVENT_QUIT => break :ui_loop,
+                    // not SDL_EVENT_WINDOW_RESIZED: that reports window coordinates, while ui.view is the GL viewport
+                    c.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => ui.view.reset(event.window.data1, event.window.data2),
                     c.SDL_EVENT_DROP_FILE => {
                         const path = std.mem.sliceTo(event.drop.data, 0);
 
@@ -111,8 +112,8 @@ pub fn main() !void {
         gl.ClearColor(0, 0, 0, 0.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
 
-        app.poll(allocator, ui, state);
-        try app.run(state.render);
+        app.poll(allocator, init.io, init.environ_map, ui, state);
+        try app.run(init.io, state.render);
 
         try platform.gui.draw(allocator, ui, state, app.video());
 
@@ -669,32 +670,15 @@ pub fn unmapNv12Frame(res: *const GpuResourceManager, idx: PixelBufferPool.Index
     gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0);
 }
 
-pub fn shutdown(queues: *Decoder.Queues) void {
+pub fn preload(io: std.Io, res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer, rect: ContentRect) ?f64 {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    while (!signal.should_quit.load(.monotonic)) {
-        signal.should_quit.store(true, .monotonic);
-        std.atomic.spinLoopHint();
-    }
+    // INVARIANT: as of right now, because this runs in the GUI thread before anything really starts, we assume everything here to be uncancelable
+    // INVARIANT: upon failure, we expect decoder.stop() to be called at some point
 
-    // wake up all the Queues
-    queues.pkt.video.interrupt();
-    queues.pkt.audio.interrupt();
-    queues.frame.interrupt();
-}
-
-pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer: *DoubleBuffer, rect: ContentRect) ?f64 {
-    const FrameQueue = @import("lib/codec.zig").FrameQueue;
-
-    const zone = tracy.Zone.begin(.{ .src = @src() });
-    defer zone.end();
-
-    const frame = decoder.queue.frame.pop() orelse {
-        shutdown(&decoder.queue);
-        return null;
-    };
-    defer decoder.queue.frame.recycle(frame);
+    const frame = decoder.queue.frame.pop(io) catch null orelse return null;
+    defer decoder.queue.frame.recycle(io, frame);
 
     const time_base = c.av_q2d(decoder.stream(.video).time_base);
     const timestamp = @as(f64, @floatFromInt(frame.pts)) * time_base;
@@ -716,55 +700,61 @@ pub fn preload(res: *const GpuResourceManager, decoder: *Decoder, double_buffer:
 
         while (decoder.queue.frame.len() + 1 != FrameQueue.capacity) {
             if (decoder.queue.frame.end_of_stream.load(.monotonic)) break;
-            sleep(1 * std.time.ns_per_ms);
+
+            sleep(1 * std.time.ns_per_ms); // FIXME(paoda): test with io.sleep?
         }
     }
 
     return timestamp;
 }
 
-fn runHttpServer(port: u16) !void {
-    tracy.setThreadName("http server");
-
+fn httpServerTask(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, port: u16) std.Io.Cancelable!void {
     const log = std.log.scoped(.http);
 
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(gpa.deinit() == .ok);
+    runHttpServer(allocator, io, environ_map, port) catch |e| switch (e) {
+        error.Canceled => return error.Canceled,
+        else => log.err("http server died: {}", .{e}),
+    };
+}
 
-    const allocator = gpa.allocator();
+fn runHttpServer(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, port: u16) !void {
+    const log = std.log.scoped(.http);
+    tracy.setThreadName("http server");
 
-    var address = try std.net.Address.parseIp4("0.0.0.0", port);
-    var listener = try address.listen(.{});
+    var address: std.Io.net.IpAddress = try .parseIp4("0.0.0.0", port);
+    var listener = try address.listen(io, .{});
 
     log.info("upload server listening on http://{f}", .{address});
 
-    const pool = try allocator.create(std.Thread.Pool);
-    defer allocator.destroy(pool);
+    // NB: declared after gpa so the LIFO defers join every connection task
+    // before the leak assert runs
+    var conn_group: std.Io.Group = .init;
+    defer conn_group.cancel(io);
 
-    try pool.init(.{ .allocator = allocator });
-    defer pool.deinit();
-
-    while (!signal.should_quit.load(.monotonic)) {
-        const conn = listener.accept() catch |err| {
-            log.err("failed to accept connection: {}", .{err});
-            continue;
+    while (true) {
+        const stream = listener.accept(io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled, // main's http_group.cancel
+            else => {
+                log.err("failed to accept connection: {}", .{err});
+                continue;
+            },
         };
 
-        pool.spawn(handleConnection, .{ allocator, conn }) catch |err| {
-            log.err("failed to spawn thread: {}", .{err});
-            conn.stream.close();
+        conn_group.concurrent(io, handleConnection, .{ allocator, io, environ_map, stream }) catch |err| {
+            log.err("failed to spawn connection task: {}", .{err});
+            stream.close(io);
             continue;
         };
     }
 }
 
-fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Connection) void {
+fn handleConnection(parent_allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.Environ.Map, stream: std.Io.net.Stream) void {
     tracy.setThreadName("http conn");
-    defer conn.stream.close();
+    defer stream.close(io);
 
     const log = std.log.scoped(.http_conn);
 
-    setRecvTimeout(conn.stream, 30_000) catch |e| log.warn("recv timeout not set: {}", .{e});
+    // FIXME(paoda): what about recv timeouts?
 
     var arena = std.heap.ArenaAllocator.init(parent_allocator);
     defer arena.deinit();
@@ -774,13 +764,13 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
     var recv_buf: [0x4000]u8 = undefined;
     var send_buf: [0x4000]u8 = undefined;
 
-    var conn_reader = conn.stream.reader(&recv_buf);
-    var conn_writer = conn.stream.writer(&send_buf);
+    var conn_reader = stream.reader(io, &recv_buf);
+    var conn_writer = stream.writer(io, &send_buf);
 
-    var server = std.http.Server.init(conn_reader.interface(), &conn_writer.interface);
+    var server = std.http.Server.init(&conn_reader.interface, &conn_writer.interface);
 
     while (server.reader.state == .ready) {
-        handleRequest(allocator, &server, conn.address) catch |e| switch (e) {
+        handleRequest(allocator, io, environ_map, &server, stream.socket.address) catch |e| switch (e) {
             error.HttpConnectionClosing => return,
             error.ReadFailed => return, // timeout or client vanished
             else => return log.err("request handler err: {}", .{e}),
@@ -788,7 +778,13 @@ fn handleConnection(parent_allocator: std.mem.Allocator, conn: std.net.Server.Co
     }
 }
 
-fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_addr: std.net.Address) !void {
+fn handleRequest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *std.process.Environ.Map,
+    server: *std.http.Server,
+    client_addr: std.Io.net.IpAddress,
+) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "handleRequest" });
     defer zone.end();
 
@@ -874,20 +870,20 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_
 
                 const tmp_name = try std.fmt.bufPrint(&tmp_name_buf, "{s}.tmp", .{file_name});
 
-                const default_path = try platform.getVideoDirectory(allocator) orelse return error.missing_video_path;
+                const default_path = try platform.getVideoDirectory(allocator, io, environ_map) orelse return error.missing_video_path;
 
                 const upload_path = try std.fs.path.join(allocator, &.{ default_path, "upload" });
-                std.fs.makeDirAbsolute(upload_path) catch |e| if (e != error.PathAlreadyExists) return e;
+                std.Io.Dir.createDirAbsolute(io, upload_path, .default_dir) catch |e| if (e != error.PathAlreadyExists) return e;
 
-                var dir = try std.fs.openDirAbsolute(upload_path, .{});
-                defer dir.close();
+                var dir = try std.Io.Dir.openDirAbsolute(io, upload_path, .{});
+                defer dir.close(io);
 
                 var new_size: usize = chunk_offset;
 
                 {
                     const file = switch (chunk_index) {
-                        0 => try dir.createFile(tmp_name, .{}),
-                        else => dir.openFile(tmp_name, .{ .mode = .write_only }) catch |err| switch (err) {
+                        0 => try dir.createFile(io, tmp_name, .{}),
+                        else => dir.openFile(io, tmp_name, .{ .mode = .write_only }) catch |err| switch (err) {
                             error.FileNotFound => {
                                 try req.respond("No upload in progress for this chunk index", .{ .status = .conflict });
                                 return error.no_upload_in_progress;
@@ -895,15 +891,17 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_
                             else => return err,
                         },
                     };
-                    defer file.close();
+                    defer file.close(io);
 
-                    if (chunk_offset > try file.getEndPos()) {
-                        log.warn("[{s}] rejected chunk {}: expected offset {}, got {}", .{ file_name, chunk_index, try file.getEndPos(), chunk_offset });
+                    const current_size = (try file.stat(io)).size;
+
+                    if (chunk_offset > current_size) {
+                        log.warn("[{s}] rejected chunk {}: expected offset {}, got {}", .{ file_name, chunk_index, current_size, chunk_offset });
                         try req.respond("Chunk out of order", .{ .status = .conflict });
                         return error.chunk_out_of_order;
                     }
 
-                    var file_writer = file.writer(file_buf);
+                    var file_writer = file.writer(io, file_buf);
                     try file_writer.seekTo(chunk_offset); // append for new chunk, overwrite for retried chunk
 
                     var payload_reader = req.readerExpectNone(payload_buf);
@@ -925,7 +923,7 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_
                 }
 
                 if (new_size == total_size) {
-                    try dir.rename(tmp_name, file_name);
+                    try dir.rename(tmp_name, dir, file_name, io);
                     log.info("[{s}] completed upload to {s}", .{ file_name, upload_path });
                 } else if (new_size > total_size) {
                     log.warn("[{s}] overflow: chunk {} pushed size to {} (max {})", .{ file_name, chunk_index, new_size, total_size });
@@ -940,23 +938,6 @@ fn handleRequest(allocator: std.mem.Allocator, server: *std.http.Server, client_
         },
         else => try req.respond("Not Found", .{ .status = .not_found }),
     }
-}
-
-// FIXME(paoda): is there a better way?
-fn setRecvTimeout(stream: std.net.Stream, ms: u32) !void {
-    const opt: []const u8 = switch (builtin.os.tag) {
-        .windows => std.mem.asBytes(&ms),
-        else => blk: {
-            const timeval: std.posix.timeval = .{
-                .sec = @intCast(ms / 1000),
-                .usec = @intCast((ms % 1000) * 1000),
-            };
-
-            break :blk std.mem.asBytes(&timeval);
-        },
-    };
-
-    try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, opt);
 }
 
 test {

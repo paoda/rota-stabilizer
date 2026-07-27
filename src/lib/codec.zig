@@ -1,58 +1,64 @@
 const std = @import("std");
 const libav = @import("libav.zig");
 const tracy = @import("tracy");
-const c = @import("../lib.zig").c;
+const c = @import("c");
 
 const errify = @import("platform.zig").errify;
 
-const LinearFifo = @import("fifo.zig").LinearFifo(*c.AVPacket, .dynamic);
-
-const signal = @import("platform.zig").signal;
-
 const enc = @import("libav.zig").enc;
 const dec = @import("libav.zig").dec;
-const sleep = @import("../lib.zig").sleep;
+const AVERROR = @import("libav.zig").AVERROR;
 
 const AvPacket = @import("libav.zig").AvPacket;
 const AvFrame = @import("libav.zig").AvFrame;
 const Viewport = @import("../lib.zig").Viewport;
 const Resolution = @import("../lib.zig").Resolution;
+const Mutex = @import("../lib.zig").Mutex;
 
 const errors = &@import("../lib.zig").errors;
 
-// TODO: some universal thread sync primitive
-
 pub const packet = struct {
-    pub const Queue = struct { // FIXME: is there any point to rolling my own?
-        list: LinearFifo,
+    // EOF should not close the Queue, as we want to support seeking in the future.
+    // In the future, add a .flush variant
+    pub const Item = union(enum) { pkt: *c.AVPacket, eof };
 
-        mutex: TracyMutex,
-        cond: std.Thread.Condition = .{},
+    pub const Queue = struct {
+        inner: std.Io.Queue(Item),
+        buffer: []Item,
 
-        end_of_stream: std.atomic.Value(bool) = .init(false),
+        /// Sticky EOF. Consumer-side only — safe unsynchronized because this
+        /// is an SPSC queue.
+        eof_seen: bool = false,
 
-        const log = std.log.scoped(.packet_queue);
+        /// Bounded: a slow consumer backpressures av_read_frame instead of
+        /// letting the queue balloon (SRT can then drop per its latency
+        /// window, which is the correct live-stream behavior).
+        pub const capacity = 0x400;
 
-        // INVARIANT: this is an SPSC Queue
+        pub const PopError = error{end_of_stream} || std.Io.Cancelable;
 
-        pub fn init(allocator: std.mem.Allocator, name: []const u8) Queue {
-            return .{
-                .mutex = .init(@src(), name),
-                .list = LinearFifo.init(allocator),
-            };
+        pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Queue {
+            const buffer = try allocator.alloc(Item, capacity);
+            return .{ .inner = .init(buffer), .buffer = buffer };
         }
 
-        pub fn deinit(self: *@This(), _: std.mem.Allocator) void {
-            while (self.list.readItem()) |pkt| {
-                var p: ?*c.AVPacket = pkt;
-                c.av_packet_free(&p);
+        /// NB: only safe after Decoder.stop — no worker may be blocked in here.
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator, io: std.Io) void {
+            var buf: [1]Item = undefined;
+            while ((self.inner.getUncancelable(io, &buf, 0) catch 0) > 0) {
+                switch (buf[0]) {
+                    .pkt => |pkt| {
+                        var p: ?*c.AVPacket = pkt;
+                        c.av_packet_free(&p);
+                    },
+                    .eof => {},
+                }
             }
 
-            self.mutex.deinit();
-            self.list.deinit();
+            allocator.free(self.buffer);
         }
 
-        pub fn push(self: *@This(), pkt: *c.AVPacket) !void {
+        pub fn push(self: *@This(), io: std.Io, pkt: *c.AVPacket) !void {
             const zone = tracy.Zone.begin(.{ .src = @src() });
             defer zone.end();
 
@@ -61,68 +67,62 @@ pub const packet = struct {
 
             _ = try libav.err(c.av_packet_ref(copy, pkt));
 
-            {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-
-                try self.list.writeItem(copy.?);
-            }
-
-            self.cond.signal();
+            self.inner.putOne(io, .{ .pkt = copy.? }) catch |e| switch (e) {
+                error.Closed => unreachable, // we never close; see Item
+                error.Canceled => return error.Canceled,
+            };
         }
 
-        pub fn pop(self: *@This()) !*c.AVPacket {
+        pub fn pop(self: *@This(), io: std.Io) PopError!*c.AVPacket {
             const zone = tracy.Zone.begin(.{ .src = @src() });
             defer zone.end();
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            if (self.eof_seen) return error.end_of_stream;
 
-            {
-                const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for packet", .color = .gray25 });
-                defer z.end();
+            const item = self.inner.getOne(io) catch |e| switch (e) {
+                error.Closed => unreachable, // we never close; see Item
+                error.Canceled => return error.Canceled,
+            };
 
-                while (self.list.readableLength() == 0) {
-                    if (self.end_of_stream.load(.monotonic)) return error.end_of_stream;
-                    if (signal.should_quit.load(.monotonic)) return error.should_quit;
-
-                    self.mutex.wait(&self.cond);
-                }
+            switch (item) {
+                .pkt => |pkt| return pkt,
+                .eof => {
+                    self.eof_seen = true;
+                    return error.end_of_stream;
+                },
             }
-
-            return self.list.readItem() orelse unreachable;
         }
 
         /// Non-blocking pop - returns null immediately if queue is empty
-        pub fn tryPop(self: *@This()) ?*c.AVPacket {
+        pub fn tryPop(self: *@This(), io: std.Io) ?*c.AVPacket {
             const zone = tracy.Zone.begin(.{ .src = @src() });
             defer zone.end();
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            if (self.eof_seen) return null;
 
-            if (self.list.readableLength() == 0) return null;
-            return self.list.readItem();
+            var buf: [1]Item = undefined;
+            const n = self.inner.get(io, &buf, 0) catch return null;
+            if (n == 0) return null;
+
+            switch (buf[0]) {
+                .pkt => |pkt| return pkt,
+                .eof => {
+                    self.eof_seen = true;
+                    return null;
+                },
+            }
         }
 
-        pub fn complete(self: *@This()) void {
-            self.end_of_stream.store(true, .monotonic);
-
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            self.cond.broadcast();
-        }
-
-        pub fn interrupt(self: *@This()) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            self.cond.broadcast();
+        /// Enqueues the in-band EOF marker. May block if the queue is full.
+        pub fn complete(self: *@This(), io: std.Io) std.Io.Cancelable!void {
+            self.inner.putOne(io, .eof) catch |e| switch (e) {
+                error.Closed => unreachable, // we never close; see Item
+                error.Canceled => return error.Canceled,
+            };
         }
     };
 
-    pub fn read(decode: *Decoder) !void {
+    pub fn read(decode: *Decoder, io: std.Io) !void {
         const log = std.log.scoped(.packet_read);
         defer log.debug("thread exit", .{});
 
@@ -135,7 +135,7 @@ pub const packet = struct {
         const video_queue = &decode.queue.pkt.video;
         const fmt_ctx = &decode.fmt_ctx;
 
-        while (!signal.should_quit.load(.monotonic)) {
+        while (true) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "read loop" });
             defer zone.end();
 
@@ -147,16 +147,15 @@ pub const packet = struct {
                     defer z.end();
 
                     if (pkt.ptr().stream_index == decode.video_ctx.stream) {
-                        try video_queue.push(pkt.ptr());
+                        try video_queue.push(io, pkt.ptr());
                     } else if (pkt.ptr().stream_index == decode.audio_ctx.stream) {
-                        try audio_queue.push(pkt.ptr());
+                        try audio_queue.push(io, pkt.ptr());
                     }
                 },
-                c.AVERROR_EOF => {
-                    audio_queue.complete();
-                    video_queue.complete();
-                    return;
-                },
+                // NB: readTask completes the packet queues on every exit path
+                c.AVERROR_EOF => return,
+                // Decoder.stop tripped the AVIOInterruptCB; not a real error
+                c.AVERROR_EXIT => return,
                 else => |e| _ = try libav.err(e),
             }
         }
@@ -330,7 +329,7 @@ pub const audio = struct {
 
     // A/V Sync Debug: Set to true to enable audio-side logging
 
-    pub fn decode(decoder: *Decoder) !void {
+    pub fn decode(decoder: *Decoder, io: std.Io) !void {
         const log = std.log.scoped(.audio_decode);
         defer log.debug("thread exit", .{});
 
@@ -364,7 +363,7 @@ pub const audio = struct {
         var pending: ?*c.AVPacket = null;
         defer if (pending) |_| c.av_packet_free(&pending);
 
-        while (!signal.should_quit.load(.monotonic)) {
+        while (true) {
             const zone = tracy.Zone.begin(.{ .src = @src(), .name = "decode loop" });
             defer zone.end();
 
@@ -404,7 +403,11 @@ pub const audio = struct {
 
                             while (true) {
                                 if (c.SDL_GetAudioStreamQueued(clock.stream) < max_len) break;
-                                sleep(2 * std.time.ns_per_ms);
+
+                                // NB: must be a cancelation point — if the SDL
+                                // stream is paused during stop() this loop
+                                // never drains, and group.cancel would hang
+                                try io.sleep(.{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake);
                             }
                         }
 
@@ -423,7 +426,7 @@ pub const audio = struct {
                             _ = clock.bytes_sent.fetchAdd(@intCast(len), .monotonic);
                         }
                     },
-                    c.AVERROR(c.EAGAIN) => break :recv_loop,
+                    AVERROR(.AGAIN) => break :recv_loop,
                     c.AVERROR_EOF => return,
                     else => |e| _ = try libav.err(e),
                 }
@@ -435,14 +438,14 @@ pub const audio = struct {
                     break :blk pkt;
                 }
 
-                break :blk pkt_queue.pop() catch |e| switch (e) {
+                break :blk pkt_queue.pop(io) catch |e| switch (e) {
                     error.end_of_stream => {
                         const flush_ret = c.avcodec_send_packet(audio_ctx, null);
                         if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
 
                         continue;
                     },
-                    error.should_quit => break,
+                    error.Canceled => return error.Canceled,
                 };
             };
 
@@ -451,7 +454,7 @@ pub const audio = struct {
                 defer send_z.end();
 
                 const send_ret = c.avcodec_send_packet(audio_ctx, pkt);
-                if (send_ret == c.AVERROR(c.EAGAIN)) {
+                if (send_ret == AVERROR(.AGAIN)) {
                     pending = pkt;
                     continue;
                 }
@@ -567,7 +570,7 @@ pub const video = struct {
         fn pull(self: *@This(), frame: *c.AVFrame) !PullResult {
             switch (c.av_buffersink_get_frame(self.sink.?, frame)) {
                 0 => return .frame,
-                c.AVERROR(c.EAGAIN) => return .again,
+                AVERROR(.AGAIN) => return .again,
                 c.AVERROR_EOF => return .eof,
                 else => |e| {
                     _ = try libav.err(e);
@@ -577,7 +580,7 @@ pub const video = struct {
         }
     };
 
-    pub fn decode(decoder: *Decoder) !void {
+    pub fn decode(decoder: *Decoder, io: std.Io) !void {
         const log = std.log.scoped(.video_decode);
         defer log.debug("thread exit", .{});
 
@@ -627,7 +630,7 @@ pub const video = struct {
         defer if (pending) |_| c.av_packet_free(&pending);
 
         // TODO: using a fn ptr I think we can deduplicate this massive loop
-        while (!signal.should_quit.load(.monotonic)) {
+        while (true) {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "decode loop" });
             defer z.end();
 
@@ -642,8 +645,8 @@ pub const video = struct {
 
                         if (decoder.display_rotation == 0) {
                             // common path, skip the AvFilterGraph
-                            const dst = frame_queue.acquire() catch |e| if (e != error.early_exit) return e else return;
-                            defer frame_queue.commit(dst);
+                            const dst = try frame_queue.acquire(io);
+                            defer frame_queue.commit(io, dst);
 
                             try convert(sws, .{ .inner = dst }, src_frame);
                         } else {
@@ -652,14 +655,16 @@ pub const video = struct {
 
                             try convert(sws, mid_frame, src_frame);
                             try filter.push(mid_frame.ptr());
-                            try drainFilter(&filter, frame_queue, dst_frame.ptr());
+                            try drainFilter(io, &filter, frame_queue, dst_frame.ptr());
                         }
                     },
-                    c.AVERROR(c.EAGAIN) => break :recv_loop,
+                    AVERROR(.AGAIN) => break :recv_loop,
                     c.AVERROR_EOF => {
                         try filter.push(null);
-                        try drainFilter(&filter, frame_queue, dst_frame.ptr());
-                        return frame_queue.end_of_stream.store(true, .monotonic);
+                        try drainFilter(io, &filter, frame_queue, dst_frame.ptr());
+
+                        // NB: videoTask completes frame_queue on every exit path
+                        return;
                     },
                     else => |e| _ = try libav.err(e),
                 }
@@ -671,14 +676,14 @@ pub const video = struct {
                     break :blk pkt;
                 }
 
-                break :blk pkt_queue.pop() catch |e| switch (e) {
+                break :blk pkt_queue.pop(io) catch |e| switch (e) {
                     error.end_of_stream => {
                         const flush_ret = c.avcodec_send_packet(video_ctx, null);
                         if (flush_ret < 0 and flush_ret != c.AVERROR_EOF) _ = try libav.err(flush_ret);
 
                         continue;
                     },
-                    error.should_quit => break,
+                    error.Canceled => return error.Canceled,
                 };
             };
 
@@ -687,27 +692,27 @@ pub const video = struct {
                 defer send_z.end();
 
                 const send_ret = c.avcodec_send_packet(video_ctx, pkt);
-                if (send_ret == c.AVERROR(c.EAGAIN)) {
+                if (send_ret == AVERROR(.AGAIN)) {
                     pending = pkt;
                     continue;
                 }
 
                 c.av_packet_free(&pkt);
 
-                if (send_ret == c.AVERROR_EOF) return frame_queue.end_of_stream.store(true, .monotonic);
+                if (send_ret == c.AVERROR_EOF) return; // videoTask completes frame_queue
                 if (send_ret < 0) _ = try libav.err(send_ret);
             }
         }
     }
 
-    fn drainFilter(filter: *FilterGraph, frame_queue: *FrameQueue, frame: *c.AVFrame) !void {
+    fn drainFilter(io: std.Io, filter: *FilterGraph, frame_queue: *FrameQueue, frame: *c.AVFrame) !void {
         while (true) {
             c.av_frame_unref(frame);
 
             switch (try filter.pull(frame)) {
                 .frame => {
-                    const dst_frame = frame_queue.acquire() catch |e| if (e != error.early_exit) return e else return;
-                    defer frame_queue.commit(dst_frame);
+                    const dst_frame = try frame_queue.acquire(io);
+                    defer frame_queue.commit(io, dst_frame);
 
                     _ = try libav.err(c.av_frame_copy(dst_frame, frame));
                     _ = try libav.err(c.av_frame_copy_props(dst_frame, frame));
@@ -744,52 +749,6 @@ pub const video = struct {
     }
 };
 
-const TracyMutex = struct {
-    inner: std.Thread.Mutex,
-    _lock: *tracy.Lock,
-
-    pub fn init(comptime src: std.builtin.SourceLocation, name: []const u8) TracyMutex {
-        const _lock: *tracy.Lock = .init(.{ .src = src });
-        _lock.customName(name);
-
-        return .{
-            .inner = .{},
-            ._lock = _lock,
-        };
-    }
-
-    pub fn deinit(self: @This()) void {
-        self._lock.deinit();
-    }
-
-    pub fn lock(self: *@This()) void {
-        _ = self._lock.beforeLock();
-        defer self._lock.afterLock();
-
-        self.inner.lock();
-    }
-
-    pub fn unlock(self: *@This()) void {
-        self.inner.unlock();
-        self._lock.afterUnlock();
-    }
-
-    pub fn wait(self: *@This(), cond: *std.Thread.Condition) void {
-        // INVARIANT: this function is called when the lock is held
-        self._lock.afterUnlock();
-        defer self._lock.afterLock();
-
-        cond.wait(&self.inner);
-    }
-
-    pub fn tryLock(self: *@This()) bool {
-        const ret = self.inner.tryLock();
-        self._lock.afterTryUnlock(ret); // NB: is actually afterTrylock
-
-        return ret;
-    }
-};
-
 pub const FrameQueue = struct {
     slot: Slot,
     read_idx: usize,
@@ -797,12 +756,11 @@ pub const FrameQueue = struct {
 
     end_of_stream: std.atomic.Value(bool) = .init(false),
 
-    mutex: TracyMutex,
-    cond: std.Thread.Condition = .{},
+    mutex: Mutex,
+    cond: std.Io.Condition = .init,
 
     const Slot = struct { frame: []c.AVFrame, state: []State };
     const State = enum { empty, in_use, ready_to_reuse, writing };
-    const Error = error{ invalid_size, early_exit };
     pub const InitError = std.mem.Allocator.Error || libav.Error;
 
     pub const capacity = 0x20;
@@ -851,22 +809,21 @@ pub const FrameQueue = struct {
         allocator.free(self.slot.state);
     }
 
-    pub fn acquire(self: *@This()) Error!*c.AVFrame {
+    pub fn acquire(self: *@This(), io: std.Io) std.Io.Cancelable!*c.AVFrame {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
         const idx = self.mask(self.write_idx);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
         {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for available frame", .color = .gray25 });
             defer z.end();
 
             while (self.slot.state[idx] != .empty) {
-                if (signal.should_quit.load(.monotonic)) return error.early_exit;
-                self.mutex.wait(&self.cond);
+                try self.mutex.wait(io, &self.cond);
             }
         }
 
@@ -874,31 +831,34 @@ pub const FrameQueue = struct {
         return &self.slot.frame[idx];
     }
 
-    pub fn commit(self: *@This(), frame: *c.AVFrame) void {
+    pub fn commit(self: *@This(), io: std.Io, frame: *c.AVFrame) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
         const idx = self.mask(self.write_idx);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         std.debug.assert(&self.slot.frame[idx] == frame);
         std.debug.assert(self.slot.state[idx] == .writing);
 
         self.slot.state[idx] = .in_use;
         self.write_idx += 1;
-        self.cond.signal(); // wake up consumer in pop
+
+        // NB: broadcast, not signal — producer (acquire) and consumer (pop)
+        // share this cond; a signal could wake the wrong role and stall
+        self.cond.broadcast(io);
     }
 
-    pub fn pop(self: *@This()) ?*c.AVFrame {
+    pub fn pop(self: *@This(), io: std.Io) std.Io.Cancelable!?*c.AVFrame {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
         const idx = self.mask(self.read_idx);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
         {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "wait for frame", .color = .gray25 });
@@ -906,9 +866,8 @@ pub const FrameQueue = struct {
 
             while (self.slot.state[idx] != .in_use) {
                 if (self.end_of_stream.load(.monotonic)) return null;
-                if (signal.should_quit.load(.monotonic)) return null;
 
-                self.mutex.wait(&self.cond);
+                try self.mutex.wait(io, &self.cond);
             }
         }
 
@@ -918,14 +877,14 @@ pub const FrameQueue = struct {
         return &self.slot.frame[idx];
     }
 
-    pub fn tryPop(self: *@This()) ?*c.AVFrame {
+    pub fn tryPop(self: *@This(), io: std.Io) ?*c.AVFrame {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
         const idx = self.mask(self.read_idx);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.slot.state[idx] != .in_use) return null;
 
@@ -936,21 +895,21 @@ pub const FrameQueue = struct {
     }
 
     /// you *must* not call recycle() on this AvFrame
-    pub fn peek(self: *@This()) ?*c.AVFrame {
+    pub fn peek(self: *@This(), io: std.Io) ?*c.AVFrame {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
         const idx = self.mask(self.read_idx);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.slot.state[idx] != .in_use) return null;
 
         return &self.slot.frame[idx];
     }
 
-    pub fn recycle(self: *@This(), used_frame: *c.AVFrame) void {
+    pub fn recycle(self: *@This(), io: std.Io, used_frame: *c.AVFrame) void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
@@ -958,8 +917,8 @@ pub const FrameQueue = struct {
         const diff = @intFromPtr(used_frame) - @intFromPtr(self.slot.frame.ptr);
         const idx = diff / @sizeOf(c.AVFrame);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         std.debug.assert(idx < self.slot.frame.len);
         std.debug.assert(self.slot.state[idx] == .ready_to_reuse);
@@ -967,17 +926,18 @@ pub const FrameQueue = struct {
         self.slot.state[idx] = .empty;
 
         // Wake up the producer in acquire()
-        self.cond.signal();
+        self.cond.broadcast(io);
     }
 
-    pub fn interrupt(self: *@This()) void {
-        const zone = tracy.Zone.begin(.{ .src = @src() });
-        defer zone.end();
+    /// Marks the queue finished and wakes any blocked consumer; without this a
+    /// consumer already parked in pop()'s wait would never observe EOF.
+    pub fn complete(self: *@This(), io: std.Io) void {
+        self.end_of_stream.store(true, .monotonic);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-        self.cond.broadcast();
+        self.cond.broadcast(io);
     }
 
     pub inline fn len(self: @This()) usize {
@@ -997,7 +957,7 @@ pub const Decoder = struct {
         ffmpeg_error,
         unsupported_display_matrix,
         unsupported_colour_depth,
-    } || std.mem.Allocator.Error || FrameQueue.InitError || AudioClock.InitError || std.Thread.SpawnError;
+    } || std.mem.Allocator.Error || FrameQueue.InitError || AudioClock.InitError;
 
     fmt_ctx: dec.AvFormatContext,
 
@@ -1014,35 +974,25 @@ pub const Decoder = struct {
 
     display_rotation: i16 = 0,
 
+    /// Aborts blocking FFmpeg calls (avformat_open_input / av_read_frame) via
+    /// AVIOInterruptCB. Lives here (heap, via `create`) so it stays valid across
+    /// ownership transfers and is settable while `init` is still blocking.
+    interrupted: std.atomic.Value(bool),
+
+    /// The packet-read / video-decode / audio-decode workers. `stop` cancels
+    /// and joins them as a unit — every blocked queue wait is a cancelation
+    /// point, so no per-queue wakeup bookkeeping is needed.
+    group: std.Io.Group,
+
     pub const Queues = struct {
         frame: FrameQueue,
         pkt: struct { audio: PacketQueue, video: PacketQueue },
 
-        fn deinit(self: *Queues, allocator: std.mem.Allocator) void {
-            // wake up the mutexes so they can check for should_quit
-            self.pkt.audio.interrupt();
-            self.pkt.video.interrupt();
-            self.frame.interrupt();
-
-            self.pkt.audio.deinit(allocator);
-            self.pkt.video.deinit(allocator);
+        // NB: only safe after Decoder.stop — no worker may be blocked in here
+        fn deinit(self: *Queues, allocator: std.mem.Allocator, io: std.Io) void {
+            self.pkt.audio.deinit(allocator, io);
+            self.pkt.video.deinit(allocator, io);
             self.frame.deinit(allocator);
-        }
-    };
-
-    pub const Handles = struct {
-        pkt: std.Thread,
-        audio: ?std.Thread,
-        video: std.Thread,
-
-        pub fn deinit(self: Handles) void {
-            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Handles.deinit" });
-            defer zone.end();
-
-            self.pkt.join();
-            self.video.join();
-
-            if (self.audio) |a| a.join();
         }
     };
 
@@ -1058,12 +1008,31 @@ pub const Decoder = struct {
         return @intCast(normalized);
     }
 
+    /// Allocates and pre-initializes the fields that must be valid *before*
+    /// `init` runs: `init` can block for a long time inside avformat_open_input
+    /// (SRT listen), and `interrupted` is how another thread aborts it.
+    // FIXME(paoda): find a better solution than this create and then init thing
+    pub fn create(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Decoder {
+        const self = try allocator.create(Decoder);
+        self.interrupted = .init(false);
+        self.group = .init;
+        return self;
+    }
+
     // TODO: DecoderOptions
-    pub fn init(self: *Decoder, allocator: std.mem.Allocator, hw_device: c.AVHWDeviceType, volume: f32, path: []const u8, headless: bool) InitError!void {
+    pub fn init(
+        self: *Decoder,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        hw_device: c.AVHWDeviceType,
+        volume: f32,
+        path: []const u8,
+        headless: bool,
+    ) InitError!void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Decoder.init" });
         defer zone.end();
 
-        var fmt_ctx = try dec.AvFormatContext.init(path);
+        var fmt_ctx = try dec.AvFormatContext.init(path, &self.interrupted);
         errdefer fmt_ctx.deinit();
 
         const video_ctx = try allocator.create(dec.AvCodecContext);
@@ -1143,39 +1112,36 @@ pub const Decoder = struct {
         });
         errdefer frame_queue.deinit(allocator);
 
-        var video_queue = PacketQueue.init(allocator, "Video PacketQueue");
-        errdefer video_queue.deinit(allocator);
+        var video_queue = try PacketQueue.init(allocator);
+        errdefer video_queue.deinit(allocator, io);
 
-        var audio_queue = PacketQueue.init(allocator, "Audio PacketQueue");
-        errdefer audio_queue.deinit(allocator);
+        var audio_queue = try PacketQueue.init(allocator);
+        errdefer audio_queue.deinit(allocator, io);
 
         const audio_clock: ?AudioClock = if (headless) null else try AudioClock.init(audio_ctx, volume);
         errdefer if (audio_clock) |clock| clock.deinit();
 
-        self.* = .{
-            .fmt_ctx = fmt_ctx,
-            .video_ctx = video_ctx,
-            .audio_ctx = audio_ctx,
-            .queue = .{
-                .frame = frame_queue,
-                .pkt = .{
-                    .video = video_queue,
-                    .audio = audio_queue,
-                },
-            },
-            .audio_clock = audio_clock,
-            .colour_space = video_ctx.inner.?.colorspace,
-            .resolution = resolution,
-            .display_rotation = display_rotation,
+        // NB: self.interrupted prevents us from doing self.* .{}
+        // FIXME(paoda): do something more idiomatic here
+        self.fmt_ctx = fmt_ctx;
+        self.video_ctx = video_ctx;
+        self.audio_ctx = audio_ctx;
+        self.queue = .{
+            .frame = frame_queue,
+            .pkt = .{ .video = video_queue, .audio = audio_queue },
         };
+        self.audio_clock = audio_clock;
+        self.colour_space = video_ctx.inner.?.colorspace;
+        self.resolution = resolution;
+        self.display_rotation = display_rotation;
     }
 
-    pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Decoder, allocator: std.mem.Allocator, io: std.Io) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Decoder.deinit" });
         defer zone.end();
 
         if (self.audio_clock) |clock| clock.deinit();
-        self.queue.deinit(allocator);
+        self.queue.deinit(allocator, io);
 
         self.audio_ctx.deinit();
         allocator.destroy(self.audio_ctx);
@@ -1208,16 +1174,73 @@ pub const Decoder = struct {
         return end_pts * c.av_q2d(st.time_base);
     }
 
-    pub fn spawn(self: *Decoder, headless: bool) std.Thread.SpawnError!Handles {
-        const pkt_handle = try std.Thread.spawn(.{}, packet.read, .{self});
-        const video_handle = try std.Thread.spawn(.{}, video.decode, .{self});
-        const audio_handle = if (headless) null else try std.Thread.spawn(.{}, audio.decode, .{self});
+    pub fn start(self: *Decoder, io: std.Io, headless: bool) std.Io.ConcurrentError!void {
+        errdefer self.stop(io);
 
-        return .{
-            .pkt = pkt_handle,
-            .video = video_handle,
-            .audio = audio_handle,
+        try self.group.concurrent(io, readTask, .{ self, io });
+        try self.group.concurrent(io, videoTask, .{ self, io });
+        if (!headless) try self.group.concurrent(io, audioTask, .{ self, io });
+    }
+
+    /// Aborts any blocking FFmpeg read, then cancels *and joins* all workers.
+    /// Idempotent.
+    pub fn stop(self: *Decoder, io: std.Io) void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "Decoder.stop" });
+        defer zone.end();
+
+        self.interrupted.store(true, .monotonic);
+        self.group.cancel(io);
+    }
+
+    // Group tasks must coerce to Cancelable!void; ffmpeg_error is already
+    // reported to the user via libav.err, everything else is unexpected.
+
+    fn readTask(self: *Decoder, io: std.Io) std.Io.Cancelable!void {
+        packet.read(self, io) catch |e| switch (e) {
+            error.Canceled => return error.Canceled,
+            error.ffmpeg_error => {},
+            else => errors.add_unknown_err(e),
         };
+
+        // however read() exited (EOF, error, interrupt), downstream must observe
+        // end-of-stream or the decode workers — and a UI thread blocked in
+        // FrameQueue.pop — wait forever on a dead producer.
+        //
+        // video before audio: in headless mode the UI thread consumes audio, and
+        // it only resumes draining once the frame queue completes; the reverse
+        // order can block in a full audio queue and re-deadlock.
+        try self.queue.pkt.video.complete(io);
+        try self.queue.pkt.audio.complete(io);
+    }
+
+    fn videoTask(self: *Decoder, io: std.Io) std.Io.Cancelable!void {
+        video.decode(self, io) catch |e| switch (e) {
+            error.Canceled => return error.Canceled,
+            error.ffmpeg_error => {},
+            else => errors.add_unknown_err(e),
+        };
+
+        // idempotent; wakes any consumer blocked in FrameQueue.pop
+        self.queue.frame.complete(io);
+    }
+
+    fn audioTask(self: *Decoder, io: std.Io) std.Io.Cancelable!void {
+        audio.decode(self, io) catch |e| switch (e) {
+            error.Canceled => return error.Canceled,
+            error.ffmpeg_error => {},
+            else => errors.add_unknown_err(e),
+        };
+
+        // keep draining so a dead audio decoder never backpressures the reader
+        // (a full audio queue stalls read() and starves video of packets)
+        while (true) {
+            var pkt: ?*c.AVPacket = self.queue.pkt.audio.pop(io) catch |e| switch (e) {
+                error.end_of_stream => return,
+                error.Canceled => return error.Canceled,
+            };
+
+            c.av_packet_free(&pkt);
+        }
     }
 };
 
@@ -1497,7 +1520,7 @@ pub const Encoder = struct {
                 defer z.end();
 
                 const ret = c.avcodec_receive_packet(codec_ctx, pkt);
-                if (ret == c.AVERROR(c.EAGAIN) or ret == c.AVERROR_EOF) break;
+                if (ret == AVERROR(.AGAIN) or ret == c.AVERROR_EOF) break;
                 _ = try libav.err(ret);
             }
 

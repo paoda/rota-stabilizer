@@ -1,28 +1,11 @@
 const std = @import("std");
 const tracy = @import("tracy");
 const gl = @import("gl");
+const c = @import("c");
 
 const AvFrame = @import("lib/libav.zig").AvFrame;
 
 pub var errors: Errors = undefined;
-
-pub const c = @cImport({
-    @cDefine("SDL_DISABLE_OLD_NAMES", {});
-    @cDefine("SDL_MAIN_HANDLED", {});
-
-    @cInclude("SDL3/SDL.h");
-    @cInclude("SDL3/SDL_main.h");
-    @cInclude("libavcodec/avcodec.h");
-    @cInclude("libavformat/avformat.h");
-    @cInclude("libavfilter/avfilter.h");
-    @cInclude("libavfilter/buffersink.h");
-    @cInclude("libavfilter/buffersrc.h");
-    @cInclude("libswscale/swscale.h");
-    @cInclude("libswresample/swresample.h");
-    @cInclude("libavutil/imgutils.h");
-    @cInclude("libavutil/opt.h");
-    @cInclude("libavutil/display.h");
-});
 
 // bytes per pixel, i know... sorry
 pub const RGB24_BPP = 3;
@@ -977,13 +960,14 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
 // 2. Irrecoverable. These errors are allowed to crash the program if unhandled
 //
 // The way this program should work more or less, is that as soon as we have DearImgui drawing, all errors must more or less be treated as recoverable.
-//
+
 // Errors is a method that reports errors and their context
 pub const Errors = struct {
     messages: RingBuffer([]const u8),
     allocator: std.mem.Allocator,
 
-    mutex: std.Thread.Mutex = .{}, // TODO(paoda): tracy?
+    // NB: this is not contested often so we can get away with a spinlock here
+    mutex: std.atomic.Mutex = .unlocked,
 
     pub fn init(self: *Errors, allocator: std.mem.Allocator) !void {
         const buffer = try RingBuffer([]const u8).init(allocator, 32);
@@ -993,6 +977,15 @@ pub const Errors = struct {
             .allocator = allocator,
             .messages = buffer,
         };
+    }
+
+    /// Guards `messages` for external readers (e.g. drawErrorPopup).
+    pub fn lock(self: *Errors) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn unlock(self: *Errors) void {
+        self.mutex.unlock();
     }
 
     pub fn deinit(self: *Errors) void {
@@ -1005,7 +998,7 @@ pub const Errors = struct {
 
     // TODO(paoda): introduce tiers of errors
 
-    pub fn add_local_ip_err(self: *Errors, e: std.posix.ConnectError) void {
+    pub fn add_local_ip_err(self: *Errors, e: anyerror) void {
         self.print("failed to determine local ip: {}\n", .{e});
     }
 
@@ -1108,11 +1101,11 @@ pub const Errors = struct {
 
         if (@import("builtin").mode == .Debug) {
             std.debug.print("err: {s}", .{text});
-            std.debug.dumpCurrentStackTrace(@returnAddress());
+            // std.debug.dumpCurrentStackTrace(.{ .first_address = @returnAddress() });
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         self.messages.push(text) catch {
             if (self.messages.pop()) |old| self.allocator.free(old);
@@ -1184,3 +1177,50 @@ pub fn RingBuffer(comptime T: type) type {
         }
     };
 }
+
+pub const Mutex = struct {
+    inner: std.Io.Mutex,
+    mark: *tracy.Lock,
+
+    pub fn init(comptime src: std.builtin.SourceLocation, comptime name: [:0]const u8) Mutex {
+        const mark = tracy.Lock.init(.{ .src = src, .name = name.ptr });
+        return .{ .inner = .init, .mark = mark };
+    }
+
+    pub fn deinit(self: Mutex) void {
+        self.mark.deinit();
+    }
+
+    pub fn lock(self: *Mutex, io: std.Io) std.Io.Cancelable!void {
+        _ = self.mark.beforeLock();
+        defer self.mark.afterLock();
+
+        return self.inner.lock(io);
+    }
+
+    /// For short critical sections that must not become cancelation points
+    /// (the std.Io.TypeErasedQueue.close idiom).
+    pub fn lockUncancelable(self: *Mutex, io: std.Io) void {
+        _ = self.mark.beforeLock();
+        defer self.mark.afterLock();
+
+        self.inner.lockUncancelable(io);
+    }
+
+    pub fn unlock(self: *Mutex, io: std.Io) void {
+        self.inner.unlock(io);
+        self.mark.afterUnlock();
+    }
+
+    /// On error.Canceled the mutex is *held* again — std re-acquires it
+    /// uncancelably before returning, so `defer unlock` patterns stay valid.
+    pub fn wait(self: *Mutex, io: std.Io, cond: *std.Io.Condition) std.Io.Cancelable!void {
+        // INVARIANT: this fn must be called when the lock is held
+        std.debug.assert(self.inner.state.raw != .unlocked);
+
+        self.mark.afterUnlock();
+        defer self.mark.afterLock();
+
+        return cond.wait(io, &self.inner);
+    }
+};
