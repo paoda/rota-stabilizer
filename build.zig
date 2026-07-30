@@ -1,15 +1,5 @@
 const std = @import("std");
-
-fn buildCheck(b: *std.Build, mod: *std.Build.Module) !void {
-    const step = b.step("check", "check if rota-stabilizer compiles");
-
-    const exe = b.addExecutable(.{
-        .name = "rota-stabilizer",
-        .root_module = mod,
-    });
-
-    step.dependOn(&exe.step);
-}
+const zigglgen = @import("zigglgen");
 
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
@@ -35,101 +25,86 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
     });
 
     exe_mod.addAnonymousImport("build.zig.zon", .{ .root_source_file = b.path("build.zig.zon") });
     exe_mod.addAnonymousImport("asset/Inter-Medium.ttf", .{ .root_source_file = b.path("asset/Inter-Medium.ttf") });
 
+    const gl_mod = zigglgen.generateBindingsModule(b, .{ .api = .gl, .version = .@"3.3", .profile = .core });
+    exe_mod.addImport("gl", gl_mod);
+
     const qrcodegen = b.dependency("zqrcodegen", .{ .target = target, .optimize = optimize });
     exe_mod.addImport("qrcodegen", qrcodegen.module("zqrcodegen"));
 
-    const znfde = b.dependency("znfde", .{ .target = target, .optimize = optimize, .with_portal = true });
+    const znfde = b.dependency("znfde", .{ .target = target, .optimize = optimize });
     exe_mod.addImport("znfde", znfde.module("root"));
     exe_mod.linkLibrary(znfde.artifact("nfde"));
 
     const known_folders = b.dependency("known_folders", .{ .target = target, .optimize = optimize });
     exe_mod.addImport("known-folders", known_folders.module("known-folders"));
 
-    const sdl = switch (target.result.os.tag) {
-        .macos => blk: {
-            const result = try std.process.Child.run(.{
-                .allocator = b.allocator,
-                .argv = &.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" },
-            });
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
 
-            const sdk_root = std.mem.trim(u8, result.stdout, " \n");
+    const sdl = b.dependency("sdl", .{ .target = target, .optimize = optimize });
+    translate_c.addIncludePath(sdl.path("include"));
 
-            break :blk b.dependency("sdl", .{
-                .target = target,
-                .optimize = .ReleaseFast,
-                .preferred_linkage = .static,
-                .system_include_path = b.pathJoin(&.{ sdk_root, "usr", "include" }),
-                .system_framework_path = b.pathJoin(&.{ sdk_root, "System", "Library", "Frameworks" }),
-                .library_path = b.pathJoin(&.{ sdk_root, "usr", "lib" }),
-            });
+    const zimgui = b.dependency("zimgui", .{ .target = target, .optimize = optimize });
+    exe_mod.addImport("zimgui", zimgui.module("dcimgui"));
+
+    // -- ffmpeg --
+    const libs = [_][]const u8{ "avcodec", "avformat", "avfilter", "swscale", "avutil", "swresample" };
+
+    const ffmpeg_dep: ?*std.Build.Dependency = switch (target.result.os.tag) {
+        .windows => blk: {
+            const dep = b.lazyDependency("ffmpeg", .{}) orelse return;
+            translate_c.addIncludePath(dep.path("include/"));
+
+            break :blk dep;
         },
-        else => b.dependency("sdl", .{ .target = target, .optimize = .ReleaseFast, .preferred_linkage = .static }),
+        else => blk: {
+            for (libs) |lib| translate_c.linkSystemLibrary(lib, .{});
+            break :blk null;
+        },
     };
 
-    const sdl_lib = sdl.artifact("SDL3");
-    exe_mod.linkLibrary(sdl_lib);
+    const c_mod = translate_c.createModule();
+    exe_mod.addImport("c", c_mod);
+    c_mod.linkLibrary(sdl.artifact("SDL3"));
 
-    const zgui = b.dependency("zgui", .{ .target = target, .optimize = .ReleaseFast, .shared = false, .backend = .sdl3_opengl3 });
-    exe_mod.addImport("zgui", zgui.module("root"));
+    if (ffmpeg_dep) |dep| {
+        c_mod.addLibraryPath(dep.path("lib/"));
 
-    const zgui_lib = zgui.artifact("imgui");
-    zgui_lib.linkLibrary(sdl_lib);
-    exe_mod.linkLibrary(zgui_lib);
+        const base_lazy_path = dep.path("bin" ++ std.fs.path.sep_str);
+        const base_dir = blk: {
+            const path = try base_lazy_path.getPath4(b, null);
+            break :blk try path.openDir(b.graph.io, ".", .{ .iterate = true });
+        };
 
-    switch (target.result.os.tag) {
-        .windows => {
-            const ffmpeg = b.lazyDependency("ffmpeg", .{}) orelse return;
-            exe_mod.addIncludePath(ffmpeg.path("include/"));
-            exe_mod.addLibraryPath(ffmpeg.path("lib/"));
+        var walk = try base_dir.walk(b.allocator);
+        defer walk.deinit();
 
-            const ffmpeg_libs = [_][]const u8{ "avcodec", "avformat", "avfilter", "swscale", "avutil", "swresample" };
+        while (try walk.next(b.graph.io)) |entry| {
+            const lib = containsAny(libs[0..], entry.basename) orelse continue;
+            const src_path = try base_lazy_path.join(b.allocator, entry.basename);
 
-            const base_path = ffmpeg.path("bin" ++ std.fs.path.sep_str);
-            const dir = try base_path.getPath3(b, null).openDir(".", .{ .iterate = true });
-
-            var walk = try dir.walk(b.allocator);
-            defer walk.deinit();
-
-            while (try walk.next()) |entry| {
-                const lib = containsAny(ffmpeg_libs[0..], entry.basename) orelse continue;
-                const src_path = try base_path.join(b.allocator, entry.basename);
-
-                // b.installBinFile doesn't support LazyPath for some reason :\
-                b.getInstallStep().dependOn(&b.addInstallFileWithDir(src_path, .bin, entry.basename).step);
-                exe_mod.linkSystemLibrary(lib, .{});
-            }
-        },
-        else => {
-            exe_mod.linkSystemLibrary("avcodec", .{});
-            exe_mod.linkSystemLibrary("avformat", .{});
-            exe_mod.linkSystemLibrary("avfilter", .{});
-            exe_mod.linkSystemLibrary("swscale", .{});
-            exe_mod.linkSystemLibrary("swresample", .{});
-            exe_mod.linkSystemLibrary("avutil", .{});
-        },
+            // b.installBinFile doesn't support LazyPath for some reason :\
+            b.getInstallStep().dependOn(&b.addInstallFileWithDir(src_path, .bin, entry.basename).step);
+            c_mod.linkSystemLibrary(lib, .{});
+        }
     }
 
-    const gl_mod = @import("zigglgen").generateBindingsModule(b, .{
-        .api = .gl,
-        .version = .@"3.3",
-        .profile = .core,
-    });
-    exe_mod.addImport("gl", gl_mod);
-
     const enable_tracy = b.option(bool, "tracy", "Enable Tracy Profiling") orelse false;
+
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = optimize });
-    const tracy_impl = if (enable_tracy) "tracy_impl_enabled" else "tracy_impl_disabled";
-
     exe_mod.addImport("tracy", tracy.module("tracy"));
-    exe_mod.addImport("tracy_impl", tracy.module(tracy_impl));
+    exe_mod.addImport("tracy_impl", tracy.module(if (enable_tracy) "tracy_impl_enabled" else "tracy_impl_disabled"));
 
-    try buildCheck(b, exe_mod);
+    try check(b, exe_mod);
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
@@ -178,6 +153,13 @@ pub fn build(b: *std.Build) !void {
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+}
+
+fn check(b: *std.Build, mod: *std.Build.Module) !void {
+    const step = b.step("check", "check if rota-stabilizer compiles");
+
+    const exe = b.addExecutable(.{ .name = "rota-stabilizer", .root_module = mod });
+    step.dependOn(&exe.step);
 }
 
 /// will return the first match
