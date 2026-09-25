@@ -203,6 +203,10 @@ pub const Ui = struct {
         return mode.*.refresh_rate;
     }
 
+    pub fn setVsync(_: @This(), enabled: bool) void {
+        _ = c.SDL_GL_SetSwapInterval(if (enabled) 1 else 0);
+    }
+
     pub fn swap(self: @This()) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .color = .gray25 });
         defer zone.end();

@@ -542,6 +542,9 @@ const EncodeSession = struct {
     refresh_rate: f32,
     is_finished: bool = false,
 
+    /// NB: held so deinit can restore vsync
+    ui: Ui,
+
     const log = std.log.scoped(.encode_session);
 
     fn stop(self: *const @This(), io: std.Io) void {
@@ -572,6 +575,10 @@ const EncodeSession = struct {
         const hw_enc: c.AVHWDeviceType = @intFromEnum(state.hw_enc);
         log.debug("trying {s} for hw decode", .{getHwDeviceName(hw_dec)});
         log.debug("trying {s} for hw encode", .{getHwDeviceName(hw_enc)});
+
+        // NB: encoding should not be limited by vsync. If set to true, every swap waits on the display, capping encode speed at the refresh rate
+        ui.setVsync(false);
+        errdefer ui.setVsync(true);
 
         var render_view: Viewport = .default;
         try render_view.push(state.resolution[0], state.resolution[1]);
@@ -666,6 +673,7 @@ const EncodeSession = struct {
             .encode_view = encode_view,
 
             .frame_total = frame_estimate,
+            .ui = ui,
         };
     }
 
@@ -674,6 +682,7 @@ const EncodeSession = struct {
         defer zone.end();
 
         self.stop(io); // cancels and joins the decode workers
+        self.ui.setVsync(true);
 
         self.manager.deinit(allocator);
 
