@@ -79,9 +79,6 @@ pub const Ui = struct {
     /// INVARIANT: in pixels
     view: Viewport,
 
-    /// NB: will always be 1.0 on macOS and Wayland
-    scale: f32,
-
     /// INVARIANT: the size of the window in window coordinates
     init_size: Resolution,
 
@@ -177,7 +174,6 @@ pub const Ui = struct {
             .window = window,
             .gl_ctx = gl_ctx,
             .view = view,
-            .scale = main_scale,
             .init_size = .{ .width = w, .height = h },
         };
     }
