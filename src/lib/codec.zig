@@ -642,7 +642,8 @@ pub const video = struct {
 
                             try convert(sws, .{ .inner = dst }, src_frame);
                         } else {
-                            c.av_frame_unref(mid_frame.ptr());
+                            // NB: unref would drop the buffer + dimensions sws_scale_frame needs, so only copy-on-write
+                            _ = try libav.err(c.av_frame_make_writable(mid_frame.ptr()));
                             c.av_frame_unref(dst_frame.ptr());
 
                             try convert(sws, mid_frame, src_frame);
