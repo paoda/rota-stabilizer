@@ -238,18 +238,18 @@ pub fn guessHardware() struct { DecodeHwDeviceType, EncodeHwDeviceType } {
 
     const vendor = std.mem.span(gl.GetString(gl.VENDOR)) orelse return .{ .Software, .Software };
 
-    const is_nvidia = std.mem.indexOf(u8, vendor, "NVIDIA") != null;
+    const is_nvidia = std.mem.find(u8, vendor, "NVIDIA") != null;
     if (is_nvidia) return .{ .CUDA, .CUDA };
 
-    const is_intel = std.mem.indexOf(u8, vendor, "Intel") != null;
+    const is_intel = std.mem.find(u8, vendor, "Intel") != null;
     if (is_intel) return switch (builtin.os.tag) {
         .linux => .{ .VAAPI, .VAAPI },
         .windows => .{ .D3D11VA, .QSV },
         else => unreachable,
     };
 
-    const is_amd = std.mem.indexOf(u8, vendor, "AMD") != null;
-    const is_ati = std.mem.indexOf(u8, vendor, "ATI") != null;
+    const is_amd = std.mem.find(u8, vendor, "AMD") != null;
+    const is_ati = std.mem.find(u8, vendor, "ATI") != null;
     if (is_amd or is_ati) return switch (builtin.os.tag) {
         .linux => .{ .VAAPI, .VAAPI },
         .windows => .{ .D3D11VA, .AMF },
@@ -270,8 +270,8 @@ pub const gui = struct {
     var built_layout: bool = false;
 
     pub const State = struct {
-        input_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
-        output_path: [std.fs.max_path_bytes:0]u8 = @splat(0),
+        input_path: [std.Io.Dir.max_path_bytes:0]u8 = @splat(0),
+        output_path: [std.Io.Dir.max_path_bytes:0]u8 = @splat(0),
         default_path: ?[:0]const u8,
 
         hw_dec: DecodeHwDeviceType,
@@ -625,8 +625,8 @@ pub const gui = struct {
 
                 if (str.len == 0) {
                     if (state.default_path) |path| {
-                        var buf: [std.fs.max_path_bytes]u8 = undefined;
-                        const file_path = std.fmt.bufPrintZ(&buf, "{s}{s}{s}", .{ path, std.fs.path.sep_str, "output.mp4" }) catch unreachable;
+                        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                        const file_path = std.fmt.bufPrintSentinel(&buf, "{s}{s}{s}", .{ path, std.fs.path.sep_str, "output.mp4" }, 0) catch unreachable;
 
                         setPath(&state.output_path, file_path);
                     }
@@ -1041,7 +1041,7 @@ pub const gui = struct {
 
         const version_label = blk: {
             var buf: [64]u8 = undefined;
-            break :blk std.fmt.bufPrintZ(&buf, "rota-stabilizer v{s}", .{version}) catch unreachable;
+            break :blk std.fmt.bufPrintSentinel(&buf, "rota-stabilizer v{s}", .{version}, 0) catch unreachable;
         };
         const version_width = imgui.calcTextSize(version_label)[0];
         const line_height = imgui.getTextLineHeightWithSpacing();
@@ -1216,8 +1216,8 @@ pub const gui = struct {
     }
 
     // FIXME: does zig not handle this?
-    fn setPath(dst: *[std.fs.max_path_bytes:0]u8, src: [:0]const u8) void {
-        const payload = @min(src.len, std.fs.max_path_bytes - 1);
+    fn setPath(dst: *[std.Io.Dir.max_path_bytes:0]u8, src: [:0]const u8) void {
+        const payload = @min(src.len, std.Io.Dir.max_path_bytes - 1);
 
         @memset(dst[0..], 0);
         @memcpy(dst[0..payload], src[0..payload]);
@@ -1293,7 +1293,7 @@ const QrCode = struct {
             addr.setPort(8080); // TODO(paoda): make configurable
 
             var buf: [MAX_LEN + 1]u8 = undefined;
-            break :blk std.fmt.bufPrintZ(&buf, "http://{f}", .{addr}) catch unreachable;
+            break :blk std.fmt.bufPrintSentinel(&buf, "http://{f}", .{addr}, 0) catch unreachable;
         };
 
         const qrcode = try qrcodegen.encodeText(allocator, url, .Low, .Auto, .{});

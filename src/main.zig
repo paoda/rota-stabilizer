@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
                         const path = std.mem.sliceTo(event.drop.data, 0);
 
                         // similar to setPath in platform.zig
-                        const len = @min(path.len, std.fs.max_path_bytes - 1);
+                        const len = @min(path.len, std.Io.Dir.max_path_bytes - 1);
                         @memset(state.input_path[0..], 0);
                         @memcpy(state.input_path[0..len], path[0..len]);
 
@@ -810,8 +810,8 @@ fn handleRequest(
         },
         .POST => {
             if (std.mem.eql(u8, req.head.target, "/upload")) {
-                var file_name_buf: [std.fs.max_name_bytes]u8 = undefined;
-                var tmp_name_buf: [std.fs.max_name_bytes]u8 = undefined;
+                var file_name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
+                var tmp_name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
 
                 const file_buf = try allocator.alloc(u8, 0x100000);
                 const payload_buf = try allocator.alloc(u8, 0x10000);

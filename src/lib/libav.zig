@@ -25,7 +25,12 @@ pub const enc = struct {
             const codec = c.avcodec_find_encoder(codec_id);
             const ideal_fmt = c.AV_PIX_FMT_RGB24;
 
-            const pix_fmts: [*]const c.AVPixelFormat = @as(?[*]const c.AVPixelFormat, codec.*.pix_fmts) orelse @panic("FIXME: no supported sw encode pix fmt?");
+            const pix_fmts: [*]const c.AVPixelFormat = blk: {
+                var configs: ?*const anyopaque = null;
+                _ = c.avcodec_get_supported_config(null, codec, c.AV_CODEC_CONFIG_PIX_FORMAT, 0, &configs, null);
+
+                break :blk @ptrCast(@alignCast(configs orelse @panic("FIXME: no supported sw encode pix fmt?"))); // AV_PIX_FMT_NONE terminated
+            };
 
             var i: usize = 0;
             while (pix_fmts[i] != c.AV_PIX_FMT_NONE) : (i += 1) {

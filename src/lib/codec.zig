@@ -490,27 +490,27 @@ pub const video = struct {
                 break :blk stream.time_base;
             };
 
-            var buf: [0x100]u8 = undefined;
-            const args = try std.fmt.bufPrintZ(
-                &buf,
-                "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}:colorspace={}:range={}",
-                .{
-                    video_ctx.width,
-                    video_ctx.height,
-                    c.AV_PIX_FMT_NV12,
-                    time_base.num,
-                    time_base.den,
-                    pixel_aspect.num,
-                    pixel_aspect.den,
-                    video_ctx.colorspace,
-                    video_ctx.color_range,
-                },
-            );
-
             const buffersrc = c.avfilter_get_by_name("buffer") orelse return error.ffmpeg_error;
             const buffersink = c.avfilter_get_by_name("buffersink") orelse return error.ffmpeg_error;
 
-            _ = try libav.err(c.avfilter_graph_create_filter(&src, buffersrc, "video_in", args.ptr, null, graph));
+            src = c.avfilter_graph_alloc_filter(graph, buffersrc, "video_in") orelse return error.out_of_memory;
+
+            {
+                const params = c.av_buffersrc_parameters_alloc() orelse return error.out_of_memory;
+                defer c.av_free(params);
+
+                params.*.format = c.AV_PIX_FMT_NV12;
+                params.*.width = video_ctx.width;
+                params.*.height = video_ctx.height;
+                params.*.time_base = time_base;
+                params.*.sample_aspect_ratio = pixel_aspect;
+                params.*.color_space = video_ctx.colorspace;
+                params.*.color_range = video_ctx.color_range;
+
+                _ = try libav.err(c.av_buffersrc_parameters_set(src, params));
+            }
+
+            _ = try libav.err(c.avfilter_init_str(src, null));
             _ = try libav.err(c.avfilter_graph_create_filter(&sink, buffersink, "video_out", null, null, graph));
 
             switch (decoder.display_rotation) {
@@ -602,21 +602,11 @@ pub const video = struct {
         var filter = try FilterGraph.init(decoder);
         defer filter.deinit();
 
-        const maybe_sws = c.sws_getContext(
-            video_ctx.width,
-            video_ctx.height,
-            video_ctx.pix_fmt,
-            video_ctx.width,
-            video_ctx.height,
-            c.AV_PIX_FMT_NV12,
-            c.SWS_FAST_BILINEAR,
-            null,
-            null,
-            null,
-        );
-        defer c.sws_freeContext(maybe_sws);
+        var maybe_sws: ?*c.SwsContext = c.sws_alloc_context();
+        defer c.sws_free_context(&maybe_sws);
 
         const sws = maybe_sws orelse return error.out_of_memory;
+        sws.flags = c.SWS_FAST_BILINEAR;
 
         var pending: ?*c.AVPacket = null;
         defer if (pending) |_| c.av_packet_free(&pending);
@@ -717,6 +707,13 @@ pub const video = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
+        // NB:  ensures that there's no colour space mismatch and its just a pixel conversion
+        dst_frame.ptr().colorspace = src_frame.ptr().colorspace;
+        dst_frame.ptr().color_range = src_frame.ptr().color_range;
+        dst_frame.ptr().color_primaries = src_frame.ptr().color_primaries;
+        dst_frame.ptr().color_trc = src_frame.ptr().color_trc;
+        dst_frame.ptr().chroma_location = src_frame.ptr().chroma_location;
+
         if (src_frame.ptr().hw_frames_ctx != null) {
             const z = tracy.Zone.begin(.{ .src = @src(), .name = "hwframe_transfer_data" });
             defer z.end();
@@ -731,11 +728,6 @@ pub const video = struct {
 
         // timing
         dst_frame.ptr().pts = src_frame.ptr().pts;
-
-        dst_frame.ptr().colorspace = src_frame.ptr().colorspace;
-        dst_frame.ptr().color_range = src_frame.ptr().color_range;
-        dst_frame.ptr().color_primaries = src_frame.ptr().color_primaries;
-        dst_frame.ptr().color_trc = src_frame.ptr().color_trc;
     }
 };
 
@@ -1135,30 +1127,21 @@ pub const Decoder = struct {
         try audio_ctx.init(.audio, fmt_ctx, .{});
         errdefer audio_ctx.deinit();
 
-        var display_rotation: i16 = 0;
+        const display_rotation: i16 = blk: {
+            const codecpar = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)].*.codecpar;
 
-        {
-            const st: ?*c.AVStream = fmt_ctx.ptr().streams[@intCast(video_ctx.stream)];
-            const data = st.?.codecpar.*.coded_side_data;
-            const count: usize = @intCast(st.?.codecpar.*.nb_coded_side_data);
+            const side = c.av_packet_side_data_get(
+                codecpar.*.coded_side_data,
+                codecpar.*.nb_coded_side_data,
+                c.AV_PKT_DATA_DISPLAYMATRIX,
+            ) orelse break :blk 0;
 
-            // FIXME(paoda): be a little bit more intentional about how this looks in the terminal
-            for (0..count) |i| {
-                const ptr = &data[i];
-                log.debug("{}: {s}", .{ i, c.av_packet_side_data_name(ptr.type) });
+            const angle = c.av_display_rotation_get(@ptrCast(@alignCast(side.*.data)));
+            const rotation = try normalizeRotation(angle);
 
-                switch (ptr.type) {
-                    c.AV_PKT_DATA_DISPLAYMATRIX => {
-                        const angle = c.av_display_rotation_get(@ptrCast(@alignCast(ptr.data)));
-                        display_rotation = try normalizeRotation(angle);
-
-                        log.debug("display matrix angle: {d:.2}", .{angle});
-                        log.debug("display matrix snapped rotation: {}", .{display_rotation});
-                    },
-                    else => log.debug("found {s} side_data", .{c.av_packet_side_data_name(ptr.type)}),
-                }
-            }
-        }
+            log.debug("display matrix angle: {d:.2}, snapped rotation: {}", .{ angle, rotation });
+            break :blk rotation;
+        };
 
         const resolution: Resolution = blk: {
             const ctx = video_ctx.inner.?;
@@ -1328,6 +1311,8 @@ pub const Encoder = struct {
         if (self._hw) |*hw| hw.frame.deinit();
         self._pkt.deinit();
 
+        c.sws_free_context(&self.sws_ctx);
+
         self.codec_ctx.deinit();
         self.fmt_ctx.deinit();
 
@@ -1339,8 +1324,6 @@ pub const Encoder = struct {
         errdefer fmt_ctx.deinit();
 
         const encode_resolution = opt.encode_view.resolution();
-        const width = encode_resolution.width;
-        const height = encode_resolution.height;
 
         var codec_ctx = try enc.AvCodecContext.init(codec, fmt_ctx, .{
             .resolution = encode_resolution,
@@ -1417,20 +1400,10 @@ pub const Encoder = struct {
                 break :blk .{ .frame = frame };
             },
             .sws_ctx = blk: {
-                const ptr: ?*c.SwsContext = c.sws_getContext(
-                    width,
-                    height,
-                    c.AV_PIX_FMT_NV12,
-                    width,
-                    height,
-                    sw_pix_fmt,
-                    c.SWS_POINT,
-                    null,
-                    null,
-                    null,
-                );
+                const ptr: *c.SwsContext = c.sws_alloc_context() orelse return error.out_of_memory;
+                ptr.flags = c.SWS_POINT;
 
-                break :blk ptr.?;
+                break :blk ptr;
             },
         };
     }
@@ -1483,13 +1456,13 @@ pub const Encoder = struct {
         } else {
             const sw_frame = self._sw_frame.ptr();
             _ = try libav.err(c.av_frame_make_writable(sw_frame));
+            _ = try libav.err(c.av_frame_copy_props(sw_frame, src_frame));
 
             {
                 const z = tracy.Zone.begin(.{ .src = @src(), .name = "sws_scale_frame" });
                 defer z.end();
 
                 _ = try libav.err(c.sws_scale_frame(self.sws_ctx, sw_frame, src_frame));
-                sw_frame.pts = src_frame.pts;
             }
 
             try self.writeVideoFrame(sw_frame);
