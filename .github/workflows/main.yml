@@ -59,7 +59,11 @@ jobs:
           cp zig-out/bin/rota-stabilizer zig-out/rota-stabilizer.app/Contents/MacOS/
           cp -R zig-out/bin/libs zig-out/rota-stabilizer.app/Contents/MacOS/
 
-          cat > zig-out/rota-stabilizer.app/Contents/Info.plist << 'EOF'
+          # CFBundleShortVersionString must be numeric, so drop any -dev suffix
+          VERSION=$(sed -n 's/^ *\.version = "\(.*\)",/\1/p' build.zig.zon)
+          VERSION=${VERSION%%-*}
+
+          cat > zig-out/rota-stabilizer.app/Contents/Info.plist << EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -73,9 +77,9 @@ jobs:
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleVersion</key>
-              <string>1</string>
+              <string>${VERSION}</string>
               <key>CFBundleShortVersionString</key>
-              <string>1.0</string>
+              <string>${VERSION}</string>
           </dict>
           </plist>
           EOF
