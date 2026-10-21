@@ -1,31 +1,11 @@
-//! By convention, root.zig is the root source file when making a library. If
-//! you are making an executable, the convention is to delete this file and
-//! start with main.zig instead.
 const std = @import("std");
 const tracy = @import("tracy");
 const gl = @import("gl");
+const c = @import("c");
 
 const AvFrame = @import("lib/libav.zig").AvFrame;
 
 pub var errors: Errors = undefined;
-
-pub const c = @cImport({
-    @cDefine("SDL_DISABLE_OLD_NAMES", {});
-    @cDefine("SDL_MAIN_HANDLED", {});
-
-    @cInclude("SDL3/SDL.h");
-    @cInclude("SDL3/SDL_main.h");
-    @cInclude("libavcodec/avcodec.h");
-    @cInclude("libavformat/avformat.h");
-    @cInclude("libavfilter/avfilter.h");
-    @cInclude("libavfilter/buffersink.h");
-    @cInclude("libavfilter/buffersrc.h");
-    @cInclude("libswscale/swscale.h");
-    @cInclude("libswresample/swresample.h");
-    @cInclude("libavutil/imgutils.h");
-    @cInclude("libavutil/opt.h");
-    @cInclude("libavutil/display.h");
-});
 
 // bytes per pixel, i know... sorry
 pub const RGB24_BPP = 3;
@@ -41,7 +21,85 @@ pub const Resolution = struct {
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{}x{}", .{ self.width, self.height });
     }
+
+    pub fn eql(left: Resolution, right: Resolution) bool {
+        return left.width == right.width and left.height == right.height;
+    }
 };
+
+/// A sub-rectangle of the video frame that contains only the pixels that are from the screen capture.
+/// i.e. any letterboxing that a streaming app adds is discarded
+pub const ContentRect = struct {
+    x: c_int,
+    y: c_int,
+
+    frame: Resolution,
+
+    pub fn full(frame: Resolution) ContentRect {
+        return .{ .x = 0, .y = 0, .frame = frame };
+    }
+
+    pub fn eql(left: ContentRect, right: ContentRect) bool {
+        return left.x == right.x and left.y == right.y and left.frame.eql(right.frame);
+    }
+
+    /// produces a centered ContentRect that fits device_aspect within frame
+    /// NV12 UV is considered, so offsets and dimensions must be even rounded down
+    pub fn fromAspect(frame: Resolution, device_aspect: f32) ContentRect {
+        if (!std.math.isFinite(device_aspect) or device_aspect <= 0.0) return full(frame);
+
+        const frame_w: f32 = @floatFromInt(frame.width);
+        const frame_h: f32 = @floatFromInt(frame.height);
+        const frame_aspect = frame_w / frame_h;
+
+        var width: c_int = frame.width;
+        var height: c_int = frame.height;
+
+        if (device_aspect > frame_aspect) {
+            height = @intFromFloat(frame_w / device_aspect);
+        } else {
+            width = @intFromFloat(frame_h * device_aspect);
+        }
+
+        width = @max(2, width & ~@as(c_int, 1));
+        height = @max(2, height & ~@as(c_int, 1));
+
+        return .{
+            .x = @divTrunc(frame.width - width, 2) & ~@as(c_int, 1),
+            .y = @divTrunc(frame.height - height, 2) & ~@as(c_int, 1),
+            .frame = .{ .width = width, .height = height },
+        };
+    }
+};
+
+test ContentRect {
+    const frame: Resolution = .{ .width = 1920, .height = 1080 };
+
+    // matching aspect -> no crop
+    try std.testing.expect(ContentRect.fromAspect(frame, 16.0 / 9.0).eql(.full(frame)));
+
+    // invalid aspect -> no crop
+    try std.testing.expect(ContentRect.fromAspect(frame, 0.0).eql(.full(frame)));
+    try std.testing.expect(ContentRect.fromAspect(frame, -1.0).eql(.full(frame)));
+
+    { // letterbox: 19.5:9 device inside a 16:9 frame
+        const rect = ContentRect.fromAspect(frame, 2340.0 / 1080.0);
+
+        try std.testing.expectEqual(0, rect.x);
+        try std.testing.expectEqual(96, rect.y); // (1080 - 886) / 2 = 97, rounded down to even
+        try std.testing.expectEqual(1920, rect.frame.width);
+        try std.testing.expectEqual(886, rect.frame.height); // 1920 / (2340 / 1080) ≈ 886.15
+    }
+
+    { // pillarbox: 4:3 device inside a 16:9 frame
+        const rect = ContentRect.fromAspect(frame, 4.0 / 3.0);
+
+        try std.testing.expectEqual(240, rect.x);
+        try std.testing.expectEqual(0, rect.y);
+        try std.testing.expectEqual(1440, rect.frame.width);
+        try std.testing.expectEqual(1080, rect.frame.height);
+    }
+}
 
 pub const BlurManager = struct {
     const Layer = struct { fbo: c_uint, tex: c_uint };
@@ -307,6 +365,14 @@ pub const GpuResourceManager = struct {
 
         gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out_tex, 0);
         if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.framebuffer_check_failed;
+    }
+
+    /// resizes resources related to the output texture
+    /// NB: does not affect offscreen target or angle calc
+    pub fn resize(self: *GpuResourceManager, content: Resolution) void {
+        self.setupVertexArrays(content);
+        self.setupBlur(content);
+        self.setupVideoTextures(content);
     }
 
     pub fn blur(self: GpuResourceManager) BlurManager {
@@ -894,13 +960,14 @@ pub fn getPixelFormatName(kind: c.AVPixelFormat) [:0]const u8 {
 // 2. Irrecoverable. These errors are allowed to crash the program if unhandled
 //
 // The way this program should work more or less, is that as soon as we have DearImgui drawing, all errors must more or less be treated as recoverable.
-//
+
 // Errors is a method that reports errors and their context
 pub const Errors = struct {
     messages: RingBuffer([]const u8),
     allocator: std.mem.Allocator,
 
-    mutex: std.Thread.Mutex = .{}, // TODO(paoda): tracy?
+    // NB: this is not contested often so we can get away with a spinlock here
+    mutex: std.atomic.Mutex = .unlocked,
 
     pub fn init(self: *Errors, allocator: std.mem.Allocator) !void {
         const buffer = try RingBuffer([]const u8).init(allocator, 32);
@@ -910,6 +977,15 @@ pub const Errors = struct {
             .allocator = allocator,
             .messages = buffer,
         };
+    }
+
+    /// Guards `messages` for external readers (e.g. drawErrorPopup).
+    pub fn lock(self: *Errors) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn unlock(self: *Errors) void {
+        self.mutex.unlock();
     }
 
     pub fn deinit(self: *Errors) void {
@@ -922,7 +998,7 @@ pub const Errors = struct {
 
     // TODO(paoda): introduce tiers of errors
 
-    pub fn add_local_ip_err(self: *Errors, e: std.posix.ConnectError) void {
+    pub fn add_local_ip_err(self: *Errors, e: anyerror) void {
         self.print("failed to determine local ip: {}\n", .{e});
     }
 
@@ -1025,11 +1101,11 @@ pub const Errors = struct {
 
         if (@import("builtin").mode == .Debug) {
             std.debug.print("err: {s}", .{text});
-            std.debug.dumpCurrentStackTrace(@returnAddress());
+            // std.debug.dumpCurrentStackTrace(.{ .first_address = @returnAddress() });
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         self.messages.push(text) catch {
             if (self.messages.pop()) |old| self.allocator.free(old);
@@ -1101,3 +1177,48 @@ pub fn RingBuffer(comptime T: type) type {
         }
     };
 }
+
+pub const Mutex = struct {
+    inner: std.Io.Mutex,
+    mark: *tracy.Lock,
+
+    pub fn init(comptime src: std.builtin.SourceLocation, comptime name: [:0]const u8) Mutex {
+        const mark = tracy.Lock.init(.{ .src = src, .name = name.ptr });
+        return .{ .inner = .init, .mark = mark };
+    }
+
+    pub fn deinit(self: Mutex) void {
+        self.mark.deinit();
+    }
+
+    pub fn lock(self: *Mutex, io: std.Io) std.Io.Cancelable!void {
+        _ = self.mark.beforeLock();
+        defer self.mark.afterLock();
+
+        return self.inner.lock(io);
+    }
+
+    pub fn lockUncancelable(self: *Mutex, io: std.Io) void {
+        _ = self.mark.beforeLock();
+        defer self.mark.afterLock();
+
+        self.inner.lockUncancelable(io);
+    }
+
+    pub fn unlock(self: *Mutex, io: std.Io) void {
+        self.inner.unlock(io);
+        self.mark.afterUnlock();
+    }
+
+    /// On error.Canceled the mutex is *held* again — std re-acquires it
+    /// uncancelably before returning, so `defer unlock` patterns stay valid.
+    pub fn wait(self: *Mutex, io: std.Io, cond: *std.Io.Condition) std.Io.Cancelable!void {
+        // INVARIANT: this fn must be called when the lock is held
+        std.debug.assert(self.inner.state.raw != .unlocked);
+
+        self.mark.afterUnlock();
+        defer self.mark.afterLock();
+
+        return cond.wait(io, &self.inner);
+    }
+};

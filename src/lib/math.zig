@@ -10,6 +10,22 @@ pub const Vec2 = struct {
     }
 };
 
+pub const IVec2 = struct {
+    v: [2]usize,
+
+    pub inline fn x(self: @This()) usize {
+        return self.v[0];
+    }
+
+    pub inline fn y(self: @This()) usize {
+        return self.v[1];
+    }
+};
+
+pub fn ivec2(x: usize, y: usize) IVec2 {
+    return .{ .v = .{ x, y } };
+}
+
 pub fn vec2(x: f32, y: f32) Vec2 {
     return .{ .v = .{ x, y } };
 }
