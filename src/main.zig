@@ -878,9 +878,10 @@ fn handleRequest(
                 var new_size: usize = chunk_offset;
 
                 {
+                    // NB: read access needed for stat() on Windows?
                     const file = switch (chunk_index) {
-                        0 => try dir.createFile(io, tmp_name, .{}),
-                        else => dir.openFile(io, tmp_name, .{ .mode = .write_only }) catch |err| switch (err) {
+                        0 => try dir.createFile(io, tmp_name, .{ .read = true }),
+                        else => dir.openFile(io, tmp_name, .{ .mode = .read_write }) catch |err| switch (err) {
                             error.FileNotFound => {
                                 try req.respond("No upload in progress for this chunk index", .{ .status = .conflict });
                                 return error.no_upload_in_progress;
