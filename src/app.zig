@@ -79,21 +79,19 @@ const Session = union(State) {
 };
 
 const ListenSession = struct {
-    // FIXME(paoda): this should be a task instead of a group?
-    group: std.Io.Group = .init,
+    /// Null once ownership of the result transfers to PlaybackSession.
+    task: ?std.Io.Future(Error!Accepted) = null,
 
     /// Created on the main thread *before* the listen task spawns, so deinit()
-    /// can abort a setup() still blocked in avformat_open_input. Null once
+    /// can abort a listen() still blocked in avformat_open_input. Null once
     /// ownership transfers to PlaybackSession.
     dec: ?*DecoderManager = null,
 
+    /// Future can't be polled, so this tells the UI thread await() won't block for long
     is_done: std.atomic.Value(bool) = .init(false),
-    err: ?anyerror = null,
-    accepted: ?Accepted = null,
 
-    const Accepted = struct {
-        double_buffer: *DoubleBuffer,
-    };
+    const Accepted = struct { double_buffer: *DoubleBuffer };
+    const Error = Decoder.InitError || std.Io.ConcurrentError;
 
     // TODO(paoda): port and latency ms configurable
     const uri = "srt://0.0.0.0:8090?mode=listener&latency=50000";
@@ -104,19 +102,22 @@ const ListenSession = struct {
         self.dec = try DecoderManager.create(allocator);
         errdefer self.dec.?.destroy(allocator, io);
 
-        try self.group.concurrent(io, listen, .{ self, allocator, io, device_type, volume });
+        self.task = try io.concurrent(listen, .{ self, allocator, io, device_type, volume });
     }
 
     fn deinit(self: *ListenSession, allocator: std.mem.Allocator, io: std.Io) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.deinit" });
         defer zone.end();
 
-        // abort a setup() still blocked in avformat_open_input / av_read_frame
+        // abort a listen() still blocked in avformat_open_input / av_read_frame
         if (self.dec) |dec| dec.interrupt();
 
-        self.group.cancel(io); // join the listen task
-
-        if (self.accepted) |accepted| allocator.destroy(accepted.double_buffer);
+        if (self.task) |*task| {
+            // NB: cancel() joins the listen task (or returns its result if it already finished).
+            // A successful result here was never handed off (that nulls `task`), so free it.
+            // On error, listen()'s errdefer already did.
+            if (task.cancel(io) catch null) |unclaimed| allocator.destroy(unclaimed.double_buffer);
+        }
 
         // NB: only cancel the workers once the listen task can no longer spawn them
         if (self.dec) |dec| {
@@ -125,22 +126,15 @@ const ListenSession = struct {
         }
     }
 
-    fn listen(self: *ListenSession, allocator: std.mem.Allocator, io: std.Io, device_type: c.AVHWDeviceType, volume: f32) void {
-        tracy.setThreadName("listen");
-
-        if (setup(self.dec.?, allocator, io, device_type, volume)) |accepted| {
-            self.accepted = accepted;
-        } else |e| {
-            self.err = e;
-        }
-
-        self.is_done.store(true, .release);
-    }
-
     // NB: on failure deinit() owns the cleanup, so no errdefer for the decoder
-    fn setup(dec: *DecoderManager, allocator: std.mem.Allocator, io: std.Io, device_type: c.AVHWDeviceType, volume: f32) !Accepted {
-        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.setup" });
+    fn listen(self: *ListenSession, allocator: std.mem.Allocator, io: std.Io, device_type: c.AVHWDeviceType, volume: f32) Error!Accepted {
+        tracy.setThreadName("listen");
+        defer self.is_done.store(true, .release);
+
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ListenSession.listen" });
         defer zone.end();
+
+        const dec = self.dec.?;
 
         try dec.produce(allocator, io, device_type, volume, uri, false);
 
@@ -245,11 +239,10 @@ const PlaybackSession = struct {
         );
     }
 
-    fn fromListenSession(allocator: std.mem.Allocator, io: std.Io, state: *GuiState, ui: Ui, listen: *ListenSession) InitError!PlaybackSession {
+    fn fromListenSession(allocator: std.mem.Allocator, io: std.Io, state: *GuiState, ui: Ui, listen: *ListenSession, accepted: ListenSession.Accepted) InitError!PlaybackSession {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "PlaybackSession.fromListenSession" });
         defer zone.end();
 
-        const accepted = listen.accepted.?;
         const dec = listen.dec.?;
 
         // on failure listen keeps ownership: App.poll requests .idle and the
@@ -265,7 +258,7 @@ const PlaybackSession = struct {
         );
 
         // ownership has transferred; listen.deinit() must not free them
-        listen.accepted = null;
+        listen.task = null;
         listen.dec = null;
         listen.deinit(allocator, io);
 
@@ -887,13 +880,8 @@ pub const App = struct {
             },
             .listen => |*listen| {
                 if (listen.is_done.load(.acquire)) {
-                    if (listen.err) |e| {
-                        state.request = .idle;
-
-                        // TODO(paoda): report this to the user
-                        log.err("failed to start stream: {}", .{e});
-                    } else {
-                        const maybe_session = PlaybackSession.fromListenSession(allocator, io, state, ui, listen);
+                    if (listen.task.?.await(io)) |accepted| {
+                        const maybe_session = PlaybackSession.fromListenSession(allocator, io, state, ui, listen, accepted);
 
                         if (maybe_session) |session| {
                             // force session change, don't go through regular process, so theres gotta be some self.reset() here
@@ -906,6 +894,11 @@ pub const App = struct {
                             // TODO(paoda): report this to user
                             log.err("failed to convert ListenSession into PlaybackSession: {}", .{e});
                         }
+                    } else |e| {
+                        state.request = .idle;
+
+                        // TODO(paoda): report this to the user
+                        log.err("failed to start stream: {}", .{e});
                     }
                 }
             },
