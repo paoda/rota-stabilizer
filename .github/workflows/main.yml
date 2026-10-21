@@ -5,6 +5,11 @@ on:
     paths:
       - "**.zig"
       - "build.zig.zon"
+      - "src/**" # think c.h
+      - "asset/**" # font
+      - "moe.paoda.rota-stabilizer.yml"
+      - "moe.paoda.rota-stabilizer.desktop"
+      - ".github/workflows/**"
     branches:
       - main
   schedule:
